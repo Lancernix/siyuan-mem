@@ -16,7 +16,7 @@
 
 import { chat } from "./llm.mjs";
 import { hasModel } from "./llm.mjs";
-import { NEGATIVES_PATH, ensureDirs } from "./config.mjs";
+import { NEGATIVES_PATH, ENTITIES_PATH, ensureDirs } from "./config.mjs";
 import { readFileSync, writeFileSync } from "node:fs";
 
 /** 强命中阈值：到这个分就直接当同一个东西，不问模型。 */
@@ -131,26 +131,27 @@ export function similarity(a, b) {
  * parent 是文档的**标题块**，不是文档本身（实测：doc → h1 → p）。
  * 按 parent_id 查永远空，于是每次都会以为表是空的。
  */
-export async function loadEntities(sy, entitiesDocId) {
-  const rows = await sy.sql(
-    `SELECT id, content, ial FROM blocks
-      WHERE box = (SELECT box FROM blocks WHERE id='${entitiesDocId}')
-        AND type='p' AND ial LIKE '%custom-mem-kind="entity"%'
-      ORDER BY created ASC`
-  );
-  return (rows ?? [])
-    .filter((r) => /custom-mem-kind="entity"/.test(r.ial ?? ""))
-    .map((r) => ({
-      id: r.id,
-      name: String(r.content ?? "").trim(),
-      aliases: (/custom-mem-aliases="([^"]*)"/.exec(r.ial ?? "")?.[1] ?? "")
-        .split("|")
-        .map((s) => s.trim())
-        .filter(Boolean),
-      status: /custom-mem-status="([^"]*)"/.exec(r.ial ?? "")?.[1] ?? "active",
-      mergedInto: /custom-mem-merged-into="([^"]*)"/.exec(r.ial ?? "")?.[1] ?? "",
-    }))
-    .filter((e) => e.name);
+/**
+ * 读实体表。
+ *
+ * 存本地 JSON，不占思源文档。原因：它本质是**索引**不是内容——程序用它做归一
+ * 和判重，人不读它。而且 02-实体 那个文档已经被「视图」占了（话题 + 块引用），
+ * 一个文档不能同时当数据表和数据展示。
+ *
+ * 想改实体名走 `mem entity add/merge`，改完回填条目属性；表本身随时可重建。
+ */
+export function loadEntities() {
+  try {
+    const list = JSON.parse(readFileSync(ENTITIES_PATH, "utf8"));
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveEntities(list) {
+  ensureDirs();
+  writeFileSync(ENTITIES_PATH, JSON.stringify(list, null, 2) + "\n");
 }
 
 /** 精确命中：规范名或别名，返回那个实体。 */
@@ -180,23 +181,22 @@ export function findCandidates(name, table, { limit = 3 } = {}) {
   return out.sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
-export async function addEntity(sy, entitiesDocId, name, { aliases = [], source = "" } = {}) {
+export function addEntity(name, { aliases = [], source = "" } = {}) {
   const clean = String(name).trim();
   if (!clean) throw new Error("实体名不能为空");
-  const blockId = await sy.appendBlock(entitiesDocId, clean, "markdown");
-  try {
-    await sy.setBlockAttrs(blockId, {
-      "custom-mem-kind": "entity",
-      "custom-mem-aliases": aliases.join("|"),
-      "custom-mem-status": "active",
-      "custom-mem-first-seen": new Date().toISOString().slice(0, 10),
-      ...(source ? { "custom-mem-source": source } : {}),
-    });
-  } catch (e) {
-    await sy.deleteBlock(blockId).catch(() => {});
-    throw e;
-  }
-  return blockId;
+  const list = loadEntities();
+  if (list.some((e) => e.name === clean && e.status !== "merged")) return list.find((e) => e.name === clean);
+  const row = {
+    name: clean,
+    aliases: aliases.filter(Boolean),
+    status: "active",
+    mergedInto: "",
+    firstSeen: new Date().toISOString().slice(0, 10),
+    ...(source ? { source } : {}),
+  };
+  list.push(row);
+  saveEntities(list);
+  return row;
 }
 
 /**
@@ -206,9 +206,9 @@ export async function addEntity(sy, entitiesDocId, name, { aliases = [], source 
  * 反过来的话，改完条目属性再写表失败，下次抽取又会造一个新实体，
  * 而那一批被改过的条目已经指向新名字了，两边对不上。
  */
-export async function mergeEntities(sy, entitiesDocId, fromName, intoName, { log = () => {} } = {}) {
-  const table = await loadEntities(sy, entitiesDocId);
-  const target = lookup(table, intoName);
+export async function mergeEntities(sy, fromName, intoName, { log = () => {} } = {}) {
+  const table = loadEntities();
+  const target = table.find((e) => e.status !== "merged" && norm(e.name) === norm(intoName));
   if (!target) throw new Error(`找不到实体「${intoName}」，先用 mem entity add 建一个`);
   const src = table.find((e) => e.name === fromName || e.aliases.includes(fromName));
   if (src && src.name === target.name) return { changed: 0, aliases: target.aliases, note: "已经是同一个" };
@@ -216,13 +216,20 @@ export async function mergeEntities(sy, entitiesDocId, fromName, intoName, { log
   // 1) 别名并进去（含 from 自己，以及它名下的别名）
   const add = new Set([fromName, ...(src?.aliases ?? [])]);
   add.delete(target.name);
-  const aliases = Array.from(new Set([...target.aliases, ...add]));
-  await sy.setBlockAttrs(target.id, { "custom-mem-aliases": aliases.join("|") });
+  target.aliases = Array.from(new Set([...target.aliases, ...add]));
 
-  // 2) 回填条目：把 entity 是这些名字的条目改成规范名
+  // 2) 源实体标 merged，不删：历史条目里可能还有它的名字
+  if (src) {
+    src.status = "merged";
+    src.mergedInto = target.name;
+  }
+  saveEntities(table);
+
+  // 3) 回填条目：把 entity 是这些名字的条目改成规范名。
+  //    顺序是「先写表，再改派生物」——反过来的话改到一半失败，表里没记，下次又造新实体。
   const names = [fromName, ...(src?.aliases ?? [])].filter(Boolean);
   let changed = 0;
-  if (names.length) {
+  if (sy && names.length) {
     const cond = names.map((n) => `ial LIKE '%custom-mem-entity="${n.replace(/"/g, '\\"')}"%'`).join(" OR ");
     const rows = await sy.sql(`SELECT id FROM blocks WHERE (${cond}) AND ial LIKE '%custom-mem-hash="%'`);
     const pairs = (rows ?? []).map((r) => ({ id: r.id, attrs: { "custom-mem-entity": target.name } }));
@@ -231,16 +238,8 @@ export async function mergeEntities(sy, entitiesDocId, fromName, intoName, { log
       changed = pairs.length;
     }
   }
-
-  // 3) 源实体标成 merged，不删：历史条目里可能还有它的名字，留着能查
-  if (src) {
-    await sy.setBlockAttrs(src.id, {
-      "custom-mem-status": "merged",
-      "custom-mem-merged-into": target.name,
-    });
-  }
   log(`    合并 ${fromName} → ${target.name}，回填 ${changed} 条`);
-  return { changed, aliases };
+  return { changed, aliases: target.aliases };
 }
 
 /* ---------- 弱候选：问一次模型 ---------- */
@@ -323,7 +322,7 @@ export async function resolveEntities({ sy, cfg, ids, names, useModel = true, ta
   // 回灌时一轮要处理十几个会话，每个会话都重新查一遍表没意义，而且刚建的实体
   // 在 SQL 索引里还查不到（异步），下一个会话会把它当成新的再造一份。
   // 所以调用方可以把表传进来，本函数负责把新建的追加进去。
-  const table = given ?? (await loadEntities(sy, ids.entities));
+  const table = given ?? loadEntities();
   const map = new Map();
   const created = [];
   const weak = [];
@@ -391,9 +390,10 @@ export async function resolveEntities({ sy, cfg, ids, names, useModel = true, ta
     if (finalName !== e.name) continue;
     if (lookup(table, finalName)) continue;
     try {
-      const blockId = await addEntity(sy, ids.entities, finalName);
+      addEntity(finalName);
       created.push(finalName);
-      table.push({ id: blockId, name: finalName, aliases: [], status: "active", mergedInto: "" });
+      // 外部传进来的表也要同步：一轮处理多个会话时，后面的会话要能命中刚建的实体。
+      table.push({ name: finalName, aliases: [], status: "active", mergedInto: "" });
     } catch (e2) {
       log(`    ! 建实体失败：${finalName}（${e2.message}）`);
     }
@@ -494,7 +494,7 @@ export async function applyPending({ sy, cfg, ids, log = () => {}, dry = false }
         continue;
       }
       try {
-        const r = await mergeEntities(sy, ids.entities, it.a, it.b, { log });
+        const r = await mergeEntities(sy, it.a, it.b, { log });
         stat.merged++;
         merged.push({ ...it, changed: r.changed });
         await deleteItem(sy, it.blockId);

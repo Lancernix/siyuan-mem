@@ -159,7 +159,7 @@ export async function processQueue({ dry = false, useModel = true, onLine = () =
     }
 
     // 2) 抽取时带上已有实体清单，从源头减少「同一款裤子五个名字」。
-    if (!entityTable) entityTable = await loadEntities(sy, ids.entities);
+    if (!entityTable) entityTable = loadEntities();
     const entityShot = shotList(entityTable, cfg.extract?.entityShotList ?? 300);
 
     const fallbackEntity = (payload.cwd ?? "").split("/").filter(Boolean).pop() ?? "";

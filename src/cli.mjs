@@ -740,7 +740,7 @@ async function cmdEntity(args, flags) {
 
   if (sub === "list") {
     const q = String(args[1] ?? "").toLowerCase();
-    const table = await loadEntities(sy, ids.entities);
+    const table = loadEntities();
     const rows = table.filter(
       (e) => !q || e.name.toLowerCase().includes(q) || e.aliases.some((a) => a.toLowerCase().includes(q))
     );
@@ -764,9 +764,9 @@ async function cmdEntity(args, flags) {
       .split("|")
       .map((s) => s.trim())
       .filter(Boolean);
-    const before = await loadEntities(sy, ids.entities);
+    const before = loadEntities();
     if (before.some((e) => e.name === name)) throw new Error(`已经有了：${name}（要加别名用 mem entity merge）`);
-    await addEntity(sy, ids.entities, name, { aliases, source: "manual" });
+    addEntity(name, { aliases, source: "manual" });
     console.log(`已建实体「${name}」${aliases.length ? `，别名 ${aliases.join("、")}` : ""}`);
     return;
   }
@@ -774,7 +774,7 @@ async function cmdEntity(args, flags) {
   if (sub === "merge") {
     const [from, into] = args.slice(1);
     if (!from || !into) throw new Error("mem entity merge <旧名> <新名>");
-    const r = await mergeEntities(sy, ids.entities, from, into, { log: console.log });
+    const r = await mergeEntities(sy, from, into, { log: console.log });
     console.log(`已合并：${from} → ${into}，回填 ${r.changed} 条`);
     if (r.aliases?.length) console.log(`  现在的别名：${r.aliases.join("、")}`);
     return;
