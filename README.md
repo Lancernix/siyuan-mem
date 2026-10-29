@@ -103,7 +103,7 @@ node src/cli.mjs forget <块id>        # 标成过时，不删
 |---|---|---|---|
 | WorkBuddy | `~/.workbuddy/projects/*/*.jsonl` | 读日志（无插件机制） | 闭源，拿不到进程内事件 |
 | Qoder | `~/.qoder/projects/*/*.jsonl` | 读日志 | 格式照抄 Claude Code |
-| OMP | `~/.omp/agent/sessions/*/*.jsonl` | 读日志 | 子会话用 `parentSession` 标 |
+| OMP | `~/.omp/agent/sessions/*/*.jsonl` | 读日志 | 子代理转录在会话目录下一层，要跳过 |
 | DSH | `~/.dsh/sessions/*/*/session.v4.jsonl.zstd` | cordis 插件，或读日志兜底 | 多帧 zstd |
 | Claude Code | `~/.claude/projects/*/*.jsonl` | hook 脚本，或读日志 | 子代理标 `isSidechain` |
 
@@ -125,7 +125,9 @@ mem ingest-log ~/.dsh/sessions/<ws>/<sid>/session.v4.jsonl.zstd
 
 格式按内容嗅探（只影响来源标签，不影响解析）。用户消息里的 `<system-reminder>`、`<cb_summary>` 摘要块、子代理事件、工具结果会在读取时剔掉。
 
-剔掉的不等于丢掉了——`mem audit` 会把每个块归到"收进语料 / 思考块 / 工具结果 / 注入与摘要 / 其它"，五类相加等于日志里全部消息文字。本机 168 个会话的对账结果是 3359 万字里 380 万进语料，**"其它"为 0**，即没有一个字下落不明。
+剔掉的不等于丢掉了——`mem audit` 会把每个块归到"收进语料 / 思考块 / 工具结果 / 注入与摘要 / 其它"，五类相加等于日志里全部消息文字。本机 105 个会话的对账结果是 2585 万字里 355 万进语料，**"其它"为 0**，即没有一个字下落不明。
+
+**子代理的处理要分两半**：它自己的转录整份不读（OMP 放在会话目录下一层，Claude 标 `isSidechain`，DSH 标 `delegationDepth`）；但它的**结论**会回到主线——OMP 是 `job` 工具结果里的 `<task-result>`，Claude Code 是 `Task` 工具的 `tool_result`——这一份必须收，否则丢的是结论。本机这样捞回 64 段、12.3 万字。"Spawned agent…"这类派发回执会被过滤掉。
 
 ## DSH 插件
 
@@ -208,5 +210,5 @@ docs/           设计过程与调研（含思源能力盘点）
 - `mem serve` 常驻与 fs.watch 即时触发
 - 向量与 rerank（思源内核已内置，未开索引；4 万个块全量建索引要先决定云端还是本地模型）
 - 注入的关键词匹配现在只取首句前 16 字做 LIKE，召回很粗
-- 本机现有的 168 个会话、335 万字还没回灌（`mem scan --all` 看得见，`mem ingest-log` 逐个进）
+- 本机现有的 105 个会话、350 万字还没回灌（`mem scan --all` 看得见，`mem ingest-log` 逐个进）
 - 画像层（人格与用户偏好的统一管理）没做，设计在 `docs/记忆系统-分层与召回设计.md`
