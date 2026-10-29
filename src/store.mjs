@@ -135,6 +135,15 @@ export class Store {
         "",
       ].join("\n");
     }
+    if (key === "digest") {
+      return [
+        `# ${title}`,
+        "",
+        "这一页是**给人读的**：按会话分组、按「定了什么 / 是什么 / 偏好什么」分层。",
+        "`mem digest` 每次重新生成，改它没用——数据本体在 `01-条目`。",
+        "",
+      ].join("\n");
+    }
     if (key === "pending") {
       return [
         `# ${title}`,
