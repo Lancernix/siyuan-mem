@@ -9,6 +9,8 @@ export const INBOX_DIR = join(HOME_DIR, "inbox");
 export const DONE_DIR = join(HOME_DIR, "done");
 /** 解析出来的块 id 缓存在这里：思源的文档索引是异步的，刚建完查不到，不缓存就会重复建。 */
 export const STATE_PATH = join(HOME_DIR, "state.json");
+/** 每个会话日志读到哪儿了。没有它，同一个会话每次都要整份重发一遍。 */
+export const OFFSET_PATH = join(HOME_DIR, "offsets.json");
 
 const DEFAULTS = {
   siyuan: {
@@ -75,6 +77,20 @@ export function loadState() {
 export function saveState(state) {
   ensureDirs();
   writeFileSync(STATE_PATH, JSON.stringify(state, null, 2) + "\n");
+}
+
+export function loadOffsets() {
+  ensureDirs();
+  try {
+    return JSON.parse(readFileSync(OFFSET_PATH, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+export function saveOffsets(o) {
+  ensureDirs();
+  writeFileSync(OFFSET_PATH, JSON.stringify(o, null, 2) + "\n");
 }
 
 export function hasModel(cfg) {

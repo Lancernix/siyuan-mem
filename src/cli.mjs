@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { loadConfig, CONFIG_PATH, INBOX_DIR, hasModel } from "./config.mjs";
+import { statSync } from "node:fs";
+import { loadConfig, loadOffsets, saveOffsets, CONFIG_PATH, INBOX_DIR, hasModel } from "./config.mjs";
 import { SiYuan } from "./siyuan.mjs";
 import { Store, formatHits } from "./store.mjs";
 import { normalizeTurns, toExchanges, extractEntries } from "./extract.mjs";
@@ -164,147 +165,33 @@ async function cmdIngestLog(flags, args) {
       : "这条日志里没有能用的问答。");
     return;
   }
+
+  // 增量：只投上次之后新增的部分。会话是 append-only 的，位置就是进度。
+  // 文件变短说明被重写或轮转过，那就从头再来。
+  const offsets = loadOffsets();
+  const st = statSync(file);
+  const prev = offsets[file];
+  const fresh = prev && st.size >= prev.bytes && log.turns.length >= prev.turns;
+  const turns = fresh ? log.turns.slice(prev.turns) : log.turns;
+  const before = log.turns.length - turns.length;
+
+  if (!turns.length) {
+    console.log(`${log.harness}  没有新内容（上次读到第 ${prev.turns} 轮）`);
+    return;
+  }
+
   const target = drop({
     session_id: log.sessionId || `log-${Date.now()}`,
     harness: log.harness,
     cwd: log.cwd,
     date: new Date().toISOString().slice(0, 10),
-    turns: log.turns,
+    turns,
   });
-  console.log(`${log.harness}   ${log.turns.length} 轮   ${target}`);
-}
+  offsets[file] = { bytes: st.size, turns: log.turns.length, at: Date.now() };
+  saveOffsets(offsets);
 
-function mb(n) {
-  return n >= 1048576 ? `${(n / 1048576).toFixed(1)}MB` : `${Math.max(1, Math.round(n / 1024))}KB`;
-}
-
-function ago(ts) {
-  const d = Math.floor((Date.now() - ts) / 86400000);
-  if (d <= 0) return "今天";
-  if (d === 1) return "昨天";
-  return `${d} 天前`;
-}
-
-/** 读一个文件，返回轮数和字符数；读不了就说明原因。 */
-function probe(file) {
-  try {
-    const log = readLog(file);
-    const turns = normalizeTurns(log.turns);
-    const ex = toExchanges(turns, 25);
-    const chars = ex.reduce((n, e) => n + e.q.length + e.a.length, 0);
-    return { harness: log.harness, turns: turns.length, exchanges: ex.length, chars };
-  } catch (e) {
-    return { error: e.message };
-  }
-}
-
-async function cmdScan(flags) {
-  const sessions = listSessions(flags.harness === true ? "" : flags.harness ?? "");
-  if (!sessions.length) {
-    console.log("一个会话都没找到。看看 ROOTS 里那几条路径对不对。");
-    return;
-  }
-  const n = Number(flags.n ?? 3);
-  for (const g of summarize(sessions)) {
-    const rows = sessions.filter((s) => s.harness === g.harness);
-    console.log(`\n${g.harness.padEnd(10)} ${String(g.count).padStart(3)} 个会话  ${mb(g.bytes).padStart(8)}  最新 ${ago(g.newest)}`);
-    const pick = flags.all ? rows : rows.slice(0, n);
-    for (const s of pick) {
-      const r = probe(s.file);
-      const name = s.file.replace(process.env.HOME, "~");
-      if (r.error) {
-        console.log(`  ✗ ${mb(s.size).padStart(7)}  ${name}`);
-        console.log(`      ${r.error}`);
-        continue;
-      }
-      // 格式名和目录名不一致，说明嗅探把这家认成了别家——这条要修。
-      const mark = r.harness === s.harness ? "" : `  ← 嗅探成 ${r.harness}`;
-      console.log(`  · ${mb(s.size).padStart(7)}  ${String(r.turns).padStart(5)} 轮  ${(r.chars / 1000).toFixed(0).padStart(5)}k 字  ${name}${mark}`);
-    }
-    if (!flags.all && rows.length > pick.length) console.log(`  …还有 ${rows.length - pick.length} 个（--all 全读）`);
-  }
-  console.log(`\n共 ${sessions.length} 个会话，${mb(sessions.reduce((n, s) => n + s.size, 0))}。`);
-  console.log(`支持格式：${HARNESS_NAMES.join(" / ")}`);
-}
-
-/** 中文一个字占两列，直接 padEnd 会对不齐。 */
-function padLabel(s, width) {
-  let w = 0;
-  for (const ch of s) w += /[\u4e00-\u9fa5\uff00-\uffef]/.test(ch) ? 2 : 1;
-  return s + " ".repeat(Math.max(0, width - w));
-}
-
-const KINDS = [
-  ["kept", "收入语料"],
-  ["thinking", "思考块"],
-  ["tool", "工具调用与结果"],
-  ["injected", "注入与摘要"],
-  ["other", "其它角色"],
-];
-
-function auditLine(file, harness = "") {
-  const a = auditMessages(readJsonLines(file));
-  const total = KINDS.reduce((n, [k]) => n + a[k], 0);
-  const name = file.replace(process.env.HOME, "~");
-  console.log(`\n${name}`);
-  console.log(`  ${String(a.events).padStart(6)} 个事件   收进 ${a.keeps} 段`);
-  for (const [k, label] of KINDS) {
-    const pct = total ? ((a[k] / total) * 100).toFixed(1) : "0.0";
-    console.log(`  ${padLabel(label, 16)} ${String(a[k]).padStart(10)} 字  ${pct.padStart(5)}%`);
-  }
-  console.log(`  ${padLabel("合计", 16)} ${String(total).padStart(10)} 字`);
-  return { harness, ...a, total };
-}
-
-async function cmdAudit(flags, rest) {
-  if (rest.length) {
-    for (const f of rest) auditLine(f);
-    return;
-  }
-  if (flags.all) {
-    // 全量对账：把每个会话的五个分类加起来，看整体上多少进了语料。
-    const byHarness = new Map();
-    const blank = () => ({ kept: 0, thinking: 0, tool: 0, injected: 0, other: 0, events: 0, keeps: 0, files: 0 });
-    for (const s of listSessions()) {
-      const a = auditMessages(readJsonLines(s.file));
-      const g = byHarness.get(s.harness) ?? blank();
-      for (const k of ["kept", "thinking", "tool", "injected", "other", "events", "keeps"]) g[k] += a[k];
-      g.files++;
-      byHarness.set(s.harness, g);
-    }
-    console.log("全部会话逐块对账：\n");
-    console.log("harness      会话   收进语料      思考块       工具结果      注入摘要      其它    收录占比");
-    const tot = blank();
-    for (const [h, g] of [...byHarness].sort((a, b) => b[1].kept - a[1].kept)) {
-      const sum = g.kept + g.thinking + g.tool + g.injected + g.other;
-      const pct = sum ? ((g.kept / sum) * 100).toFixed(1) + "%" : "-";
-      const f = (n) => `${(n / 10000).toFixed(0)}万`.padStart(8);
-      console.log(`${h.padEnd(10)} ${String(g.files).padStart(4)} ${f(g.kept)} ${f(g.thinking)} ${f(g.tool)} ${f(g.injected)} ${f(g.other)} ${pct.padStart(8)}`);
-      for (const k of Object.keys(tot)) tot[k] += g[k];
-    }
-    const sum = tot.kept + tot.thinking + tot.tool + tot.injected + tot.other;
-    const f = (n) => `${(n / 10000).toFixed(0)}万`.padStart(8);
-    console.log(`${"合计".padEnd(10)} ${String(tot.files).padStart(4)} ${f(tot.kept)} ${f(tot.thinking)} ${f(tot.tool)} ${f(tot.injected)} ${f(tot.other)} ${(((tot.kept / sum) * 100).toFixed(1) + "%").padStart(8)}`);
-    console.log(`\n共 ${((sum) / 10000).toFixed(0)} 万字，收进语料 ${((tot.kept) / 10000).toFixed(0)} 万字、${tot.keeps} 段。`);
-    return;
-  }
-  // 不带参数：每家挑最大的一个会话对账
-  const sessions = listSessions();
-  const biggest = new Map();
-  for (const s of sessions) {
-    const cur = biggest.get(s.harness);
-    if (!cur || s.size > cur.size) biggest.set(s.harness, s);
-  }
-  console.log("每家取最大的一个会话：");
-  const rows = [];
-  for (const [harness, s] of biggest) {
-    rows.push(auditLine(s.file, harness));
-  }
-  console.log("\n=== 汇总（各取一个样本，不代表整体）===");
-  for (const r of rows.sort((a, b) => b.total - a.total)) {
-    const pct = ((r.kept / r.total) * 100).toFixed(1);
-    console.log(`${r.harness.padEnd(10)} 收 ${String(r.kept).padStart(9)} / 共 ${String(r.total).padStart(9)} 字 = ${pct}%`);
-  }
+  const note = before ? `（跳过前 ${before} 轮已读过的）` : "";
+  console.log(`${log.harness}  新增 ${turns.length} 轮${note}  ${target}`);
 }
 
 async function cmdSearch(flags, words) {
