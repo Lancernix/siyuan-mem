@@ -202,8 +202,9 @@ export async function processQueue({ dry = false, useModel = true, onLine = () =
       const rawPtr =
         e.from != null && parts.length ? ptrFor(parts, turnFrom + e.from, turnFrom + e.to) : "";
       if (dry) {
-        const span = parts[0];
-        const where = span?.dry ? `  · 原文第 ${span.from}–${span.to} 轮 / ${(span.bytes / 1024).toFixed(0)}KB` : "";
+        // 用条目自己的轮次范围，不是整个 part：dry 的意义就是看指针会精确到哪一段。
+        const where =
+          e.from != null ? `  · 第 ${turnFrom + e.from}–${turnFrom + e.to} 轮` : parts[0]?.dry ? `  · 整段 ${parts[0].from}–${parts[0].to}` : "";
         onLine(`    [${entity || "-"}] ${e.text}${where}`);
         continue;
       }
