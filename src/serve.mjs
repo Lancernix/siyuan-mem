@@ -25,7 +25,7 @@ import { join } from "node:path";
 import { hostname } from "node:os";
 import { HOME_DIR, ensureDirs, loadConfig, loadOffsets } from "./config.mjs";
 import { listSessions } from "./harness.mjs";
-import { enqueueLog, processQueue } from "./jobs.mjs";
+import { enqueueLog, processQueue, assertModel } from "./jobs.mjs";
 import { SiYuan } from "./siyuan.mjs";
 
 export const LOCK_PATH = join(HOME_DIR, "serve.lock");
@@ -222,6 +222,9 @@ export async function serve({ once = false, dry = false, useModel = true, interv
   const cfg = loadConfig();
   const gap = intervalMs ?? (cfg.serve?.intervalMinutes ?? 10) * 60_000;
   const log = makeLogger();
+
+  // 起不来比起一直重试好：没 key 的时候每轮都会失败在同一个地方，日志只会刷屏。
+  assertModel(cfg, { useModel, dry });
 
   acquire({ force, log });
   log(

@@ -5,7 +5,7 @@
  * 而"手动跑成功、后台跑丢字"是最难查的一类问题。
  */
 import { statSync } from "node:fs";
-import { loadConfig, loadOffsets, saveOffsets } from "./config.mjs";
+import { loadConfig, loadOffsets, saveOffsets, hasModel } from "./config.mjs";
 import { SiYuan } from "./siyuan.mjs";
 import { Store } from "./store.mjs";
 import { normalizeTurns, toExchanges, extractEntries } from "./extract.mjs";
@@ -69,10 +69,27 @@ export function enqueueLog(file, { format = "" } = {}) {
  * 重跑（writeEntry 自带哈希去重，重跑不会写两遍）。归档意味着原文出队，
  * 之后再也拿不回，所以不能急。
  */
+/**
+ * 没有 key 的时候 extract 会静默退回规则抽取，而规则抽取只取首句/首段，
+ * 写进正式库的全是半句话（实测："[interrupted] 让我为您重新推荐一些…"）。
+ * 所以默认行为是拒绝，而不是降级；--no-model 才是显式选择规则抽取。
+ */
+export function assertModel(cfg, { useModel = true, dry = false } = {}) {
+  if (dry || !useModel || hasModel(cfg)) return;
+  throw new Error(
+    "没有配置模型（config.model.apiKey），规则抽取写进库里全是半句话。\n" +
+      "  要么填 key，要么显式加 --no-model 表示你就是要规则抽取，或者先用 --dry 看一眼。"
+  );
+}
+
 export async function processQueue({ dry = false, useModel = true, onLine = () => {} } = {}) {
   const { cfg, store } = open();
+
   const files = pending();
   const sum = { sessions: files.length, written: 0, skipped: 0, failed: 0, degraded: 0 };
+  if (!files.length) return sum;
+
+  assertModel(cfg, { useModel, dry });
 
   for (const file of files) {
     let payload;
