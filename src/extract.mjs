@@ -107,8 +107,21 @@ const SYSTEM_PROMPT = `你是记忆整理器。输入是一段人机对话，按
 不要拆成三四条并列的碎片——拆开之后每条都失去了上下文，读的人不知道在说什么。
 一场对话通常产出 3-10 条记忆，超过 15 条基本可以断定拆得太细了。
 
+## brief（摘要）
+
+每条再给一个 brief：**不超过 24 字**，是 text 的浓缩。
+
+它的用途是「列表里扫一眼就知道这条在说什么」，所以：
+- 不要复述 text 的开头几个字（那是截断，不是摘要）
+- 不要写「关于XX的说明」这种空话
+- 把结论本身压短，保留主语和结论，丢掉条件和细节
+
+例：
+  text   MiniWMS 的索引改动要三处同步：init.sql、实体 @Index、云端库 ALTER，再用 EXPLAIN 验证。
+  brief  MiniWMS 改索引要三处同步 + EXPLAIN 验证
+
 只输出 JSON 对象，不要解释，不要代码块标记：
-{"entries":[{"text":"...","entity":"话题，2-12字","type":"decision|fact|preference|reference","confidence":1}]}
+{"entries":[{"brief":"...","text":"...","entity":"话题，2-12字","type":"decision|fact|preference|reference","confidence":1}]}
 
 type：decision 明确了方案 / fact 客观事实 / preference 偏好与原则 / reference 资料出处。
 confidence 1-5，5 表示这条是明确结论、以后一定会用到。`
@@ -143,6 +156,8 @@ function parseEntries(raw) {
   return arr
     .map((x) => ({
       text: String(x?.text ?? "").trim(),
+      // brief 缺失时退回 text 的前 24 字——不理想，但比空着强。
+      brief: String(x?.brief ?? "").trim() || String(x?.text ?? "").trim().slice(0, 24),
       entity: String(x?.entity ?? "").trim(),
       type: ["decision", "fact", "preference", "reference"].includes(x?.type) ? x.type : "fact",
       confidence: Math.min(5, Math.max(1, Number(x?.confidence) || 3)),
