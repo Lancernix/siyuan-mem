@@ -218,7 +218,7 @@ export async function probe(cfg) {
 }
 
 /** 把预设写进配置。key 只写进 home 下的 config.json（0600），不进项目目录。 */
-export function saveModelChoice(provider, { apiKey, model, wire } = {}) {
+export function saveModelChoice(provider, { apiKey, model, wire, base } = {}) {
   const preset = PROVIDERS[provider];
   // 预设之外还有目录里的七十来家：有 api 地址和 env 变量名就够用了。
   const fromCatalog = preset ? null : findProvider(loadCatalogSync().providers, provider);
@@ -227,7 +227,8 @@ export function saveModelChoice(provider, { apiKey, model, wire } = {}) {
       `不认识的 provider：${provider}。\n  预设：${Object.keys(PROVIDERS).join(", ")}\n  或先 mem model refresh 拉目录（models.dev，七十多家）`
     );
   }
-  const baseUrl = preset?.baseUrl || fromCatalog?.api || "";
+  // --base 用来接目录里没有的端点（比如同一家的另一个 API 面：/api/v3 与 /api/plan/v3）。
+  const baseUrl = String(base || preset?.baseUrl || fromCatalog?.api || "").replace(/\/+$/, "");
   const name = model || preset?.model || "";
   if (!name) throw new Error(`目录里的 ${provider} 没有默认模型，加 --name 指定一个：mem model list ${provider}`);
   ensureDirs();

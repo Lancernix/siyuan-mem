@@ -35,7 +35,17 @@ cp config.example.json ~/.siyuan-mem/config.json   # 首次运行也会自动生
 node src/cli.mjs init
 ```
 
-`init` 会建一个 `90-记忆` 笔记本和三个文档。重复执行是安全的。
+`init` 会建一个 `90-记忆` 笔记本和五个文档（条目 / 原文 / 变更 / 实体 / 实体待确认）。重复执行是安全的。
+
+想直接敲 `mem`：编一个自带运行时的单文件，再软链进 PATH。
+
+```bash
+npm run dist                                   # 产物在 ~/.siyuan-mem/mem，86MB
+ln -sf ~/.siyuan-mem/mem ~/.local/bin/mem      # 确认 ~/.local/bin 在 PATH 里
+mem status
+```
+
+`~/.siyuan-mem/mem` 是**发版产物**，运行时焊死在里面（当前 bun 1.4.4）。改了代码要重新 `npm run dist`，否则跑的还是旧的。
 
 `ingest-log` 记住每个日志读到第几行（`~/.siyuan-mem/offsets.json`），重复跑只投新增部分；文件被重写或轮转（变小）就从零开始。
 
