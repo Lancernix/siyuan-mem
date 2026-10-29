@@ -227,6 +227,13 @@ async function cmdScan(flags) {
   console.log(`支持格式：${HARNESS_NAMES.join(" / ")}`);
 }
 
+/** 中文一个字占两列，直接 padEnd 会对不齐。 */
+function padLabel(s, width) {
+  let w = 0;
+  for (const ch of s) w += /[\u4e00-\u9fa5\uff00-\uffef]/.test(ch) ? 2 : 1;
+  return s + " ".repeat(Math.max(0, width - w));
+}
+
 const KINDS = [
   ["kept", "收入语料"],
   ["thinking", "思考块"],
@@ -243,9 +250,9 @@ function auditLine(file, harness = "") {
   console.log(`  ${String(a.events).padStart(6)} 个事件   收进 ${a.keeps} 段`);
   for (const [k, label] of KINDS) {
     const pct = total ? ((a[k] / total) * 100).toFixed(1) : "0.0";
-    console.log(`  ${label.padEnd(12, "　").slice(0, 12)} ${String(a[k]).padStart(10)} 字  ${pct.padStart(5)}%`);
+    console.log(`  ${padLabel(label, 16)} ${String(a[k]).padStart(10)} 字  ${pct.padStart(5)}%`);
   }
-  console.log(`  ${"合计".padEnd(12, "　").slice(0, 12)} ${String(total).padStart(10)} 字`);
+  console.log(`  ${padLabel("合计", 16)} ${String(total).padStart(10)} 字`);
   return { harness, ...a, total };
 }
 
