@@ -24,6 +24,12 @@ export const NEGATIVES_PATH = join(HOME_DIR, "entity-negatives.json");
  * 本地这份是权威，SQL 只在本地丢了时兜底。
  */
 export const RAW_INDEX_PATH = join(HOME_DIR, "raw-index.json");
+/**
+ * 实体表。存本地不存思源：它是**索引**不是内容——程序用它做归一和判重，人不读它。
+ * 而且 02-实体 那个文档已经是「视图」（话题 + 块引用），一个文档不能同时当
+ * 数据表和数据展示。想改走 mem entity add/merge。
+ */
+export const ENTITIES_PATH = join(HOME_DIR, "entities.json");
 
 const DEFAULTS = {
   siyuan: {
