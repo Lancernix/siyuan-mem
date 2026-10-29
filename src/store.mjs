@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { SiYuan } from "./siyuan.mjs";
-import { loadState, saveState } from "./config.mjs";
+import { loadState, saveState, loadGroups, saveGroups } from "./config.mjs";
 
 export const ATTR = {
   status: "custom-mem-status",
@@ -105,13 +105,9 @@ export class Store {
 
   #docSeed(key, title) {
     if (key === "entries") {
-      return [
-        `# ${title}`,
-        "",
-        "每条记忆是一个段落，属性挂在块上。`custom-mem-status` 为 `current` 才参与召回，",
-        "`superseded` 表示被后来的结论取代——不删，因为「为什么改了」的答案就在旧条目里。",
-        "",
-      ].join("\n");
+      // 别在这里写技术说明：用户打开笔记第一眼看到的是「custom-mem-status 为 current
+      // 才参与召回」，那不是笔记，是数据库的 README。
+      return `# ${title}\n`;
     }
     if (key === "changes") {
       return [`# ${title}`, "", "追加式变更日志，一行一次改动。审阅看这一页，不看全库。", ""].join("\n");
@@ -191,6 +187,39 @@ export class Store {
    * @param {{text:string, entity?:string, type?:string, confidence?:number}} entry
    * @param {{source?:string, session?:string, date?:string}} meta
    */
+  /**
+   * 分组标题。同一会话的条目挂在同一个 `## 日期 · 项目` 下面。
+   *
+   * 为什么必须分组：五十四条互不相干的句子平铺在一个文档里，人读不下去——
+   * 不是句子本身有问题，是失去了「这些话是在聊什么」这个上下文。
+   * 分组之后打开文档，先看到的是「哪天、哪个项目」，再往下才是细节。
+   */
+  async #anchorFor(entriesDocId, meta, date) {
+    const session = meta.session || "";
+    if (!session || this.#cfg.siyuan.groupEntries !== true) return { parent: entriesDocId, previous: null, key: "" };
+    const groups = loadGroups();
+    const g = groups[session];
+    // 直接信记录，不查 SQL：块的索引是异步的，刚写完的那条查不到，
+    // 一查就会以为锚点没了、又插一个新标题——54 条就插出 54 个标题。
+    // 锚点真被手删时，写入会报错，那里再回退重建。
+    if (g?.last) return { parent: entriesDocId, previous: g.last, key: session };
+    const project = String(meta.project || "").trim() || meta.source || "会话";
+    const heading = await this.#sy.appendBlock(entriesDocId, `## ${date} · ${project}`, "markdown");
+    groups[session] = { heading, last: heading };
+    saveGroups(groups);
+    // 标题是叶子块，第一条要插在标题**之后**，所以这里用 heading 当锚点。
+    return { parent: entriesDocId, previous: heading, key: session };
+  }
+
+  /** 记住这个会话最后一条写在哪个块上，下一条接着往后排。 */
+  #rememberAnchor(key, blockId) {
+    if (!key) return;
+    const groups = loadGroups();
+    if (!groups[key]) return;
+    groups[key].last = blockId;
+    saveGroups(groups);
+  }
+
   async writeEntry(entry, meta = {}) {
     const { entries } = await this.#ensure();
     const text = String(entry.text ?? "").replace(/\s+/g, " ").trim();
@@ -202,7 +231,22 @@ export class Store {
     if (dup) return { id: dup, duplicate: true };
 
     const date = meta.date ?? new Date().toISOString().slice(0, 10);
-    const blockId = await this.#sy.appendBlock(entries, text, "markdown");
+    const at = await this.#anchorFor(entries, meta, date);
+    let blockId;
+    try {
+      blockId = await this.#sy.appendBlock(at.parent, text, "markdown", at.previous ? { previousID: at.previous } : {});
+    } catch (e) {
+      if (!at.previous) throw e;
+      // 锚点真的失效了（块被手动删掉）：丢掉记录，重建标题，再写一次。
+      const groups = loadGroups();
+      delete groups[at.key];
+      saveGroups(groups);
+      const again = await this.#anchorFor(entries, meta, date);
+      blockId = await this.#sy.appendBlock(again.parent, text, "markdown", again.previous ? { previousID: again.previous } : {});
+      this.#rememberAnchor(again.key, blockId);
+      return { id: blockId, duplicate: false };
+    }
+    this.#rememberAnchor(at.key, blockId);
     try {
       await this.#sy.setBlockAttrs(blockId, {
         [ATTR.status]: "current",
