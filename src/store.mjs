@@ -11,6 +11,8 @@ export const ATTR = {
   session: "custom-mem-session",
   date: "custom-mem-date",
   confidence: "custom-mem-confidence",
+  /** 24 字摘要。02-实体 里的块引用锚文本用它，扫一眼就知道那条在说什么。 */
+  brief: "custom-mem-brief",
   /** 哪台机器上产生的。多机汇聚之后，没有这一栏就分不清来源。 */
   machine: "custom-mem-machine",
   /**
@@ -202,13 +204,19 @@ export class Store {
     // 直接信记录，不查 SQL：块的索引是异步的，刚写完的那条查不到，
     // 一查就会以为锚点没了、又插一个新标题——54 条就插出 54 个标题。
     // 锚点真被手删时，写入会报错，那里再回退重建。
-    if (g?.last) return { parent: entriesDocId, previous: g.last, key: session };
+    // 父永远是**最初那个分组列表项**，不跟着更新。
+    // appendBlock 返回的 id 可能是子段落 p，拿它当下次的 parent 会报
+    // "type p is a leaf block and cannot have children"——实测踩过。
+    if (g?.heading) return { parent: g.heading, previous: null, key: session };
+    // 分组标记用**列表项**，不是标题：实测标题是叶子块不能有子块，列表项可以，
+    // 而且往列表项 append 会得到同级列表项——视觉上就是「一条分组标题 + 下面几条」。
     const project = String(meta.project || "").trim() || meta.source || "会话";
-    const heading = await this.#sy.appendBlock(entriesDocId, `## ${date} · ${project}`, "markdown");
-    groups[session] = { heading, last: heading };
+    // 原文链接挂在这里就够：附件只要被块正文引用一次，就不会被「清理未引用资源」带走。
+    const link = meta.rawPath ? ` [原文](${meta.rawPath})` : "";
+    const item = await this.#sy.appendBlock(entriesDocId, `- **${date} · ${project}**${link}`, "markdown");
+    groups[session] = { heading: item, last: item };
     saveGroups(groups);
-    // 标题是叶子块，第一条要插在标题**之后**，所以这里用 heading 当锚点。
-    return { parent: entriesDocId, previous: heading, key: session };
+    return { parent: item, previous: null, key: session };
   }
 
   /** 记住这个会话最后一条写在哪个块上，下一条接着往后排。 */
@@ -234,19 +242,16 @@ export class Store {
     const at = await this.#anchorFor(entries, meta, date);
     let blockId;
     try {
-      blockId = await this.#sy.appendBlock(at.parent, text, "markdown", at.previous ? { previousID: at.previous } : {});
+      blockId = await this.#sy.appendBlock(at.parent, text, "markdown");
     } catch (e) {
-      if (!at.previous) throw e;
-      // 锚点真的失效了（块被手动删掉）：丢掉记录，重建标题，再写一次。
+      // 分组项被手删了：丢掉记录重建一次，再写。
+      if (!at.key) throw e;
       const groups = loadGroups();
       delete groups[at.key];
       saveGroups(groups);
       const again = await this.#anchorFor(entries, meta, date);
-      blockId = await this.#sy.appendBlock(again.parent, text, "markdown", again.previous ? { previousID: again.previous } : {});
-      this.#rememberAnchor(again.key, blockId);
-      return { id: blockId, duplicate: false };
+      blockId = await this.#sy.appendBlock(again.parent, text, "markdown");
     }
-    this.#rememberAnchor(at.key, blockId);
     try {
       await this.#sy.setBlockAttrs(blockId, {
         [ATTR.status]: "current",
@@ -257,6 +262,7 @@ export class Store {
         [ATTR.session]: meta.session || "",
         [ATTR.date]: date,
         [ATTR.confidence]: String(entry.confidence ?? 3),
+        ...(entry.brief ? { [ATTR.brief]: String(entry.brief) } : {}),
         ...(meta.machine ? { [ATTR.machine]: String(meta.machine) } : {}),
         ...(meta.raw ? { [ATTR.raw]: String(meta.raw) } : {}),
         ...(meta.rawpart ? { [ATTR.rawpart]: String(meta.rawpart) } : {}),

@@ -218,6 +218,8 @@ export async function processQueue({ dry = false, useModel = true, onLine = () =
             machine: payload.machine ?? machineId(),
             project: (payload.cwd ?? "").split("/").filter(Boolean).pop() ?? "",
             raw: rawPtr,
+            // 挂在会话分组项上的原文链接。一个会话通常只有一个 part。
+            rawPath: parts.find((p) => p.path)?.path ?? "",
           }
         );
         if (r.duplicate) sum.skipped++;

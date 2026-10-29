@@ -175,7 +175,7 @@ export async function knownParts(sy, rawDocId, { machine, harness, session }) {
  */
 export async function archive({ sy, cfg, ids, payload, dry = false, log = () => {} }) {
   const turns = payload.turns ?? [];
-  if (!turns.length || !ids?.raw) return [];
+  if (!turns.length) return [];
 
   const rawCfg = cfg.raw ?? {};
   if (rawCfg.enabled === false) return [];
@@ -221,42 +221,15 @@ export async function archive({ sy, cfg, ids, payload, dry = false, log = () => 
     const path = await sy.uploadAsset(dir, name, part.buf, "application/x-ndjson");
     const ptr = `${path}#${part.from}-${part.to}`;
 
-    const label = [
-      safeLabel(payload.machine || "local"),
-      safeLabel(payload.harness || "?"),
-      payload.date || "",
-      `第 ${part.from}–${part.to} 轮`,
-      fmtChars(part.chars),
-    ]
-      .filter(Boolean)
-      .join(" · ");
-    const blockId = await sy.appendBlock(ids.raw, `[${label}](${path})`, "markdown");
-
-    try {
-      await sy.setBlockAttrs(blockId, {
-        "custom-mem-kind": "raw-part",
-        "custom-mem-session": session,
-        "custom-mem-harness": payload.harness ?? "",
-        "custom-mem-machine": payload.machine ?? "",
-        "custom-mem-range": `${part.from}-${part.to}`,
-        "custom-mem-path": path,
-        "custom-mem-bytes": String(part.buf.length),
-        "custom-mem-hash": part.hash,
-      });
-    } catch (e) {
-      // 属性没写成，这个块就只是条链接，清理未引用资源时挡不住；删掉让下次重来。
-      await sy.deleteBlock(blockId).catch(() => {});
-      throw e;
-    }
-
-    // 本地索引立刻写：SQL 索引是异步的，下一轮幂等判断要马上用到。
+    // 不再建「02-原文」的引用块：实测块正文里出现附件路径就算「被引用」，
+    // 所以引用由条目的会话分组项承担（见 store.#anchorFor）。少一个文档、少一次写。
     const idx = loadRawIndex();
     const key = indexKey(payload.machine, payload.harness, session);
-    idx[key] = [...(idx[key] ?? existing), { blockId, path, from: part.from, to: part.to }];
+    idx[key] = [...(idx[key] ?? existing), { path, from: part.from, to: part.to }];
     saveRawIndex(idx);
-    existing.push({ blockId, path, from: part.from, to: part.to });
+    existing.push({ path, from: part.from, to: part.to });
 
-    out.push({ ptr, blockId, path, from: part.from, to: part.to, bytes: part.buf.length, chars: part.chars });
+    out.push({ ptr, path, from: part.from, to: part.to, bytes: part.buf.length, chars: part.chars });
     offset = part.to + 1;
     log(`    原文 ${path.split("/").pop()}  第 ${part.from}–${part.to} 轮  ${fmtChars(part.chars)}`);
   }

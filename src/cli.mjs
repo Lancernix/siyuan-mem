@@ -10,6 +10,7 @@ import { formatHits, ATTR } from "./store.mjs";
 import { readRange, listParts, parsePtr } from "./raw.mjs";
 import { loadEntities, addEntity, mergeEntities, applyPending, shotList } from "./entities.mjs";
 import { print as printDigest } from "./digest.mjs";
+import { writeEntities } from "./entity-view.mjs";
 import { normalizeTurns, toExchanges } from "./extract.mjs";
 import { pending } from "./inbox.mjs";
 import { readLog, readJsonLines, auditMessages, HARNESS_NAMES } from "./readers/index.mjs";
@@ -40,7 +41,8 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
   mem entity [list [词]]       看实体表
   mem entity add <名> [--alias "别名1|别名2"]
   mem entity merge <旧名> <新名>   合并并回填条目（纯机械，不调模型）
-  mem entity review [--dry]    执行 05-实体待确认 里勾选的项
+  mem entity review [--dry]    执行 03-实体待确认 里勾选的项
+  mem entity reindex           重建 02-实体（话题 → 块引用，锚文本用摘要）
   mem remember <文本> [--entity X] [--type decision|fact|preference|reference]
   mem forget <块id>            标成 superseded（不删）
   mem model                    看当前模型配置与今天的用量
@@ -778,6 +780,12 @@ async function cmdEntity(args, flags) {
     return;
   }
 
+  if (sub === "reindex") {
+    const r = await writeEntities({ sy, ids, log: console.log });
+    console.log(`已重建 02-实体：${r.groups} 个话题 / ${r.total} 条`);
+    return;
+  }
+
   if (sub === "review") {
     const r = await applyPending({ sy, cfg, ids, dry: Boolean(flags.dry), log: console.log });
     const s = r.stat;
@@ -793,7 +801,7 @@ async function cmdEntity(args, flags) {
     return;
   }
 
-  throw new Error(`不认识的子命令：${sub}（可用：list / add / merge / review）`);
+  throw new Error(`不认识的子命令：${sub}（可用：list / add / merge / review / reindex）`);
 }
 
 async function main() {
