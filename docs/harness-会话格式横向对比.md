@@ -73,7 +73,7 @@ user/assistant + `message.content` 块数组，和 Claude Code 一样；多出�
 
 ---
 
-## 四、所以统一读法是这样的
+## 四、所以统一读法是这样的（引擎共用，规则分家）
 
 ```
 一行一个 JSON
@@ -90,6 +90,16 @@ user/assistant + `message.content` 块数组，和 Claude Code 一样；多出�
 ```
 
 `sniff()` **只用来给条目打来源标签**（`custom-mem-source`），不参与解析。这样新 harness 出来，解析零改动，标签最多显示 `unknown`。
+
+这套东西落在代码里是两层：
+
+```
+readers/base.mjs      引擎：解压、找消息节点、role 归一、注入块、子代理回报、对账
+readers/<harness>.mjs 只声明差异（hooks），十几到几十行
+readers/index.mjs     注册表 + 分发
+```
+
+一开始写成了一份"万能形状识别"，四家跑出来逐字节一致。但那是"读文本"一致；各家特有的**过滤规则**（WorkBuddy 的 `<function_call>`、Qoder 的 `origin.kind`、OMP 的 `attribution`、DSH 的 `plugin:`）混进共用代码之后，改一家会波及另外三家。所以拆开：引擎一份，规则分家，加新格式是加一份声明。
 
 代价要说清楚：形状识别对"role 字段叫别的名字"的格式无能为力（比如用 `author`）。真遇到就加一个别名，不用写适配器。
 
