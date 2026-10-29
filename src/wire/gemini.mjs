@@ -64,6 +64,7 @@ export async function send(m, { messages, json, maxTokens, temperature, timeoutM
     usage: {
       prompt: data.usageMetadata?.promptTokenCount ?? 0,
       completion: data.usageMetadata?.candidatesTokenCount ?? 0,
+      cached: data.usageMetadata?.cachedContentTokenCount ?? 0,
     },
   };
 }

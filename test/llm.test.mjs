@@ -155,7 +155,9 @@ test("anthropic：system 提到顶层、max_tokens 必填、x-api-key 鉴权、c
   assert.ok(req.headers["anthropic-version"], "要带 anthropic-version");
   assert.equal(req.body.response_format, undefined, "anthropic 没有这个字段");
   assert.equal(r.text, '{"ok":true}');
-  assert.deepEqual(r.usage, { prompt: 21, completion: 7 });
+  assert.equal(r.usage.prompt, 21);
+  assert.equal(r.usage.completion, 7);
+  assert.equal(r.usage.cached, 0);
   assert.equal(r.wire, "anthropic");
 });
 
@@ -173,7 +175,9 @@ test("gemini：模型名进路径、system 用 systemInstruction、responseMimeT
   assert.equal(req.body.generationConfig.temperature, 1.0, "Gemini 3 建议保持 1.0");
   assert.equal(req.headers["x-goog-api-key"], "test-key");
   assert.equal(r.text, '{"ok":true}');
-  assert.deepEqual(r.usage, { prompt: 31, completion: 9 });
+  assert.equal(r.usage.prompt, 31);
+  assert.equal(r.usage.completion, 9);
+  assert.equal(r.usage.cached, 0);
 });
 
 test("预设把 provider 映射到正确的协议与 JSON 能力", () => {
@@ -182,7 +186,7 @@ test("预设把 provider 映射到正确的协议与 JSON 能力", () => {
   assert.equal(resolveModel({ model: { provider: "deepseek" } }).wire, "openai");
   assert.equal(resolveModel({ model: { provider: "gemini" } }).jsonMode, true);
   assert.equal(resolveModel({ model: { provider: "anthropic" } }).jsonMode, false);
-  assert.equal(resolveModel({ model: { provider: "deepseek" } }).model, "deepseek-chat");
+  assert.equal(resolveModel({ model: { provider: "deepseek" } }).model, "deepseek-v4-flash");
 });
 
 test("抽取整链：JSON 对象里的 entries 能解析，usage 能累加", async () => {
@@ -193,7 +197,8 @@ test("抽取整链：JSON 对象里的 entries 能解析，usage 能累加", asy
   });
   assert.equal(out.mode, "model");
   assert.deepEqual(out.entries.map((e) => e.entity), ["风盾500", "清洗"]);
-  assert.deepEqual(out.usage, { prompt: 120, completion: 30 });
+  assert.equal(out.usage.prompt, 120);
+  assert.equal(out.usage.completion, 30);
 });
 
 test("用量按天记账，能从文件读回来", () => {
