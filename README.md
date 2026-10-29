@@ -177,7 +177,9 @@ dsh --profile desktop --dump-config   # 确认它出现在配置树里
 
 两个选择：常驻加 `KeepAlive`，或定时调 `serve --once`。前者不用反复冷启动 node，后者崩了不会无限重启刷日志。
 
-**plist 里的 node 必须写绝对路径**，因为 launchd 的 `PATH` 只有 `/usr/bin:/bin:/usr/sbin:/sbin`，`node` 不在里面。先 `which node` 看实际路径再填——这台机器上 `node` 是 WorkBuddy 自带的（`~/.workbuddy/binaries/node/versions/<版本>/bin/node`），把带版本号的路径写进 plist，WorkBuddy 升级一次就断。稳妥做法是 `brew install node` 用 `/opt/homebrew/bin/node`，或者放一个每次自己找 node 的 shim 让 plist 指向它。
+**plist 里的 node 必须写绝对路径**，因为 launchd 的 `PATH` 只有 `/usr/bin:/bin:/usr/sbin:/sbin`，`node` 不在里面。别信 `which node`：它只反映当前 shell 的 PATH 顺序，这台机器上排第一的是 WorkBuddy 自带的那份（`~/.workbuddy/binaries/node/versions/<版本>/bin/node`），写进 plist 就是给别的软件的升级绑定。
+
+用 mise 的话，`~/.local/share/mise/shims/node` 是稳定路径（指向 mise，按全局配置解析版本，现在解析到 v24.22.1），我用 launchd 那种最小环境（`env -i HOME=… PATH=/usr/bin:/bin:/usr/sbin:/sbin`）验过能跑。升级 node 不用改 plist。或者干脆用编译出来的单文件二进制（见下），连运行时都不用。
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -186,7 +188,7 @@ dsh --profile desktop --dump-config   # 确认它出现在配置树里
   <key>Label</key><string>com.siyuan.mem</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/<你>/.local/share/mise/shims/node</string>
     <string>/Users/<你>/Codes/siyuan-mem/src/cli.mjs</string>
     <string>serve</string>
   </array>
@@ -204,6 +206,14 @@ dsh --profile desktop --dump-config   # 确认它出现在配置树里
 写 `StandardErrorPath` 是为了接住启动阶段的崩溃（比如 Node 路径不对、锁被占）：这些发生在 `serve` 自己的日志之前。
 
 没有配 `model.apiKey` 时 `serve` 会直接拒绝启动，`--no-model` 是显式的规则抽取开关。理由见下一节。
+
+### 单文件二进制（可选）
+
+```bash
+bun build src/cli.mjs --compile --outfile ~/.siyuan-mem/mem    # 68MB，0.2 秒
+```
+
+有 bun 的话，一条命令把整个 CLI 编成一个可执行文件，启动 20-30ms，行为跟 node 版一致（`status`、`scan`、`serve` 都验过）。好处是 launchd 直接指向它，不依赖任何运行时，换机器拷贝一个文件就能跑。代价是产物 68MB、每次改代码要重新编。没有 bun 就用上面的 mise shim，够用。
 
 ## 已经踩过的坑
 
