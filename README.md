@@ -47,6 +47,8 @@ node src/cli.mjs search 风盾500       # 查
 node src/cli.mjs search --all 风盾500 # 连已过时的一起查
 node src/cli.mjs scan                # 本机有哪些 harness 的会话，各多少
 node src/cli.mjs scan --all          # 全读一遍，数轮数和字数
+node src/cli.mjs audit               # 对账：收了多少字、丢了多少字、为什么丢
+node src/cli.mjs audit --all         # 全部会话的对账表
 node src/cli.mjs review 20           # 最近 20 条，人工扫一眼
 node src/cli.mjs remember "..." --entity 思源MCP --type fact
 node src/cli.mjs forget <块id>        # 标成过时，不删
@@ -122,6 +124,8 @@ mem ingest-log ~/.dsh/sessions/<ws>/<sid>/session.v4.jsonl.zstd
 ```
 
 格式按内容嗅探（只影响来源标签，不影响解析）。用户消息里的 `<system-reminder>`、`<cb_summary>` 摘要块、子代理事件、工具结果会在读取时剔掉。
+
+剔掉的不等于丢掉了——`mem audit` 会把每个块归到"收进语料 / 思考块 / 工具结果 / 注入与摘要 / 其它"，五类相加等于日志里全部消息文字。本机 168 个会话的对账结果是 3359 万字里 380 万进语料，**"其它"为 0**，即没有一个字下落不明。
 
 ## DSH 插件
 
