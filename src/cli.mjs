@@ -6,7 +6,9 @@ import { CONFIG_PATH, INBOX_DIR, loadConfig, LOG_PATH, machineId, saveConfig, of
 import { CATALOG_PATH } from "./catalog.mjs";
 import { PROVIDERS, resolveModel, hasModel, probe as probeModel, saveModelChoice, maskKey, usageToday } from "./llm.mjs";
 import { loadCatalog, loadCatalogSync, wireOf, findProvider, modelInfo } from "./catalog.mjs";
-import { formatHits } from "./store.mjs";
+import { formatHits, ATTR } from "./store.mjs";
+import { readRange, listParts, parsePtr } from "./raw.mjs";
+import { loadEntities, addEntity, mergeEntities, applyPending, shotList } from "./entities.mjs";
 import { normalizeTurns, toExchanges } from "./extract.mjs";
 import { pending } from "./inbox.mjs";
 import { readLog, readJsonLines, auditMessages, HARNESS_NAMES } from "./readers/index.mjs";
@@ -19,7 +21,7 @@ import { pushOnce, pushWatch, pingPush } from "./push.mjs";
 
 const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 
-  mem init [--force]           建笔记本和三个文档（幂等；--force 丢掉 id 缓存重解析）
+  mem init [--force]           建笔记本和五个文档（幂等；--force 丢掉 id 缓存重解析）
   mem status                   连通性、条目数、队列长度、服务是否在跑
   mem once [--dry] [--no-model] 处理 inbox 里的全部会话（跑的期间占锁）
   mem serve [--once]           常驻：每轮找新会话 → 投队列 → 写思源
@@ -31,6 +33,12 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
   mem search <词...>           查记忆，默认只看 current
   mem search --all <词...>     查记忆，含已过时的
   mem review [n]               列最近 n 条，人工扫一眼
+  mem show <块id> [--chars N]   看这条结论对应的原文（按指针回读附件里那几轮）
+  mem raw list [会话id]        看原文归档了哪些 part
+  mem entity [list [词]]       看实体表
+  mem entity add <名> [--alias "别名1|别名2"]
+  mem entity merge <旧名> <新名>   合并并回填条目（纯机械，不调模型）
+  mem entity review [--dry]    执行 05-实体待确认 里勾选的项
   mem remember <文本> [--entity X] [--type decision|fact|preference|reference]
   mem forget <块id>            标成 superseded（不删）
   mem model                    看当前模型配置与今天的用量
@@ -55,7 +63,7 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 `;
 
 /** 只有这几个键吃后面的值，其余 --xxx 一律当布尔，免得 "search --all 风盾" 把查询词吃掉。 */
-const VALUED = new Set(["entity", "type", "confidence", "limit", "format", "n", "interval", "key", "name", "wire", "port", "to", "token", "machine", "quiet", "every", "bind"]);
+const VALUED = new Set(["entity", "type", "confidence", "limit", "format", "n", "interval", "key", "name", "wire", "port", "to", "token", "machine", "quiet", "every", "bind", "alias", "chars"]);
 
 function parseArgs(argv) {
   const flags = {};
@@ -605,6 +613,164 @@ async function cmdPush(flags, args) {
   );
 }
 
+/** 从 ial 里抠某个属性值。ial 是 `{: custom-mem-x="y"}` 这种字符串。 */
+function attrOf(ial, key) {
+  return new RegExp(`${key}="([^"]*)"`).exec(ial ?? "")?.[1] ?? "";
+}
+
+async function cmdShow(args, flags) {
+  const id = args[0];
+  if (!id) throw new Error("要一个条目块 id：mem review 里能看到");
+  const { sy } = make();
+
+  const rows = await sy.sql(`SELECT content, ial FROM blocks WHERE id='${id.replace(/'/g, "''")}' LIMIT 1`);
+  const row = rows?.[0];
+  if (!row) throw new Error(`找不到块 ${id}`);
+
+  const entity = attrOf(row.ial, ATTR.entity);
+  const status = attrOf(row.ial, ATTR.status);
+  const ptr = attrOf(row.ial, ATTR.raw);
+  const text = String(row.content ?? "").replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").trim();
+
+  console.log(`[${entity || "-"}] ${text}`);
+  console.log(`状态 ${status || "-"}   块 ${id}`);
+  if (!ptr) {
+    console.log("\n这条没有原文指针：归档功能上线前写的，或者当时归档失败。");
+    return;
+  }
+
+  const p = parsePtr(ptr);
+  console.log(`原文 ${ptr}`);
+  if (p?.from != null) console.log(`第 ${p.from}–${p.to} 轮`);
+
+  const r = await readRange(sy, ptr, { maxChars: Number(flags.chars) || 8000 });
+  if (r.missing) {
+    console.log(`\n原文已失效：附件 ${p?.path} 不在了（被清理或手动删了）。`);
+    return;
+  }
+  if (r.error) throw new Error(r.error);
+  if (!r.turns.length) {
+    console.log("\n指针那一段没读到内容：附件在，但轮次对不上。可能是日志被重写过。");
+    return;
+  }
+
+  console.log("");
+  for (const t of r.turns) {
+    const who = t.role === "user" ? "用户" : "助手";
+    console.log(`── 第 ${t.i} 轮 · ${who} ${"─".repeat(Math.max(0, 30))}`);
+    console.log(t.text.trim());
+    console.log("");
+  }
+  if (r.truncated) {
+    console.log(`（这一段共 ${r.total} 轮，到字数上限截住了；加 --chars 80000 看全）`);
+  }
+}
+
+async function cmdRaw(args) {
+  const sub = args[0] ?? "list";
+  if (sub !== "list") throw new Error(`不认识的子命令：${sub}（可用：list）`);
+  const { sy, store } = make();
+  const ids = await store.docIds();
+  const session = args[1] ?? "";
+
+  const rows = await sy.sql(
+    `SELECT id, content, ial FROM blocks WHERE parent_id='${ids.raw}' AND ial LIKE '%custom-mem-kind="raw-part"%' ORDER BY created ASC`
+  );
+  const parts = (rows ?? [])
+    .map((r) => ({
+      id: r.id,
+      content: String(r.content ?? "").replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").trim(),
+      session: attrOf(r.ial, "custom-mem-session"),
+      harness: attrOf(r.ial, "custom-mem-harness"),
+      machine: attrOf(r.ial, "custom-mem-machine"),
+      range: attrOf(r.ial, "custom-mem-range"),
+      bytes: Number(attrOf(r.ial, "custom-mem-bytes")) || 0,
+    }))
+    .filter((p) => !session || p.session === session);
+
+  if (!parts.length) {
+    console.log(session ? `会话 ${session} 没有归档过原文` : "还没有归档过原文");
+    return;
+  }
+  const by = new Map();
+  for (const p of parts) {
+    const k = p.session;
+    (by.get(k) ?? by.set(k, []).get(k)).push(p);
+  }
+  console.log(`${parts.length} 个 part，${by.size} 个会话\n`);
+  for (const [sid, list] of by) {
+    console.log(`${sid.slice(0, 24)}  ${list[0].machine}/${list[0].harness}  ${list.length} 段`);
+    for (const p of list) {
+      console.log(`  ${String(p.range).padEnd(10)} ${(p.bytes / 1024).toFixed(0).padStart(5)}KB  ${p.content}`);
+    }
+  }
+}
+
+async function cmdEntity(args, flags) {
+  const sub = args[0] ?? "list";
+  const { sy, cfg, store } = make();
+  const ids = await store.docIds();
+
+  if (sub === "list") {
+    const q = String(args[1] ?? "").toLowerCase();
+    const table = await loadEntities(sy, ids.entities);
+    const rows = table.filter(
+      (e) => !q || e.name.toLowerCase().includes(q) || e.aliases.some((a) => a.toLowerCase().includes(q))
+    );
+    if (!rows.length) {
+      console.log(q ? `没有匹配「${q}」的实体` : "实体表还是空的（第一次抽取时会自己建）");
+      return;
+    }
+    console.log(`${rows.length} 个实体（共 ${table.length}）\n`);
+    for (const e of rows) {
+      const alias = e.aliases.length ? `  别名：${e.aliases.join("、")}` : "";
+      const merged = e.status === "merged" ? `  [已并入 ${e.mergedInto}]` : "";
+      console.log(`  ${e.name}${alias}${merged}`);
+    }
+    return;
+  }
+
+  if (sub === "add") {
+    const name = args[1];
+    if (!name) throw new Error("要一个名字：mem entity add 风盾500 --alias \"风盾 500|京造风盾500\"");
+    const aliases = String(flags.alias ?? "")
+      .split("|")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const before = await loadEntities(sy, ids.entities);
+    if (before.some((e) => e.name === name)) throw new Error(`已经有了：${name}（要加别名用 mem entity merge）`);
+    await addEntity(sy, ids.entities, name, { aliases, source: "manual" });
+    console.log(`已建实体「${name}」${aliases.length ? `，别名 ${aliases.join("、")}` : ""}`);
+    return;
+  }
+
+  if (sub === "merge") {
+    const [from, into] = args.slice(1);
+    if (!from || !into) throw new Error("mem entity merge <旧名> <新名>");
+    const r = await mergeEntities(sy, ids.entities, from, into, { log: console.log });
+    console.log(`已合并：${from} → ${into}，回填 ${r.changed} 条`);
+    if (r.aliases?.length) console.log(`  现在的别名：${r.aliases.join("、")}`);
+    return;
+  }
+
+  if (sub === "review") {
+    const r = await applyPending({ sy, cfg, ids, dry: Boolean(flags.dry), log: console.log });
+    const s = r.stat;
+    if (!s.todo && !s.merged && !s.rejected && !s.failed) {
+      console.log("05-实体待确认 里没有待办。");
+      return;
+    }
+    for (const m of r.merged) console.log(`  合并 ${m.a} → ${m.b}${flags.dry ? "（dry）" : ""}`);
+    for (const x of r.rejected) console.log(`  否定 ${x.a} ← ${x.b}${flags.dry ? "（dry）" : ""}`);
+    console.log(
+      `\n待确认 ${s.todo}，合并 ${s.merged}，否定 ${s.rejected}${s.failed ? `，失败 ${s.failed}` : ""}${flags.dry ? "（dry，没写）" : ""}`
+    );
+    return;
+  }
+
+  throw new Error(`不认识的子命令：${sub}（可用：list / add / merge / review）`);
+}
+
 async function main() {
   const [cmd, ...args] = process.argv.slice(2);
   const { flags, rest } = parseArgs(args);
@@ -629,6 +795,12 @@ async function main() {
       return cmdSearch(flags, rest);
     case "review":
       return cmdReview(rest);
+    case "show":
+      return cmdShow(rest, flags);
+    case "raw":
+      return cmdRaw(rest);
+    case "entity":
+      return cmdEntity(rest, flags);
     case "remember":
       return cmdRemember(flags, rest);
     case "forget":

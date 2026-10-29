@@ -14,13 +14,29 @@ export const OFFSET_PATH = join(HOME_DIR, "offsets.json");
 /** 进程锁与轮次日志。放这里而不是 serve.mjs，免得 ui.mjs 为了拿路径反向依赖 serve。 */
 export const LOCK_PATH = join(HOME_DIR, "serve.lock");
 export const LOG_PATH = join(HOME_DIR, "serve.log");
+/** 实体否定的本地记录：`{"甲|乙": "2026-10-30"}`。同一台机器上判过就不再问。 */
+export const NEGATIVES_PATH = join(HOME_DIR, "entity-negatives.json");
+/**
+ * 原文归档的本地索引：`{"机器|harness|会话": [{blockId, path, from, to}]}`。
+ *
+ * 为什么不只查思源：块的 SQL 索引是异步的，刚 append 完立刻查不到。
+ * 归档紧接着要做幂等判断（这段是不是已经传过），查不到就会重复上传。
+ * 本地这份是权威，SQL 只在本地丢了时兜底。
+ */
+export const RAW_INDEX_PATH = join(HOME_DIR, "raw-index.json");
 
 const DEFAULTS = {
   siyuan: {
     baseUrl: "http://127.0.0.1:6806",
     token: "",
     notebook: "90-记忆",
-    docs: { entries: "01-条目", raw: "02-原文", changes: "03-变更" },
+    docs: {
+      entries: "01-条目",
+      raw: "02-原文",
+      changes: "03-变更",
+      entities: "04-实体",
+      pending: "05-实体待确认",
+    },
   },
   model: {
     /** 预设名，见 llm.mjs 的 PROVIDERS；换成别家只改这一行 + apiKey。 */
@@ -80,6 +96,24 @@ const DEFAULTS = {
     maxEntriesPerBatch: 6,
     /** 一个会话最多入库几条，纯防噪音；撞到了会打印出来。 */
     maxEntriesPerSession: 60,
+    /** 抽取时带多少个已有实体进 prompt。多了会挤掉正文，少了复用率下降。 */
+    entityShotList: 300,
+  },
+  raw: {
+    /**
+     * 原文归档。放思源附件（assets）而不是笔记正文：
+     * 附件不进 blocks_fts，不会把 bm25 的 IDF 拉偏；但会被「清理未引用资源」扫到，
+     * 所以每个 part 都必须在 02-原文 里有一个引用块。
+     */
+    enabled: true,
+    /** assets 下的目录前缀，后面按 机器/harness 分层。 */
+    dir: "mem-raw",
+    /**
+     * 单个 part 的硬上限，超了按轮次边界切。
+     * 批次粒度由投递决定（安静 180 秒、只推增量），所以常态下一个会话一次一个 part；
+     * 只有首次回灌超长会话才会碰到这个上限。
+     */
+    forcePartBytes: 8 * 1024 * 1024,
   },
 };
 
