@@ -26,7 +26,7 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
   mem remember <文本> [--entity X] [--type decision|fact|preference|reference]
   mem forget <块id>            标成 superseded（不删）
   mem model                    看当前模型配置与今天的用量
-  mem model use <provider> --key sk-...   [--name 模型名] 换一家
+  mem model use <provider> --key sk-...  [--name 模型名] [--wire openai|anthropic|gemini]
   mem model test               真发一次请求，自证 key / 地址 / JSON 模式都通
 
 配置：${CONFIG_PATH}
@@ -35,7 +35,7 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 `;
 
 /** 只有这几个键吃后面的值，其余 --xxx 一律当布尔，免得 "search --all 风盾" 把查询词吃掉。 */
-const VALUED = new Set(["entity", "type", "confidence", "limit", "format", "n", "interval", "key", "name"]);
+const VALUED = new Set(["entity", "type", "confidence", "limit", "format", "n", "interval", "key", "name", "wire"]);
 
 function parseArgs(argv) {
   const flags = {};
@@ -322,22 +322,23 @@ async function cmdModel(args, flags) {
   if (!sub) {
     const m = resolveModel(cfg);
     const u = usageToday();
-    console.log(`provider     ${m.provider}`);
+    console.log(`provider     ${m.provider}（协议 ${m.wire}）`);
     console.log(`baseUrl      ${m.baseUrl || "（未配置）"}`);
     console.log(`模型         ${m.model || "（未配置）"}`);
     console.log(`key          ${maskKey(m.apiKey)}`);
     console.log(`JSON 模式    ${m.jsonMode ? "开" : "关"}`);
     console.log(`今日用量     ${u.calls ? `${u.calls} 次，输入 ${u.prompt} / 输出 ${u.completion} tokens` : "还没有调用"}`);
     console.log(`\n可选 provider：${Object.keys(PROVIDERS).join(", ")}`);
+    console.log(`协议三选一：openai / anthropic / gemini（自定义端点用 model.wire 指定）`);
     return;
   }
 
   if (sub === "use") {
     const provider = args[1];
     if (!provider) throw new Error(`要指定一家：${Object.keys(PROVIDERS).join(", ")}`);
-    const m = saveModelChoice(provider, { apiKey: flags.key, model: flags.name });
+    const m = saveModelChoice(provider, { apiKey: flags.key, model: flags.name, wire: flags.wire });
     console.log(`已写入 ${CONFIG_PATH}`);
-    console.log(`  ${m.provider} / ${m.model}  key ${maskKey(m.apiKey)}  JSON ${m.jsonMode ? "开" : "关"}`);
+    console.log(`  ${m.provider} / ${m.model}  协议 ${m.wire}  key ${maskKey(m.apiKey)}  JSON ${m.jsonMode ? "开" : "关"}`);
     console.log("  下一步：mem model test");
     return;
   }
@@ -345,7 +346,7 @@ async function cmdModel(args, flags) {
   if (sub === "test") {
     if (!hasModel(cfg)) throw new Error("还没配 key：mem model use deepseek --key sk-...");
     const r = await probeModel(cfg);
-    console.log(`通了：${r.provider} / ${r.model}  ${r.ms}ms  ${r.attempts} 次尝试`);
+    console.log(`通了：${r.provider} / ${r.model}（${r.wire}）  ${r.ms}ms  ${r.attempts} 次尝试`);
     console.log(`  tokens 输入 ${r.usage.prompt} / 输出 ${r.usage.completion}  JSON 模式 ${r.jsonOk ? "生效" : "没生效（退回提示词约束）"}`);
     console.log(`  回包：${r.sample}`);
     return;

@@ -86,25 +86,37 @@ node src/cli.mjs forget <块id>        # 标成过时，不删
 
 ## 模型接口
 
-传输层用官方 `openai` SDK，只认 OpenAI 兼容的 `/chat/completions` 一种形状。DeepSeek、通义（compatible-mode）、Kimi、智谱、OpenRouter、火山、ollama、LM Studio、vLLM 全都吃这一条。
+三种协议，一个接口。调用方只给 `messages`，拿 `{text, usage}`，不知道对面是谁：
 
-为什么最后用了 SDK：重试（429/408/409/5xx，认 `retry-after`）、超时、代理、keep-alive、错误分类这些 HTTP 细节它都做过了，而且是**零传递依赖、纯 JS**：`node_modules` 33MB（多半是类型定义和 sourcemap），编译进单文件只多 1MB（85→86MB，bun 会 tree-shake）。
+| 协议 | 端点 | 用于 | system 放哪 | JSON 模式 | 默认 temperature |
+|---|---|---|---|---|---|
+| `openai` | `/chat/completions` | DeepSeek、通义、Kimi、智谱、OpenRouter、ollama、LM Studio | messages 里 | `response_format` | 0.2 |
+| `anthropic` | `/v1/messages` | Claude | 顶层字段 | 无（靠提示词） | 0.2 |
+| `gemini` | `/models/{m}:generateContent` | Gemini | `systemInstruction` | `responseMimeType` | **1.0** |
 
-代价是它顶层 import 很重：node 下 880ms、bun 产物里约 170ms。所以 `makeClient` 里是**懒加载**，只有真要发请求时才拉进来——`mem status`、`scan`、`search` 这些不碰模型的命令，启动仍是 33ms（这是实测，不是估算；第一版直接顶层 import 时启动从 30ms 掉到 207ms）。
+Gemini 那 1.0 是官方的建议：Gemini 3 调低温度反而会退化、循环。三家各按各的规矩来，不强行统一。
 
-SDK 替不掉三件事，所以外面还包一层 `src/llm.mjs`：
+分工是三层，别混：`src/wire/*.mjs` 只负责"这种协议怎么拼请求、怎么读回复"；`src/llm.mjs` 管策略（重试、JSON 回退、记账、预设）；调用方只关心文本和 token。
 
-- **JSON 模式回退**：有些实现不认 `response_format`，会回 400。SDK 此时直接抛 `BadRequestError`，我们捕到后去掉字段重发一次——不让整段会话因此降级成规则抽取。prompt 相应要求顶层是对象 `{"entries":[…]}`。
-- **按调用打 tag 的用量账本**：SDK 只返回 `usage`，不知道这次是"抽取"还是"自证"。现在每次调用追加到 `~/.siyuan-mem/usage.jsonl`，`mem status` 显示今日汇总，`serve` 每轮日志带 tokens。回灌一百多个会话时，这是唯一能判断"还要不要继续跑"的指标。
-- **provider 预设**：`deepseek / qwen / moonshot / zhipu / openai / openrouter / ollama / lmstudio`，本地两家不需要 key（SDK 要传个占位 key）。
+为什么 OpenAI 那家走官方 SDK、另两家手写：SDK 只对同一种形状有收益，而且它零传递依赖、纯 JS，编进单文件只多 1MB。Anthropic / Gemini 的差异太大（system 顶层、模型名在路径里、角色叫 `model`、token 字段名不同），各自五六十行写完更好审，也不用为两家每年会 breaking 的 SDK 付维护费。三者都懒加载。
+
+预设十家：`deepseek / qwen / moonshot / zhipu / openai / openrouter / anthropic / gemini / ollama / lmstudio`（本地两家不要 key）。自定义端点用 `model.wire` 指定协议。
 
 ```bash
-mem model                                  # 看 provider / 地址 / 模型 / key（打码）/ 今日用量
-mem model use qwen --key sk-... [--name qwen-max]   # 换一家，写进 ~/.siyuan-mem/config.json（0600）
-mem model test                             # 真发一次请求，自证 key、地址、JSON 模式、记账都通
+mem model                                            # provider、协议、地址、模型、key（打码）、今日用量
+mem model use anthropic --key sk-ant-... --name claude-sonnet-4-6
+mem model use gemini --key AIza... --name gemini-3.5-flash
+mem model use deepseek --key sk-... --wire openai    # 自定义端点也可以显式指定协议
+mem model test                                       # 真发一次请求，自证 key、地址、JSON 模式、记账都通
 ```
 
-`npm test` 用本地假接口测这几条：429 重试（真的等了 `Retry-After`）、`response_format` 被拒后回退、401 不重试、5xx 重试到上限、JSON 对象解析、记账可读。不发真请求、不花钱，跑完不碰真实 `usage.jsonl`。
+三件 SDK 替不掉、必须自己做的事：
+
+- **JSON 模式回退**：服务端不认 `response_format`（或 `responseMimeType`）会回 400。这时去掉该字段重发一次，并标记 `fallback`——不让整段会话因此降级成规则抽取。prompt 相应要求顶层是对象 `{"entries":[…]}`。
+- **按调用打 tag 的用量账本**：`~/.siyuan-mem/usage.jsonl` 记 model / wire / tag / tokens / 耗时，`mem status` 显示今日汇总，`serve` 每轮日志带 tokens。回灌一百多个会话时，这是唯一能判断"还要不要继续跑"的指标。
+- **统一的重试策略**：429/408/409/5xx 退避重试（认 `retry-after`），4xx 其余立刻抛。放在策略层而不是各家 adapter 里，这样"试了几次"在三种协议之间才可比。
+
+`npm test` 用本地假接口测九条：429 重试（真的等了 `Retry-After`）、`response_format` 被拒后回退、401 不重试、5xx 重试到上限、Anthropic 的请求形状与解析、Gemini 的路径与角色映射、预设映射、抽取整链、记账可读。不发真请求、不花钱，跑完不碰真实 `usage.jsonl`。
 
 ## 数据结构
 
@@ -288,6 +300,7 @@ src/
   store.mjs     写入、去重、查询、状态
   inbox.mjs     队列（就是目录）
   llm.mjs       模型调用层：重试、JSON 模式、用量记账、provider 预设
+  wire/         三种协议各一份：openai（SDK）/ anthropic（fetch）/ gemini（fetch）
 plugin/
   index.mjs     DSH 插件
 test/           模型调用层的回归测试（本地假接口，不花钱）
