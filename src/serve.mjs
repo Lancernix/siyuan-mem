@@ -23,11 +23,12 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { hostname } from "node:os";
-import { HOME_DIR, ensureDirs, loadConfig, loadOffsets, LOCK_PATH, LOG_PATH } from "./config.mjs";
+import { HOME_DIR, ensureDirs, loadConfig, loadOffsets, offsetsOf, machineId, LOCK_PATH, LOG_PATH } from "./config.mjs";
 import { listSessions } from "./harness.mjs";
 import { enqueueLog, processQueue, assertModel } from "./jobs.mjs";
 import { SiYuan } from "./siyuan.mjs";
 import { startUi } from "./ui.mjs";
+import { startIngest } from "./ingest.mjs";
 
 export { LOCK_PATH, LOG_PATH };
 
@@ -172,7 +173,8 @@ async function runRound({ dry, useModel, log }) {
   const sy = new SiYuan({ baseUrl: cfg.siyuan.baseUrl, token: cfg.siyuan.token, timeoutMs: 3000 });
   const version = await sy.version(); // 不通就抛，交给外层退避
 
-  const offsets = loadOffsets();
+  // 只看本机的偏移：中心机器自己也可能跑着 harness。
+  const offsets = offsetsOf(loadOffsets(), machineId());
   const now = Date.now();
   const sessions = listSessions();
   const candidates = [];
@@ -255,6 +257,24 @@ export async function serve({ once = false, dry = false, useModel = true, interv
     }
   }
 
+  // 接收端只给别的机器用；单机不需要它，所以默认关。开了就必须有 token，
+  // 否则 startIngest 会抛错——写入通道不能裸奔。
+  let ingest = null;
+  if (cfg.ingest?.enabled && !once) {
+    try {
+      ingest = startIngest({
+        port: cfg.ingest.port ?? 7788,
+        bind: cfg.ingest.bind ?? "127.0.0.1",
+        token: cfg.ingest.token ?? "",
+        maxBytes: cfg.ingest.maxBytes,
+        log,
+      });
+      log(`接收端 ${ingest.url}/api/ingest${cfg.ingest.token ? "" : "（无 token，只接受本机）"}`);
+    } catch (e) {
+      log(`  接收端起不来：${e.message.split("\n")[0]}`);
+    }
+  }
+
   let stop = false;
   const onSignal = (sig) => {
     if (stop) process.exit(1); // 第二次 Ctrl-C：不体面退出了
@@ -300,6 +320,7 @@ export async function serve({ once = false, dry = false, useModel = true, interv
   }
 
   if (ui) await ui.close().catch(() => {});
+  if (ingest) await ingest.close().catch(() => {});
   release();
   if (lastError) {
     process.exitCode = 1;

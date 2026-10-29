@@ -5,7 +5,7 @@
  * 而"手动跑成功、后台跑丢字"是最难查的一类问题。
  */
 import { statSync } from "node:fs";
-import { loadConfig, loadOffsets, saveOffsets } from "./config.mjs";
+import { loadConfig, loadOffsets, saveOffsets, offsetsOf, machineId } from "./config.mjs";
 import { hasModel } from "./llm.mjs";
 import { SiYuan } from "./siyuan.mjs";
 import { Store } from "./store.mjs";
@@ -40,7 +40,8 @@ export function enqueueLog(file, { format = "" } = {}) {
     };
   }
 
-  const offsets = loadOffsets();
+  const all = loadOffsets();
+  const offsets = offsetsOf(all, machineId());
   const st = statSync(file);
   const prev = offsets[file];
   const fresh = prev && st.size >= prev.bytes && log.turns.length >= prev.turns;
@@ -51,6 +52,7 @@ export function enqueueLog(file, { format = "" } = {}) {
   const target = drop({
     session_id: log.sessionId || `log-${Date.now()}`,
     harness: log.harness,
+    machine: machineId(),
     cwd: log.cwd,
     date: new Date().toISOString().slice(0, 10),
     turns,
@@ -58,9 +60,9 @@ export function enqueueLog(file, { format = "" } = {}) {
   // 先投递再记偏移不成立：投递失败会重读同一段。反过来先记偏移再投递，
   // 万一进程在这一行之后被杀，那一段就永远丢了。所以顺序是投递成功才记偏移。
   offsets[file] = { bytes: st.size, turns: log.turns.length, at: Date.now() };
-  saveOffsets(offsets);
+  saveOffsets(all);
 
-  return { harness: log.harness, added: turns.length, before, target };
+  return { harness: log.harness, added: turns.length, before, target: target.file ?? target };
 }
 
 /**
@@ -138,6 +140,7 @@ export async function processQueue({ dry = false, useModel = true, onLine = () =
           source: payload.harness ?? "",
           session: payload.session_id ?? "",
           date: payload.date ?? "",
+          machine: payload.machine ?? machineId(),
         });
         if (r.duplicate) sum.skipped++;
         else {

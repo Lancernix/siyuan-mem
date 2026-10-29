@@ -9,10 +9,9 @@
 
 ```
 各 harness 会话日志 ┐
-                    ├─▶ ~/.siyuan-mem/inbox/ ──mem serve──▶ 思源（90-记忆）
-DSH 插件（实时）     ┘                                         │
-   ▲                                                           │
-   └───────── agent/pre-step 注入最近结论 ◀──────────────────────┘
+                    ├─▶ inbox ──mem serve──▶ 思源（90-记忆）
+其他机器的 mem push ─┘   ▲                      │
+                        └── agent/pre-step 注入 ◀┘
 ```
 
 三件事：
@@ -62,9 +61,46 @@ node src/cli.mjs model list qwen     # 目录里的 provider / 某家的模型�
 node src/cli.mjs model refresh       # 刷新 models.dev 目录
 node src/cli.mjs ui                  # 本地面板 127.0.0.1:7787
 node src/cli.mjs service install     # 装成 launchd 服务
+node src/cli.mjs center setup        # 把本机设成中心（开接收端、生成 token）
+node src/cli.mjs push --to URL --token T --save   # 边缘机器：推到中心
 ```
 
 软链到 PATH 之后就是 `mem status`、`mem once`。
+
+## 一台机器，还是中心 + 边缘
+
+单机时 `mem serve` 就够了，下面这些都不用管。多机时要有中心：**思源在哪台机器上，mem 就装在哪台**。抽取要模型 key、要写同一份库，这两件事一旦分散，key 就有 N 份、prompt 就有 N 份、token 账就有 N 本。
+
+```
+边缘 A ─┐  mem push（本机日志 → turns，只推新增）
+边缘 B ─┼──────────────▶  中心：mem serve
+边缘 C ─┘                   ├─ 接收端 7788（token 鉴权 → 队列）
+                            ├─ 抽取 + 写思源（唯一写入方）
+                            └─ 面板 7787（只读，仅回环）
+```
+
+- **边缘只读日志、只发请求**：不碰模型、不碰思源，所以那台机器上只需要一个可执行文件和一个地址。
+- **中心独占抽取**：key 一份、prompt 一份、用量账一本、重试只在一个地方发生。
+- **推送是增量的**：边缘按自己的 offsets 记"读到第几轮"，中心按内容哈希判重。边缘重装丢了 offsets 会重推，但不会写两遍。
+
+```bash
+# 中心（和思源同一台机器）
+mem center setup --port 7788      # 开接收端、生成 token、打印边缘要跑的那条命令
+mem service install               # 常驻；接收端跟着 serve 一起起
+
+# 边缘
+mem push --to https://mem.example.com --token <token> --save --test
+mem push --watch                  # 常态：每 2 分钟推一次
+mem push --once --all             # 首次回灌：一次推完，不等安静 180 秒
+```
+
+几个必须知道的：
+
+- **只推"安静了 3 分钟"的会话**。正在写的会话切出来全是半句话。`--quiet 0` 可以关掉这个等待，首次回灌常用。
+- **token 必须有**。接收端是写入通道，没 token 又绑 `0.0.0.0` 会直接拒绝启动。公网请走 HTTPS 反向代理（Caddy 两行、nginx 三行）；面板仍然只绑 `127.0.0.1`，远程看用 `ssh -L 7787:127.0.0.1:7787`。
+- **每条记忆带 `custom-mem-machine`**。多机汇聚之后，这是唯一能分清"这条来自工作电脑还是家里"的字段。
+- **offsets 按机器分组**（`machines.<主机名>.<路径>`）。三台 Mac 的路径长得一模一样，不分开就会互相顶掉。
+- **思源在 Docker 里时，mem 装在宿主机**，`baseUrl` 填映射出来的端口（默认 `127.0.0.1:6806`）。别把 mem 塞进思源容器：容器重建一次它就没了，而且它要读的是宿主机上的会话日志。
 
 ## 一个字都不截
 
@@ -315,6 +351,8 @@ src/
   store.mjs     写入、去重、查询、状态
   inbox.mjs     队列（就是目录）
   ui.mjs        本地面板（一个 HTML + 几个只读接口）
+  ingest.mjs    接收端：验 token、限大小、写队列（中心侧）
+  push.mjs      边缘侧：读本机日志、增量推给中心
   service.mjs   launchd / systemd 注册
   llm.mjs       模型调用层：重试、JSON 模式、用量记账、provider 预设
   wire/         三种协议各一份：openai（SDK）/ anthropic（fetch）/ gemini（fetch）
