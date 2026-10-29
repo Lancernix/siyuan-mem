@@ -36,6 +36,8 @@ node src/cli.mjs init
 
 `init` 会建一个 `90-记忆` 笔记本和三个文档。重复执行是安全的。
 
+`ingest-log` 记住每个日志读到第几行（`~/.siyuan-mem/offsets.json`），重复跑只投新增部分；文件被重写或轮转（变小）就从零开始。
+
 想让它抽取质量好一点，填 `config.json` 里的 `model.apiKey`。不填也能跑，走规则抽取，只是结论糙。
 
 ## 用法
