@@ -16,32 +16,28 @@ const REMINDER = /<system-reminder[\s\S]*?<\/system-reminder>/g;
  */
 const INJECTED_BLOCK = /^\s*<(?:cb_summary|conversation_history_summary|task-notification)\b/;
 
-/** 用户侧和模型侧的上限不同：用户的长内容多是粘贴，模型的长回复本身就是结论。 */
-const LIMIT = { user: 2000, assistant: 6000 };
 const CONTEXT_TAGS = /<(?:user_info|craft_mode|additional-data|current_time|wecom_wedrive_references)[\s\S]*?<\/(?:user_info|craft_mode|additional-data|current_time|wecom_wedrive_references)>/g;
 
+/**
+ * 只做三件事：丢掉伪装成用户消息的注入块、剥掉 system-reminder 这类外壳、压掉多余空行。
+ *
+ * 不截断，一个字都不截。走到这里的每一段都是用户真说的话或模型真说的话，也就是唯一
+ * 不可再生的语料；截断是不可逆的有损压缩，写时丢掉的东西，读的时候任何模型都救不回来。
+ * 长度问题在抽取那一侧按批切开处理，不在采集这一侧砍。
+ */
 function cleanUserText(text) {
   const raw = String(text ?? "");
   if (INJECTED_BLOCK.test(raw)) return "";
-  const clean = raw
+  return raw
     .replace(REMINDER, "")
     .replace(CONTEXT_TAGS, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-  return clip(clean, LIMIT.user);
 }
 
-/**
- * 超长内容按首尾保留，中间省略。
- *
- * 只留头部是错的：结论经常在最后一段（"所以我的建议是……"），一刀切掉就正好丢了要抽的东西。
- * 两头都留，损失的是中间的论证过程，那本来也不进记忆。
- */
-function clip(text, limit) {
-  if (text.length <= limit) return text;
-  const head = Math.round(limit * 0.7);
-  const tail = limit - head;
-  return `${text.slice(0, head)}\n……（省略 ${text.length - limit} 字）……\n${text.slice(-tail)}`;
+/** 模型侧同样不截断，只去首尾空白。 */
+function cleanAssistantText(text) {
+  return String(text ?? "").trim();
 }
 
 /** WorkBuddy：type=message，content 是 [{type:"input_text"|"text", text}]。 */
@@ -60,7 +56,7 @@ function readWorkbuddy(lines) {
       .filter((p) => p && typeof p.text === "string" && /text$/.test(p.type ?? "text"))
       .map((p) => p.text)
       .join("\n");
-    const clean = role === "user" ? cleanUserText(text) : clip(String(text ?? "").trim(), LIMIT.assistant);
+    const clean = role === "user" ? cleanUserText(text) : cleanAssistantText(text);
     if (!clean) continue;
     // 工具结果和文件快照会以 user 角色出现，拦掉。
     if (role === "user" && /^<(?:function_call|file-history)/.test(clean)) continue;
@@ -85,7 +81,7 @@ function readClaude(lines) {
       .filter((p) => p?.type === "text" && typeof p.text === "string")
       .map((p) => p.text)
       .join("\n");
-    const clean = d.type === "user" ? cleanUserText(text) : clip(String(text ?? "").trim(), LIMIT.assistant);
+    const clean = d.type === "user" ? cleanUserText(text) : cleanAssistantText(text);
     if (!clean) continue;
     turns.push({ role: d.type, text: clean });
   }
@@ -113,7 +109,7 @@ function readDsh(lines) {
       .filter((p) => p?.type === "text" && typeof p.text === "string")
       .map((p) => p.text)
       .join("\n");
-    const clean = role === "user" ? cleanUserText(text) : clip(String(text ?? "").trim(), LIMIT.assistant);
+    const clean = role === "user" ? cleanUserText(text) : cleanAssistantText(text);
     if (!clean) continue;
     turns.push({ role, text: clean });
   }

@@ -18,7 +18,8 @@
   },
   "extract": {
     "minTurnChars": 25,
-    "maxExchangesPerCall": 12,
-    "maxEntriesPerSession": 6
+    "maxCharsPerCall": 16000,
+    "maxEntriesPerBatch": 6,
+    "maxEntriesPerSession": 60
   }
 }

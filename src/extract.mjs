@@ -15,13 +15,23 @@ const INJECT_PREFIX = "plugin:";
 
 export function normalizeTurns(turns) {
   const out = [];
+  const push = (role, text) => {
+    const last = out[out.length - 1];
+    // 相邻同角色合并：日志里一条回复常被拆成多个事件（流式、分段发送），
+    // 一条提问也可能连着两条。当成两轮处理，第二条会因为没有配对而被整段丢掉。
+    if (last && last.role === role) {
+      last.text = `${last.text}\n\n${text}`;
+      return;
+    }
+    out.push({ role, text });
+  };
   for (const t of turns ?? []) {
     const role = t?.role ?? t?.type;
     if (role !== "user" && role !== "assistant") continue;
     if (t?.source?.kind && String(t.source.kind).startsWith(INJECT_PREFIX)) continue;
     const text = String(t?.text ?? "").trim();
     if (!text) continue;
-    out.push({ role, text });
+    push(role, text);
   }
   return out;
 }
@@ -91,10 +101,96 @@ function parseEntries(raw) {
     .filter((x) => x.text.length >= 8);
 }
 
-async function callModel(cfg, exchanges) {
-  const dialog = exchanges
-    .map((e, i) => `#${i + 1}\n用户：${e.q}\n助手：${e.a || "（无回复）"}`)
+/** 一次调用塞多少字符。中文约 1 字 0.62 token，16000 字约一万 token，余量足够。 */
+const DEFAULT_MAX_CHARS = 16000;
+/** 单次请求的硬上限，纯兜底：分批逻辑保证永远碰不到。 */
+const HARD_MAX_CHARS = 180000;
+
+function render(exchanges) {
+  return exchanges
+    .map((e, i) => {
+      const note = e.note ? `${e.note}\n` : "";
+      return `#${i + 1}\n${note}用户：${e.q}\n助手：${e.a || "（无回复）"}`;
+    })
     .join("\n\n");
+}
+
+/** 按段落切，单段仍超长时硬切。拼起来必须等于原文。 */
+function paragraphs(text, budget) {
+  const out = [];
+  let buf = "";
+  for (const line of String(text).split("\n")) {
+    if (buf.length + line.length + 1 > budget && buf) {
+      out.push(buf);
+      buf = "";
+    }
+    if (line.length > budget) {
+      if (buf) {
+        out.push(buf);
+        buf = "";
+      }
+      for (let i = 0; i < line.length; i += budget) out.push(line.slice(i, i + budget));
+      continue;
+    }
+    buf = buf ? `${buf}\n${line}` : line;
+  }
+  if (buf) out.push(buf);
+  return out.length ? out : [""];
+}
+
+/**
+ * 一条问答本身就超过一次调用的预算时，按内容切成几段，分别送。
+ *
+ * 切不是丢：所有段拼起来就是原文。会走到这里的多半是整段粘贴——日志、报错、长文档，
+ * 这时提问和回答的配对已经没意义了，逐段看反而更容易挑出结论。
+ */
+function splitExchange(e, budget) {
+  const segs = [];
+  const qParts = paragraphs(e.q, budget);
+  for (const seg of qParts) segs.push({ q: seg, a: "", note: "（这一轮的长提问，分段）" });
+  if (e.a) {
+    for (const seg of paragraphs(e.a, budget)) {
+      segs.push({ q: "（同一轮的长回复，接上段）", a: seg, note: "（按段读）" });
+    }
+  }
+  return segs;
+}
+
+/** 按字符预算分批，一条都不落。 */
+export function planBatches(exchanges, budget = DEFAULT_MAX_CHARS) {
+  const out = [];
+  let cur = [];
+  let size = 0;
+  const flush = () => {
+    if (cur.length) out.push(cur);
+    cur = [];
+    size = 0;
+  };
+  for (const e of exchanges) {
+    const one = render([e]).length;
+    if (one > budget) {
+      flush();
+      for (const seg of splitExchange(e, budget)) {
+        cur.push(seg);
+        size += render([seg]).length;
+        if (size >= budget) flush();
+      }
+      flush();
+      continue;
+    }
+    if (size + one > budget) flush();
+    cur.push(e);
+    size += one;
+  }
+  flush();
+  return out;
+}
+
+async function callModel(cfg, batch) {
+  const dialog = render(batch);
+  if (dialog.length > HARD_MAX_CHARS) {
+    throw new Error(`一批 ${dialog.length} 字，超过单次上限，分批有 bug`);
+  }
 
   const res = await fetch(`${cfg.model.baseUrl.replace(/\/+$/, "")}/chat/completions`, {
     method: "POST",
@@ -107,7 +203,7 @@ async function callModel(cfg, exchanges) {
       temperature: 0.2,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: dialog.slice(0, 24000) },
+        { role: "user", content: dialog },
       ],
     }),
     signal: AbortSignal.timeout(cfg.model.timeoutMs ?? 45000),
@@ -160,25 +256,60 @@ function heuristicEntries(exchanges, fallbackEntity, limit) {
   return out;
 }
 
+/** 同一句话被两批都抽到时留置信度高的那条。 */
+function mergeEntries(all, limit) {
+  const seen = new Map();
+  for (const e of all) {
+    const key = e.text.replace(/\s+/g, "").slice(0, 40);
+    const prev = seen.get(key);
+    if (!prev || (e.confidence ?? 0) > (prev.confidence ?? 0)) seen.set(key, e);
+  }
+  const merged = [...seen.values()].sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
+  return { entries: merged.slice(0, limit), dropped: Math.max(0, merged.length - limit) };
+}
+
 /**
  * @param {object} cfg
- * @param {{q:string,a:string}[]} exchanges
+ * @param {{q:string,a:string,note?:string}[]} exchanges
  * @param {{fallbackEntity?:string, useModel?:boolean}} opts
  */
 export async function extractEntries(cfg, exchanges, opts = {}) {
-  const limit = cfg.extract?.maxEntriesPerSession ?? 6;
-  const useModel = opts.useModel !== false && Boolean(cfg.model?.apiKey);
-  if (!exchanges.length) return { entries: [], mode: "empty" };
+  if (!exchanges.length) return { entries: [], mode: "empty", batches: 0, dropped: 0 };
 
-  const batch = exchanges.slice(-(cfg.extract?.maxExchangesPerCall ?? 12));
+  const budget = cfg.extract?.maxCharsPerCall ?? DEFAULT_MAX_CHARS;
+  const perBatch = cfg.extract?.maxEntriesPerBatch ?? 6;
+  // 会话上限只是防噪音，不是省钱手段。撞到了要报出来，不能默默扔掉。
+  const perSession = cfg.extract?.maxEntriesPerSession ?? 60;
+  const useModel = opts.useModel !== false && Boolean(cfg.model?.apiKey);
+  const plan = planBatches(exchanges, budget);
+
   if (!useModel) {
-    return { entries: heuristicEntries(batch, opts.fallbackEntity ?? "", limit), mode: "heuristic" };
+    // 规则模式能力有限，每批只取 1 条，但每批都过一遍，不跳过任何一段对话。
+    const all = [];
+    for (const batch of plan) all.push(...heuristicEntries(batch, opts.fallbackEntity ?? "", 1));
+    const { entries, dropped } = mergeEntries(all, perSession);
+    return { entries, mode: "heuristic", batches: plan.length, dropped };
   }
-  try {
-    const entries = await callModel(cfg, batch);
-    return { entries: entries.slice(0, limit), mode: "model" };
-  } catch (e) {
-    const fallback = heuristicEntries(batch, opts.fallbackEntity ?? "", limit);
-    return { entries: fallback, mode: "heuristic-after-error", error: e.message };
+
+  const all = [];
+  let failures = 0;
+  let lastError = "";
+  for (const batch of plan) {
+    try {
+      all.push(...(await callModel(cfg, batch)).slice(0, perBatch));
+    } catch (e) {
+      failures++;
+      lastError = e.message;
+      all.push(...heuristicEntries(batch, opts.fallbackEntity ?? "", 1));
+    }
   }
+  const { entries, dropped } = mergeEntries(all, perSession);
+  const mode = failures === 0 ? "model" : failures === plan.length ? "heuristic-after-error" : "partial";
+  return {
+    entries,
+    mode,
+    batches: plan.length,
+    dropped,
+    error: failures ? `${failures}/${plan.length} 批失败：${lastError}` : undefined,
+  };
 }
