@@ -1,18 +1,20 @@
 #!/usr/bin/env node
-import { statSync } from "node:fs";
-import { loadConfig, loadOffsets, saveOffsets, CONFIG_PATH, INBOX_DIR, hasModel } from "./config.mjs";
-import { SiYuan } from "./siyuan.mjs";
-import { Store, formatHits } from "./store.mjs";
-import { normalizeTurns, toExchanges, extractEntries } from "./extract.mjs";
-import { pending, readSession, archive, drop } from "./inbox.mjs";
+import { CONFIG_PATH, INBOX_DIR, hasModel } from "./config.mjs";
+import { formatHits } from "./store.mjs";
+import { normalizeTurns, toExchanges } from "./extract.mjs";
+import { pending } from "./inbox.mjs";
 import { readLog, readJsonLines, auditMessages, HARNESS_NAMES } from "./readers/index.mjs";
 import { listSessions, summarize } from "./harness.mjs";
+import { open, enqueueLog, processQueue } from "./jobs.mjs";
+import { serve, acquire, release, lockInfo, LOG_PATH } from "./serve.mjs";
 
 const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 
   mem init [--force]           建笔记本和三个文档（幂等；--force 丢掉 id 缓存重解析）
-  mem status                   连通性、条目数、待处理队列长度
-  mem once [--dry] [--no-model] 处理 inbox 里的全部会话
+  mem status                   连通性、条目数、队列长度、服务是否在跑
+  mem once [--dry] [--no-model] 处理 inbox 里的全部会话（跑的期间占锁）
+  mem serve [--once]           常驻：每轮找新会话 → 投队列 → 写思源
+      [--interval 分钟] [--dry] [--no-model] [--force]
   mem ingest <file.json>       把一个会话文件投入队列（测试用）
   mem ingest-log <日志>        直接读 harness 的会话日志入队
   mem scan [--n 3] [--all]     列出本机各 harness 的会话（--all 逐个读一遍数轮数）
@@ -25,10 +27,11 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 
 配置：${CONFIG_PATH}
 队列：${INBOX_DIR}
+服务日志：${LOG_PATH}
 `;
 
 /** 只有这几个键吃后面的值，其余 --xxx 一律当布尔，免得 "search --all 风盾" 把查询词吃掉。 */
-const VALUED = new Set(["entity", "type", "confidence", "limit", "format", "n"]);
+const VALUED = new Set(["entity", "type", "confidence", "limit", "format", "n", "interval"]);
 
 function parseArgs(argv) {
   const flags = {};
@@ -52,14 +55,7 @@ function parseArgs(argv) {
 }
 
 function make() {
-  const cfg = loadConfig();
-  const sy = new SiYuan({
-    baseUrl: cfg.siyuan.baseUrl,
-    token: cfg.siyuan.token,
-    // 注入路径要能快速放弃，不要卡住对话；写路径慢一点没关系。
-    timeoutMs: 5000,
-  });
-  return { cfg, sy, store: new Store(sy, cfg) };
+  return open();
 }
 
 async function cmdInit(flags) {
@@ -73,78 +69,50 @@ async function cmdStatus() {
   const { cfg, sy, store } = make();
   const version = await sy.version();
   const stats = await store.stats();
+  const svc = lockInfo();
+  const svcLine = svc.running
+    ? `运行中 pid ${svc.pid}，第 ${svc.round ?? 0} 轮，心跳 ${new Date(svc.at ?? Date.now()).toLocaleTimeString("zh-CN", { hour12: false })}`
+    : svc.pid
+      ? `锁是孤的（pid ${svc.pid} 已经不在了，下次启动会自动接管）`
+      : "未运行（mem serve 启动它）";
   console.log(`思源         ${cfg.siyuan.baseUrl}  v${version}`);
   console.log(`笔记本       ${cfg.siyuan.notebook}`);
   console.log(`条目         current ${stats.current ?? 0} / superseded ${stats.superseded ?? 0}`);
   console.log(`模型         ${hasModel(cfg) ? cfg.model.name : "未配置（走规则抽取）"}`);
   console.log(`待处理       ${pending().length} 个会话在队列里`);
+  console.log(`服务         ${svcLine}`);
 }
 
 async function cmdOnce(flags) {
-  const { cfg, store } = make();
-  const files = pending();
-  if (!files.length) {
-    console.log("队列是空的。");
-    return;
-  }
-  let written = 0;
-  let skipped = 0;
-  let failed = 0;
-
-  for (const file of files) {
-    let payload;
-    try {
-      payload = readSession(file);
-    } catch (e) {
-      console.error(`  ! 读不出来，跳过：${file}（${e.message}）`);
-      failed++;
-      continue;
-    }
-    const turns = normalizeTurns(payload.turns ?? payload.events ?? []);
-    const exchanges = toExchanges(turns, cfg.extract.minTurnChars);
-    if (!exchanges.length) {
-      if (!flags.dry) archive(file);
-      skipped++;
-      continue;
-    }
-    const fallbackEntity = (payload.cwd ?? "").split("/").filter(Boolean).pop() ?? "";
-    const { entries, mode, error, batches, dropped } = await extractEntries(cfg, exchanges, {
-      fallbackEntity,
+  // 手动跑也占同一把锁：思源没有行级合并，两个进程同时写会整块覆盖。
+  acquire({ log: console.log });
+  try {
+    const sum = await processQueue({
+      dry: Boolean(flags.dry),
       useModel: !flags["no-model"],
+      onLine: console.log,
     });
-    if (error) console.error(`  ! 模型失败，退回规则：${error}`);
-
-    const batchNote = batches > 1 ? ` / ${batches} 批` : "";
-    console.log(`${payload.session_id ?? "?"}  ${exchanges.length} 轮${batchNote}  ${mode}  抽出 ${entries.length} 条`);
-    if (dropped) console.log(`    · 超出单会话上限，${dropped} 条没写（调 extract.maxEntriesPerSession 可放开）`);
-    for (const e of entries) {
-      if (flags.dry) {
-        console.log(`    [${e.entity || "-"}] ${e.text}`);
-        continue;
-      }
-      try {
-        const r = await store.writeEntry(e, {
-          source: payload.harness ?? "",
-          session: payload.session_id ?? "",
-          date: payload.date ?? "",
-        });
-        if (r.duplicate) skipped++;
-        else {
-          written++;
-          console.log(`    + [${e.entity || "-"}] ${e.text}`);
-        }
-      } catch (err) {
-        failed++;
-        console.error(`    ! 写入失败：${err.message}`);
-      }
+    if (!sum.sessions) {
+      console.log("队列是空的。");
+      return;
     }
-    // 归档意味着原文出队，之后再也拿不回。所以只有"正常处理完"才归档：
-    // 模型挂了退回规则抽取时留在队列里，等模型恢复重跑（writeEntry 自带去重，重跑安全）。
-    const degraded = mode === "heuristic-after-error" || mode === "partial";
-    if (!flags.dry && failed === 0 && !degraded) archive(file);
-    else if (degraded) console.log("    · 抽取没跑完整，原文留在队列里，下次重试");
+    console.log(`\n写入 ${sum.written}，跳过 ${sum.skipped}，失败 ${sum.failed}`);
+    if (sum.degraded) console.log(`${sum.degraded} 个会话抽取不完整，原文留在队列里等重试。`);
+    if (sum.failed) process.exitCode = 1;
+  } finally {
+    release();
   }
-  console.log(`\n写入 ${written}，跳过 ${skipped}，失败 ${failed}`);
+}
+
+async function cmdServe(flags) {
+  const minutes = Number(flags.interval);
+  return serve({
+    once: Boolean(flags.once),
+    dry: Boolean(flags.dry),
+    useModel: !flags["no-model"],
+    force: Boolean(flags.force),
+    intervalMs: Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : undefined,
+  });
 }
 
 async function cmdIngest(args) {
@@ -158,40 +126,16 @@ async function cmdIngest(args) {
 async function cmdIngestLog(flags, args) {
   const file = args[0];
   if (!file) throw new Error("要给一个日志文件路径");
-  const log = readLog(file, flags.format === true ? "" : flags.format ?? "");
-  if (!log.turns.length) {
-    console.log(log.skipped === "subagent"
-      ? "这是子代理会话（归属于另一个会话），不进记忆。"
-      : "这条日志里没有能用的问答。");
+
+  const r = enqueueLog(file, { format: flags.format === true ? "" : flags.format ?? "" });
+  if (!r.added) {
+    if (r.reason === "subagent") console.log("这是子代理会话（归属于另一个会话），不进记忆。");
+    else if (r.reason === "empty") console.log("这条日志里没有能用的问答。");
+    else console.log(`${r.harness}  没有新内容（上次读到第 ${r.before} 轮）`);
     return;
   }
-
-  // 增量：只投上次之后新增的部分。会话是 append-only 的，位置就是进度。
-  // 文件变短说明被重写或轮转过，那就从头再来。
-  const offsets = loadOffsets();
-  const st = statSync(file);
-  const prev = offsets[file];
-  const fresh = prev && st.size >= prev.bytes && log.turns.length >= prev.turns;
-  const turns = fresh ? log.turns.slice(prev.turns) : log.turns;
-  const before = log.turns.length - turns.length;
-
-  if (!turns.length) {
-    console.log(`${log.harness}  没有新内容（上次读到第 ${prev.turns} 轮）`);
-    return;
-  }
-
-  const target = drop({
-    session_id: log.sessionId || `log-${Date.now()}`,
-    harness: log.harness,
-    cwd: log.cwd,
-    date: new Date().toISOString().slice(0, 10),
-    turns,
-  });
-  offsets[file] = { bytes: st.size, turns: log.turns.length, at: Date.now() };
-  saveOffsets(offsets);
-
-  const note = before ? `（跳过前 ${before} 轮已读过的）` : "";
-  console.log(`${log.harness}  新增 ${turns.length} 轮${note}  ${target}`);
+  const note = r.before ? `（跳过前 ${r.before} 轮已读过的）` : "";
+  console.log(`${r.harness}  新增 ${r.added} 轮${note}  ${r.target}`);
 }
 
 function mb(n) {
@@ -373,6 +317,8 @@ async function main() {
       return cmdStatus();
     case "once":
       return cmdOnce(flags);
+    case "serve":
+      return cmdServe(flags);
     case "ingest":
       return cmdIngest(rest);
     case "ingest-log":
