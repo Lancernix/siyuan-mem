@@ -9,6 +9,7 @@ import { loadCatalog, loadCatalogSync, wireOf, findProvider, modelInfo } from ".
 import { formatHits, ATTR } from "./store.mjs";
 import { readRange, listParts, parsePtr } from "./raw.mjs";
 import { loadEntities, addEntity, mergeEntities, applyPending, shotList } from "./entities.mjs";
+import { print as printDigest } from "./digest.mjs";
 import { normalizeTurns, toExchanges } from "./extract.mjs";
 import { pending } from "./inbox.mjs";
 import { readLog, readJsonLines, auditMessages, HARNESS_NAMES } from "./readers/index.mjs";
@@ -34,6 +35,7 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
   mem search --all <词...>     查记忆，含已过时的
   mem review [n]               列最近 n 条，人工扫一眼
   mem show <块id> [--chars N]   看这条结论对应的原文（按指针回读附件里那几轮）
+  mem digest                   按会话分组打印记忆（给人读的那一层；不写库）
   mem raw list [会话id]        看原文归档了哪些 part
   mem entity [list [词]]       看实体表
   mem entity add <名> [--alias "别名1|别名2"]
@@ -635,6 +637,12 @@ function attrOf(ial, key) {
   return new RegExp(`${key}="([^"]*)"`).exec(ial ?? "")?.[1] ?? "";
 }
 
+async function cmdDigest() {
+  const { sy, store } = make();
+  const ids = await store.docIds();
+  await printDigest({ sy, ids, out: (s) => console.log(s) });
+}
+
 async function cmdShow(args, flags) {
   const id = args[0];
   if (!id) throw new Error("要一个条目块 id：mem review 里能看到");
@@ -814,6 +822,8 @@ async function main() {
       return cmdReview(rest);
     case "show":
       return cmdShow(rest, flags);
+    case "digest":
+      return cmdDigest();
     case "raw":
       return cmdRaw(rest);
     case "entity":
