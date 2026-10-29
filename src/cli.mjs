@@ -4,7 +4,8 @@ import { SiYuan } from "./siyuan.mjs";
 import { Store, formatHits } from "./store.mjs";
 import { normalizeTurns, toExchanges, extractEntries } from "./extract.mjs";
 import { pending, readSession, archive, drop } from "./inbox.mjs";
-import { readLog } from "./readers.mjs";
+import { readLog, HARNESS_NAMES } from "./readers.mjs";
+import { listSessions, summarize } from "./harness.mjs";
 
 const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 
@@ -12,7 +13,8 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
   mem status                   连通性、条目数、待处理队列长度
   mem once [--dry] [--no-model] 处理 inbox 里的全部会话
   mem ingest <file.json>       把一个会话文件投入队列（测试用）
-  mem ingest-log <日志>        直接读 harness 的会话日志入队（workbuddy|claude|dsh）
+  mem ingest-log <日志>        直接读 harness 的会话日志入队
+  mem scan [--n 3] [--all]     列出本机各 harness 的会话（--all 逐个读一遍数轮数）
   mem search <词...>           查记忆，默认只看 current
   mem search --all <词...>     查记忆，含已过时的
   mem review [n]               列最近 n 条，人工扫一眼
@@ -24,7 +26,7 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 `;
 
 /** 只有这几个键吃后面的值，其余 --xxx 一律当布尔，免得 "search --all 风盾" 把查询词吃掉。 */
-const VALUED = new Set(["entity", "type", "confidence", "limit", "format"]);
+const VALUED = new Set(["entity", "type", "confidence", "limit", "format", "n"]);
 
 function parseArgs(argv) {
   const flags = {};
@@ -169,6 +171,59 @@ async function cmdIngestLog(flags, args) {
   console.log(`${log.harness}   ${log.turns.length} 轮   ${target}`);
 }
 
+function mb(n) {
+  return n >= 1048576 ? `${(n / 1048576).toFixed(1)}MB` : `${Math.max(1, Math.round(n / 1024))}KB`;
+}
+
+function ago(ts) {
+  const d = Math.floor((Date.now() - ts) / 86400000);
+  if (d <= 0) return "今天";
+  if (d === 1) return "昨天";
+  return `${d} 天前`;
+}
+
+/** 读一个文件，返回轮数和字符数；读不了就说明原因。 */
+function probe(file) {
+  try {
+    const log = readLog(file);
+    const turns = normalizeTurns(log.turns);
+    const ex = toExchanges(turns, 25);
+    const chars = ex.reduce((n, e) => n + e.q.length + e.a.length, 0);
+    return { harness: log.harness, turns: turns.length, exchanges: ex.length, chars };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+async function cmdScan(flags) {
+  const sessions = listSessions(flags.harness === true ? "" : flags.harness ?? "");
+  if (!sessions.length) {
+    console.log("一个会话都没找到。看看 ROOTS 里那几条路径对不对。");
+    return;
+  }
+  const n = Number(flags.n ?? 3);
+  for (const g of summarize(sessions)) {
+    const rows = sessions.filter((s) => s.harness === g.harness);
+    console.log(`\n${g.harness.padEnd(10)} ${String(g.count).padStart(3)} 个会话  ${mb(g.bytes).padStart(8)}  最新 ${ago(g.newest)}`);
+    const pick = flags.all ? rows : rows.slice(0, n);
+    for (const s of pick) {
+      const r = probe(s.file);
+      const name = s.file.replace(process.env.HOME, "~");
+      if (r.error) {
+        console.log(`  ✗ ${mb(s.size).padStart(7)}  ${name}`);
+        console.log(`      ${r.error}`);
+        continue;
+      }
+      // 格式名和目录名不一致，说明嗅探把这家认成了别家——这条要修。
+      const mark = r.harness === s.harness ? "" : `  ← 嗅探成 ${r.harness}`;
+      console.log(`  · ${mb(s.size).padStart(7)}  ${String(r.turns).padStart(5)} 轮  ${(r.chars / 1000).toFixed(0).padStart(5)}k 字  ${name}${mark}`);
+    }
+    if (!flags.all && rows.length > pick.length) console.log(`  …还有 ${rows.length - pick.length} 个（--all 全读）`);
+  }
+  console.log(`\n共 ${sessions.length} 个会话，${mb(sessions.reduce((n, s) => n + s.size, 0))}。`);
+  console.log(`支持格式：${HARNESS_NAMES.join(" / ")}`);
+}
+
 async function cmdSearch(flags, words) {
   const { store } = make();
   const q = words.join(" ");
@@ -221,6 +276,8 @@ async function main() {
       return cmdIngest(rest);
     case "ingest-log":
       return cmdIngestLog(flags, rest);
+    case "scan":
+      return cmdScan(flags);
     case "search":
       return cmdSearch(flags, rest);
     case "review":
