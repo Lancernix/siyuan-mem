@@ -210,10 +210,14 @@ dsh --profile desktop --dump-config   # 确认它出现在配置树里
 ### 单文件二进制（可选）
 
 ```bash
-bun build src/cli.mjs --compile --outfile ~/.siyuan-mem/mem    # 68MB，0.2 秒
+npm run dist      # 打包 → 对账 → 装到 ~/.siyuan-mem/mem
 ```
 
-有 bun 的话，一条命令把整个 CLI 编成一个可执行文件，启动 20-30ms，行为跟 node 版一致（`status`、`scan`、`serve` 都验过）。好处是 launchd 直接指向它，不依赖任何运行时，换机器拷贝一个文件就能跑。代价是产物 68MB、每次改代码要重新编。没有 bun 就用上面的 mise shim，够用。
+`dist` 不只编译，还要**自证**：产物跑一遍 `audit --all`，跟 node 的结果逐字比对，对不上就不落盘。理由是 bun 的 `node:zlib`、`node:fs` 是重实现，我们被「`zstdDecompressSync` 只解第一帧、1MB 解出 243 字节还不报错」坑过一次——静默吞掉半段语料比直接崩更难查。
+
+实测（bun 1.4.4）：106 个会话、368 万字，node 与产物的 `audit --all` 逐字一致，逐会话 sha256 也一致（含 DSH 的多帧 zstd）。产物 85MB（bun 1.4.4 本体 85MB，1.4.3 时是 67MB），启动 30ms，在 launchd 那种最小环境（`env -i`、cwd=`/`）下也能读全。
+
+代价是运行时被焊死在产物里：升级 bun 之后必须重新 `npm run dist`。没有 bun 就用上面的 mise shim，够用。
 
 ## 已经踩过的坑
 
