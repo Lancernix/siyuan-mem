@@ -1,30 +1,43 @@
 /**
- * 模型调用层：OpenAI 兼容的 chat.completions，走官方 SDK。
+ * 模型调用层：三种协议、一个接口。
  *
- * 为什么最后用了 SDK：重试（429/408/409/5xx、认 retry-after）、超时、代理、
- * keep-alive、错误分类这些 HTTP 细节它都做过了，而且是零传递依赖、纯 JS，
- * 编译进单文件只多 1MB（85→86MB，bun 会 tree-shake）。自己写这 40 行不值。
+ *   openai     /chat/completions           —— DeepSeek、通义、Kimi、智谱、OpenRouter、ollama、LM Studio
+ *   anthropic  /v1/messages                —— Claude
+ *   gemini     /models/{m}:generateContent —— Gemini
  *
- * 但 SDK 替不掉三件事，所以外面还包一层：
- *   1. JSON 模式不可用时自动回退：有些实现不认 response_format，回 400 时把字段
- *      去掉重发一次，而不是让整段会话降级成规则抽取。
- *   2. 按调用打 tag 的用量账本：SDK 只返回 usage，不知道那是"抽取"还是"自证"。
- *   3. provider 预设与免 key 的本地部署（ollama/lmstudio 不收 key）。
+ * 三层分工，别混：
+ *   wire/*.mjs  只管"这种协议怎么拼请求、怎么读回复"；
+ *   llm.mjs     管策略：重试、JSON 模式回退、用量记账、provider 预设；
+ *   调用方      只给 messages，拿 {text, usage}。
+ *
+ * 为什么 openai 用官方 SDK、另两家手写：SDK 只对同一种形状有收益，而且它零传递
+ * 依赖、纯 JS，编进单文件只多 1MB；Anthropic / Gemini 的请求体差异太大（system
+ * 是顶层字段、模型名在路径里、角色叫 model、token 字段名字不同），各自五六十行
+ * 写完，比再装两个 SDK 更好审。三者都懒加载：不碰模型的命令启动不受影响。
  */
 import { appendFileSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { HOME_DIR, CONFIG_PATH, ensureDirs } from "./config.mjs";
 
-/** 各家预设。baseUrl 写到版本号为止，SDK 自己拼 /chat/completions。 */
+/** 各家预设。baseUrl 写到版本号为止，具体路径由 wire 拼。 */
 export const PROVIDERS = {
-  deepseek: { baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat", jsonMode: true },
-  qwen: { baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus", jsonMode: true },
-  moonshot: { baseUrl: "https://api.moonshot.cn/v1", model: "moonshot-v1-32k", jsonMode: true },
-  zhipu: { baseUrl: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-plus", jsonMode: true },
-  openai: { baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini", jsonMode: true },
-  openrouter: { baseUrl: "https://openrouter.ai/api/v1", model: "deepseek/deepseek-chat", jsonMode: true },
-  ollama: { baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5:14b", jsonMode: false, keyless: true },
-  lmstudio: { baseUrl: "http://127.0.0.1:1234/v1", model: "local-model", jsonMode: false, keyless: true },
+  deepseek: { wire: "openai", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat", jsonMode: true },
+  qwen: { wire: "openai", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus", jsonMode: true },
+  moonshot: { wire: "openai", baseUrl: "https://api.moonshot.cn/v1", model: "moonshot-v1-32k", jsonMode: true },
+  zhipu: { wire: "openai", baseUrl: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-plus", jsonMode: true },
+  openai: { wire: "openai", baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini", jsonMode: true },
+  openrouter: { wire: "openai", baseUrl: "https://openrouter.ai/api/v1", model: "deepseek/deepseek-chat", jsonMode: true },
+  anthropic: { wire: "anthropic", baseUrl: "https://api.anthropic.com/v1", model: "claude-sonnet-4-6", jsonMode: false },
+  gemini: { wire: "gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-3.5-flash", jsonMode: true },
+  ollama: { wire: "openai", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5:14b", jsonMode: false, keyless: true },
+  lmstudio: { wire: "openai", baseUrl: "http://127.0.0.1:1234/v1", model: "local-model", jsonMode: false, keyless: true },
+};
+
+/** 协议名 → 模块。懒加载，谁用谁拉。 */
+const WIRES = {
+  openai: () => import("./wire/openai.mjs"),
+  anthropic: () => import("./wire/anthropic.mjs"),
+  gemini: () => import("./wire/gemini.mjs"),
 };
 
 export const USAGE_PATH = join(HOME_DIR, "usage.jsonl");
@@ -34,13 +47,16 @@ export function resolveModel(cfg) {
   const m = cfg?.model ?? {};
   const preset = PROVIDERS[m.provider] ?? null;
   return {
+    provider: m.provider ?? "custom",
+    wire: m.wire || preset?.wire || "openai",
     baseUrl: (m.baseUrl || preset?.baseUrl || "").replace(/\/+$/, ""),
     model: m.name || preset?.model || "",
     apiKey: m.apiKey || "",
     jsonMode: m.jsonMode ?? preset?.jsonMode ?? false,
     timeoutMs: m.timeoutMs ?? 45_000,
     retries: m.retries ?? 3,
-    provider: m.provider ?? "custom",
+    anthropicVersion: m.anthropicVersion,
+    temperature: m.temperature,
   };
 }
 
@@ -49,22 +65,6 @@ export function hasModel(cfg) {
   const m = resolveModel(cfg);
   const keyless = PROVIDERS[m.provider]?.keyless;
   return Boolean(m.baseUrl && m.model && (m.apiKey || keyless));
-}
-
-/**
- * SDK 是懒加载的：顶层 import 要 880ms（node）/ 170ms（bun 产物），而 CLI 大多数
- * 命令根本不碰模型（status/scan/search）。为了这点把每条命令都拖慢一个数量级不值得。
- */
-export async function makeClient(cfg) {
-  const { default: OpenAI } = await import("openai");
-  const m = resolveModel(cfg);
-  const keyless = PROVIDERS[m.provider]?.keyless;
-  return new OpenAI({
-    apiKey: m.apiKey || (keyless ? "not-needed" : ""),
-    baseURL: m.baseUrl || undefined,
-    maxRetries: m.retries,
-    timeout: m.timeoutMs,
-  });
 }
 
 function record(entry) {
@@ -98,66 +98,89 @@ export function usageToday() {
   return out;
 }
 
-const JSON_MODE_REJECTED = /response_format|json_object|json mode|json mode is not/i;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 服务端拒 JSON 模式时的措辞各家不同，一起匹配。 */
+const JSON_MODE_REJECTED = /response_format|json_object|json mode|responseMimeType|response_mime_type/i;
+
+/**
+ * 重试策略三家统一：429/408/409/5xx 退避重试（认 retry-after），4xx 其余立刻抛。
+ * 统一在策略层而不是各家 adapter 里，否则"试了几次"在不同 provider 之间不可比。
+ */
+async function withRetry(m, adapter, opts) {
+  const tries = Math.max(0, m.retries) + 1;
+  let last;
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    try {
+      return { ...(await adapter.send(m, opts)), attempts: attempt };
+    } catch (e) {
+      last = e;
+      if (!e.retryable || attempt === tries) break;
+      await sleep(e.retryAfterMs ?? Math.min(30_000, 800 * 2 ** (attempt - 1)));
+    }
+  }
+  throw last;
+}
 
 /**
  * 一次 chat 调用。
  *
- * 重试交给 SDK（maxRetries），我们只处理"这个实现不支持 JSON 模式"这一种可恢复错误：
- * 去掉 response_format 重发一次。它不算配置错误，也不该让整段会话降级。
+ * JSON 模式被拒时去掉该能力重发一次，不算失败：那是服务端不支持，不是配置错，
+ * 也不该让整段会话降级成规则抽取。
  */
 export async function chat(cfg, { messages, json = false, maxTokens, tag = "" } = {}) {
   const m = resolveModel(cfg);
   if (!hasModel(cfg)) throw new Error("没有配置模型：mem model use <provider> --key ...");
+  const loader = WIRES[m.wire];
+  if (!loader) throw new Error(`不认识的协议：${m.wire}（可用：${Object.keys(WIRES).join(", ")}）`);
+  const adapter = await loader();
 
-  const api = await makeClient(cfg);
-  const base = {
-    model: m.model,
-    temperature: 0.2,
-    messages,
-    ...(maxTokens ? { max_tokens: maxTokens } : {}),
-  };
-  const t0 = Date.now();
-  let wantJson = json && m.jsonMode;
+  let wantJson = json && m.jsonMode && adapter.caps.json;
+  const opts = { messages, json: wantJson, maxTokens, temperature: m.temperature };
   let fallback = false;
-
-  const call = (withJson) =>
-    api.chat.completions.create({ ...base, ...(withJson ? { response_format: { type: "json_object" } } : {}) });
+  const t0 = Date.now();
 
   let res;
   try {
-    res = await call(wantJson);
+    res = await withRetry(m, adapter, opts);
   } catch (e) {
-    if (wantJson && e?.status === 400 && JSON_MODE_REJECTED.test(e?.message ?? "")) {
-      wantJson = false;
+    if (wantJson && e.status === 400 && JSON_MODE_REJECTED.test(e.message)) {
       fallback = true;
       try {
-        res = await call(false);
+        res = await withRetry(m, adapter, { ...opts, json: false });
       } catch (e2) {
-        record({ at: new Date().toISOString(), model: m.model, tag, error: describe(e2) });
+        record({ at: new Date().toISOString(), model: m.model, wire: m.wire, tag, error: describe(e2) });
         throw new Error(`模型调用失败：${describe(e2)}`);
       }
     } else {
-      record({ at: new Date().toISOString(), model: m.model, tag, error: describe(e) });
+      record({ at: new Date().toISOString(), model: m.model, wire: m.wire, tag, error: describe(e) });
       throw new Error(`模型调用失败：${describe(e)}`);
     }
   }
 
   const out = {
-    text: res.choices?.[0]?.message?.content ?? "",
-    usage: { prompt: res.usage?.prompt_tokens ?? 0, completion: res.usage?.completion_tokens ?? 0 },
+    text: res.text,
+    usage: res.usage,
+    attempts: res.attempts,
     jsonFallback: fallback,
+    wire: m.wire,
     ms: Date.now() - t0,
   };
-  record({ at: new Date().toISOString(), model: m.model, tag, ...out.usage, ms: out.ms, ...(fallback ? { fallback } : {}) });
+  record({
+    at: new Date().toISOString(),
+    model: m.model,
+    wire: m.wire,
+    tag,
+    ...res.usage,
+    ms: out.ms,
+    ...(fallback ? { fallback } : {}),
+  });
   return out;
 }
 
-/** SDK 的错误信息带上状态码和响应正文，别只丢一句 "Request failed"。 */
 function describe(e) {
-  if (e?.name === "APIConnectionTimeoutError") return `超时：${e.message}`;
-  if (e?.name === "APIConnectionError") return `网络错误：${e.message}`;
-  if (typeof e?.status === "number") return `HTTP ${e.status}：${(e.message ?? "").slice(0, 300)}`;
+  if (e?.status) return `HTTP ${e.status}：${(e.message ?? "").slice(0, 300)}`;
+  if (e?.name === "APIConnectionTimeoutError" || e?.name === "TimeoutError") return `超时：${e.message}`;
   return e?.message ?? String(e);
 }
 
@@ -184,7 +207,7 @@ export async function probe(cfg) {
 }
 
 /** 把预设写进配置。key 只写进 home 下的 config.json（0600），不进项目目录。 */
-export function saveModelChoice(provider, { apiKey, model } = {}) {
+export function saveModelChoice(provider, { apiKey, model, wire } = {}) {
   const preset = PROVIDERS[provider];
   if (!preset) throw new Error(`不认识的 provider：${provider}。可选：${Object.keys(PROVIDERS).join(", ")}`);
   ensureDirs();
@@ -193,6 +216,7 @@ export function saveModelChoice(provider, { apiKey, model } = {}) {
   cfg.model = {
     ...(cfg.model ?? {}),
     provider,
+    wire: wire || preset.wire,
     baseUrl: preset.baseUrl,
     name: model || preset.model,
     ...(apiKey ? { apiKey } : {}),
