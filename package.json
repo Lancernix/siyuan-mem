@@ -1,0 +1,17 @@
+{
+  "name": "siyuan-mem",
+  "version": "0.1.0",
+  "description": "把 harness 会话变成思源笔记里的记忆条目",
+  "type": "module",
+  "bin": {
+    "mem": "./src/cli.mjs"
+  },
+  "scripts": {
+    "mem": "node src/cli.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "private": true
+}
