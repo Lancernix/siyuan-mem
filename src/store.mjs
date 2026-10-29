@@ -11,6 +11,8 @@ export const ATTR = {
   session: "custom-mem-session",
   date: "custom-mem-date",
   confidence: "custom-mem-confidence",
+  /** 哪台机器上产生的。多机汇聚之后，没有这一栏就分不清来源。 */
+  machine: "custom-mem-machine",
 };
 
 const esc = (v) => String(v ?? "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
@@ -159,6 +161,7 @@ export class Store {
         [ATTR.session]: meta.session || "",
         [ATTR.date]: date,
         [ATTR.confidence]: String(entry.confidence ?? 3),
+        ...(meta.machine ? { [ATTR.machine]: String(meta.machine) } : {}),
       });
     } catch (e) {
       // 建块和设属性不是一次事务。属性没写成，这个块就是没有身份的孤儿：

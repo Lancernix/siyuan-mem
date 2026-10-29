@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 
 /** 配置放在家目录，不跟项目走：里面有 API key，不能进版本库。 */
@@ -44,6 +44,33 @@ const DEFAULTS = {
     /** 本地面板。只有 127.0.0.1，没有鉴权，别绑 0.0.0.0。 */
     enabled: true,
     port: 7787,
+  },
+  ingest: {
+    /**
+     * 接收端：给别的机器推会话用。
+     *
+     * 默认关、默认只绑 127.0.0.1。它是写入通道，不是只读面板——没有 token
+     * 又绑到 0.0.0.0，等于把记忆库的写权限摆在公网上。`mem ingest setup` 会
+     * 生成 token 并一起改掉这两个值。
+     */
+    enabled: false,
+    bind: "127.0.0.1",
+    port: 7788,
+    token: "",
+    /** 单次请求上限。一个会话几百万字也就几 MB，24MB 已经宽松。 */
+    maxBytes: 24 * 1024 * 1024,
+  },
+  push: {
+    /** 边缘机器用：把本机日志推给中心。空表示还没配。 */
+    to: "",
+    token: "",
+    /** 机器名。默认取短 hostname；同一台机器换名会导致 offsets 重来一遍。 */
+    machine: "",
+    /** 常态间隔。会话还在写的时候推过去全是半句话，所以另有 quietSeconds。 */
+    intervalSeconds: 120,
+    quietSeconds: 180,
+    /** 单次请求的最大字符数，超了拆成多次。 */
+    maxCharsPerRequest: 800_000,
   },
   extract: {
     minTurnChars: 25,
@@ -99,17 +126,56 @@ export function saveState(state) {
   writeFileSync(STATE_PATH, JSON.stringify(state, null, 2) + "\n");
 }
 
+/** 本机标识。三台机器的日志路径长得一模一样，不分开就会互相顶掉。 */
+export function machineId() {
+  if (process.env.MEM_MACHINE) return String(process.env.MEM_MACHINE);
+  try {
+    const c = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
+    if (c?.push?.machine) return String(c.push.machine);
+  } catch {}
+  // hostname 常带 .local，截短只是为了让面板和日志好读。
+  return hostname().split(".")[0] || "local";
+}
+
+/**
+ * 偏移按机器分组：`{ version: 2, machines: { mac: { 路径: {...} }, server: {...} } }`。
+ *
+ * 旧格式是扁平的 `{ 路径: {...} }`，这里就地迁移到本机名下。不迁移的话，
+ * 同一台机器升级后所有会话会重推一遍（内容哈希能挡住重复条目，但白烧 token）。
+ */
 export function loadOffsets() {
   ensureDirs();
+  let raw;
   try {
-    return JSON.parse(readFileSync(OFFSET_PATH, "utf8"));
+    raw = JSON.parse(readFileSync(OFFSET_PATH, "utf8"));
   } catch {
-    return {};
+    return { version: 2, machines: {} };
   }
+  if (raw && raw.machines && typeof raw.machines === "object") return raw;
+  return { version: 2, machines: { [machineId()]: raw ?? {} } };
 }
 
 export function saveOffsets(o) {
   ensureDirs();
   writeFileSync(OFFSET_PATH, JSON.stringify(o, null, 2) + "\n");
+}
+
+/** 取某台机器的偏移表（会就地补上缺失的层级，方便直接改再整体保存）。 */
+export function offsetsOf(all, machine = machineId()) {
+  all.machines ??= {};
+  all.machines[machine] ??= {};
+  return all.machines[machine];
+}
+
+/** 写配置里的某一段。只做深合并，不整份覆盖——把别人的 key 弄丢过一次就够了。 */
+export function saveConfig(patch) {
+  ensureDirs();
+  let cur = {};
+  try {
+    cur = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
+  } catch {}
+  const merged = deepMerge(deepMerge(structuredClone(DEFAULTS), cur), patch);
+  writeFileSync(CONFIG_PATH, JSON.stringify(merged, null, 2) + "\n", { mode: 0o600 });
+  return merged;
 }
 

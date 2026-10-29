@@ -11,7 +11,16 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const OUT = process.env.MEM_BIN ?? join(homedir(), ".siyuan-mem", "mem");
+
+// 交叉编译：中心是 Linux 服务器时，本机编出来的 darwin 产物没用。
+// 用法：node scripts/dist.mjs --target=bun-linux-x64
+const targetArg = process.argv.find((a) => a.startsWith("--target="));
+const target = targetArg ? targetArg.slice("--target=".length) : "";
+const nativeTarget = `${process.platform === "darwin" ? "darwin" : "linux"}-${process.arch === "arm64" ? "arm64" : "x64"}`;
+const cross = Boolean(target) && !target.includes(nativeTarget);
+
+const OUT =
+  process.env.MEM_BIN ?? join(homedir(), ".siyuan-mem", cross ? `mem-${target}` : "mem");
 
 function run(cmd, args, opts = {}) {
   return execFileSync(cmd, args, { cwd: ROOT, encoding: "utf8", maxBuffer: 64 << 20, ...opts });
@@ -34,9 +43,23 @@ const candidate = join(staging, "mem");
 try {
   console.log(`bun ${bunVer}  打包中…`);
   const t0 = Date.now();
-  run(bun, ["build", "src/cli.mjs", "--compile", `--outfile=${candidate}`], { stdio: "inherit" });
+  run(
+    bun,
+    ["build", "src/cli.mjs", "--compile", ...(target ? [`--target=${target}`] : []), `--outfile=${candidate}`],
+    { stdio: "inherit" }
+  );
   const size = (statSync(candidate).size / 1048576).toFixed(0);
-  console.log(`  产物 ${size}MB，用时 ${Date.now() - t0}ms`);
+  console.log(`  产物 ${size}MB，用时 ${Date.now() - t0}ms${target ? `  target=${target}` : ""}`);
+
+  if (cross) {
+    // 交叉编译的产物在本机跑不起来，自证这一步只能留给目标机器。
+    // 所以不覆盖默认路径，文件名带 target，避免有人拿它当本机版本用。
+    copyFileSync(candidate, OUT);
+    chmodSync(OUT, 0o755);
+    console.log(`交叉编译，跳过对账（本机跑不了 ${target}）。已放 ${OUT}`);
+    console.log(`  到目标机器上先跑：${OUT} status && ${OUT} audit --all（跟那边的 node 对一遍）`);
+    process.exit(0);
+  }
 
   // 对账：同一份代码、同一批会话，两边必须逐字相同。
   console.log("对账中（node vs 产物，全部会话）…");

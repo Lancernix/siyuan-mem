@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
-import { CONFIG_PATH, INBOX_DIR, loadConfig, LOG_PATH } from "./config.mjs";
+import { randomBytes } from "node:crypto";
+import { networkInterfaces } from "node:os";
+import { CONFIG_PATH, INBOX_DIR, loadConfig, LOG_PATH, machineId, saveConfig, offsetsOf, loadOffsets } from "./config.mjs";
 import { CATALOG_PATH } from "./catalog.mjs";
 import { PROVIDERS, resolveModel, hasModel, probe as probeModel, saveModelChoice, maskKey, usageToday } from "./llm.mjs";
 import { loadCatalog, loadCatalogSync, wireOf, findProvider, modelInfo } from "./catalog.mjs";
@@ -13,6 +15,7 @@ import { open, enqueueLog, processQueue } from "./jobs.mjs";
 import { serve, acquire, release, lockInfo } from "./serve.mjs";
 import { startUi } from "./ui.mjs";
 import { install, uninstall, serviceStatus, systemdUnit, PLIST_PATH } from "./service.mjs";
+import { pushOnce, pushWatch, pingPush } from "./push.mjs";
 
 const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 
@@ -35,6 +38,11 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
   mem model test               真发一次请求，自证 key / 地址 / JSON 模式都通
   mem model list [关键词]      列目录里的 provider（models.dev，七十多家）
   mem model refresh            刷新目录缓存（7 天自动过期）
+  mem center [status]          看接收端（给别的机器推会话用）
+  mem center setup [--port 7788] [--bind 0.0.0.0] [--rotate]
+                               把本机设成中心：开接收端、生成 token、打印边缘命令
+  mem push [--to URL] [--token T] [--once|--watch] [--dry] [--all] [--test]
+                               边缘机器：把本机会话推给中心（默认只推安静 3 分钟的）
   mem ui [--port 7787]         起本地面板（只读；点"跑一轮"会自己抢锁）
   mem service [status]         看系统服务状态
   mem service install [--interval 分钟] [--print]   装成 launchd 服务
@@ -47,7 +55,7 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 `;
 
 /** 只有这几个键吃后面的值，其余 --xxx 一律当布尔，免得 "search --all 风盾" 把查询词吃掉。 */
-const VALUED = new Set(["entity", "type", "confidence", "limit", "format", "n", "interval", "key", "name", "wire", "port"]);
+const VALUED = new Set(["entity", "type", "confidence", "limit", "format", "n", "interval", "key", "name", "wire", "port", "to", "token", "machine", "quiet", "every", "bind"]);
 
 function parseArgs(argv) {
   const flags = {};
@@ -103,6 +111,11 @@ async function cmdStatus() {
   }
   console.log(`待处理       ${pending().length} 个会话在队列里`);
   console.log(`服务         ${svcLine}`);
+  console.log(`本机         ${machineId()}`);
+  const ing = cfg.ingest ?? {};
+  console.log(
+    `接收端       ${ing.enabled ? `${ing.bind}:${ing.port}${ing.token ? "" : "（无 token，只接受本机）"}` : "关（mem center setup 打开）"}`
+  );
 }
 
 async function cmdOnce(flags) {
@@ -142,8 +155,8 @@ async function cmdIngest(args) {
   const file = args[0];
   if (!file) throw new Error("要给一个 json 文件");
   const payload = readSession(file);
-  const target = drop(payload);
-  console.log(`已入队：${target}`);
+  const r = drop(payload);
+  console.log(r.duplicate ? `队列里已经有了：${r.file}` : `已入队：${r.file}`);
 }
 
 async function cmdIngestLog(flags, args) {
@@ -500,6 +513,98 @@ async function cmdUi(flags) {
   await new Promise(() => {});
 }
 
+/** 本机的非回环 IPv4，用来拼给边缘机器复制的那条命令。 */
+function lanAddresses() {
+  const out = [];
+  for (const list of Object.values(networkInterfaces())) {
+    for (const a of list ?? []) {
+      if (a.family === "IPv4" && !a.internal) out.push(a.address);
+    }
+  }
+  return out;
+}
+
+async function cmdCenter(args, flags) {
+  const sub = args[0] ?? "status";
+  const cfg = loadConfig();
+  const ing = cfg.ingest ?? {};
+
+  if (sub === "status") {
+    console.log(`本机         ${machineId()}`);
+    console.log(`接收端       ${ing.enabled ? `${ing.bind}:${ing.port}` : "关（mem center setup 打开）"}`);
+    console.log(`token        ${ing.token ? maskKey(ing.token) : "（没配）"}`);
+    console.log(`队列         ${pending().length} 个会话待处理`);
+    if (ing.enabled) {
+      const host = ing.bind === "0.0.0.0" ? lanAddresses()[0] ?? "<这台机器的地址>" : ing.bind;
+      console.log(`\n边缘机器上跑：\n  mem push --to http://${host}:${ing.port} --token ${ing.token || "<token>"} --once`);
+      console.log("  （公网走反向代理时把 http://… 换成 https://你的域名）");
+    }
+    return;
+  }
+
+  if (sub === "setup") {
+    const port = Number(flags.port) || ing.port || 7788;
+    // 开接收端就意味着要跨机器访问，bind 默认从回环改成全部网卡；
+    // 但如果用户显式给了 --bind，就按他说的来。
+    const bind = flags.bind ?? (ing.bind === "127.0.0.1" ? "0.0.0.0" : ing.bind);
+    const token = flags.rotate || !ing.token ? randomBytes(18).toString("base64url") : ing.token;
+    saveConfig({ ingest: { enabled: true, bind, port, token } });
+    const host = bind === "0.0.0.0" ? lanAddresses()[0] ?? "<这台机器的地址>" : bind;
+    console.log(`已写入 ${CONFIG_PATH}`);
+    console.log(`  接收端 ${bind}:${port}  token ${maskKey(token)}`);
+    console.log(`  重启 mem serve 生效：mem service install（或 kill 掉再起）`);
+    console.log(`\n在边缘机器上：`);
+    console.log(`  mem push --to http://${host}:${port} --token ${token} --once`);
+    console.log(`\n提醒：这是写入通道。公网暴露请走 HTTPS 反向代理，并把 token 当密码对待。`);
+    return;
+  }
+
+  throw new Error(`不认识的子命令：${sub}（可用：status / setup）`);
+}
+
+async function cmdPush(flags, args) {
+  const cfg = loadConfig();
+  const to = flags.to ?? cfg.push?.to ?? "";
+  const token = flags.token ?? cfg.push?.token ?? "";
+  const machine = flags.machine ?? machineId();
+
+  if (flags.save && (flags.to || flags.token)) {
+    saveConfig({ push: { ...(flags.to ? { to: flags.to } : {}), ...(flags.token ? { token: flags.token } : {}), ...(flags.machine ? { machine: flags.machine } : {}) } });
+    console.log(`已写入 ${CONFIG_PATH}`);
+  }
+  if (!to) throw new Error("没有中心地址：mem push --to http://中心:7788 --token …（加 --save 记住）");
+
+  if (flags.test) {
+    const r = await pingPush({ to, token });
+    console.log(`通了：${to}  队列 ${r.queue} 个  ${r.auth ? "需要 token（已带）" : "服务端没设 token"}`);
+    return;
+  }
+
+  const opts = {
+    to,
+    token,
+    machine,
+    dry: Boolean(flags.dry),
+    limit: flags.all ? Number.POSITIVE_INFINITY : Number(flags.limit) || 8,
+    // 0 是合法值（用完就推），所以不能用 || 兜底
+    quietSeconds: flags.quiet !== undefined ? Number(flags.quiet) : cfg.push?.quietSeconds ?? 180,
+    maxChars: cfg.push?.maxCharsPerRequest ?? 800_000,
+    log: console.log,
+  };
+
+  if (flags.watch || flags.every) {
+    await pushWatch({ ...opts, intervalSeconds: Number(flags.every) || cfg.push?.intervalSeconds || 120 });
+    return;
+  }
+
+  const r = await pushOnce(opts);
+  console.log(
+    `扫描 ${r.scanned} 个会话，推送 ${r.sessions} 个 / ${r.turns} 轮 / ${r.chars} 字，` +
+      `重复 ${r.duplicates} 包，跳过 ${r.skipped}，失败 ${r.failed}` +
+      (r.left ? `，还有 ${r.left} 个下次继续（--all 一次推完）` : "")
+  );
+}
+
 async function main() {
   const [cmd, ...args] = process.argv.slice(2);
   const { flags, rest } = parseArgs(args);
@@ -534,6 +639,10 @@ async function main() {
       return cmdUi(flags);
     case "service":
       return cmdService(rest, flags);
+    case "center":
+      return cmdCenter(rest, flags);
+    case "push":
+      return cmdPush(flags, rest);
     case undefined:
     case "-h":
     case "--help":
