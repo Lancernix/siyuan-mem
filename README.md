@@ -177,6 +177,8 @@ dsh --profile desktop --dump-config   # 确认它出现在配置树里
 
 两个选择：常驻加 `KeepAlive`，或定时调 `serve --once`。前者不用反复冷启动 node，后者崩了不会无限重启刷日志。
 
+**plist 里的 node 必须写绝对路径**，因为 launchd 的 `PATH` 只有 `/usr/bin:/bin:/usr/sbin:/sbin`，`node` 不在里面。先 `which node` 看实际路径再填——这台机器上 `node` 是 WorkBuddy 自带的（`~/.workbuddy/binaries/node/versions/<版本>/bin/node`），把带版本号的路径写进 plist，WorkBuddy 升级一次就断。稳妥做法是 `brew install node` 用 `/opt/homebrew/bin/node`，或者放一个每次自己找 node 的 shim 让 plist 指向它。
+
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
@@ -184,7 +186,7 @@ dsh --profile desktop --dump-config   # 确认它出现在配置树里
   <key>Label</key><string>com.siyuan.mem</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/node</string>
+    <string>/opt/homebrew/bin/node</string>
     <string>/Users/<你>/Codes/siyuan-mem/src/cli.mjs</string>
     <string>serve</string>
   </array>
@@ -200,6 +202,8 @@ dsh --profile desktop --dump-config   # 确认它出现在配置树里
 `launchctl load ~/Library/LaunchAgents/com.siyuan.mem.plist`
 
 写 `StandardErrorPath` 是为了接住启动阶段的崩溃（比如 Node 路径不对、锁被占）：这些发生在 `serve` 自己的日志之前。
+
+没有配 `model.apiKey` 时 `serve` 会直接拒绝启动，`--no-model` 是显式的规则抽取开关。理由见下一节。
 
 ## 已经踩过的坑
 
@@ -222,6 +226,8 @@ dsh --profile desktop --dump-config   # 确认它出现在配置树里
 **状态缓存的键要带笔记本名。** 缓存原来只按 `baseUrl` 存，`state["http://127.0.0.1:6806"].entries` 就是一个块 id。把 config 里的 `notebook` 改成测试笔记本之后，`init` 命中缓存，33 条测试数据直接写进了正式笔记本——缓存只证明了"文档还在"，没证明"文档在这本笔记本里"。现在键是 `baseUrl#笔记本名`，并且缓存命中时要按 `blocks.box` 验一次归属。
 
 **归档的失败计数要按会话算。** 原来一个全局 `failed` 计数器决定归档：第三个会话写失败，第四、五个明明写成功了也不归档，原文卡在队列里下轮重抽一遍。现在每个会话单独计。
+
+**没有 key 的时候不要让它跑。** `extract` 在没有 `apiKey` 时会静默退回规则抽取，而规则抽取只取首段，写进库里的是「[interrupted] 让我为您重新推荐一些…」这种半句话。实测一次误启动就往正式库里灌了 37 条这种垃圾。现在 `serve` / `once` 默认拒绝（`--dry` 放行，因为不写库），`--no-model` 才是显式的规则抽取开关。
 
 ## 目录
 
