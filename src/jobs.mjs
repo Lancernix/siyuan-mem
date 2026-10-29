@@ -5,7 +5,8 @@
  * 而"手动跑成功、后台跑丢字"是最难查的一类问题。
  */
 import { statSync } from "node:fs";
-import { loadConfig, loadOffsets, saveOffsets, hasModel } from "./config.mjs";
+import { loadConfig, loadOffsets, saveOffsets } from "./config.mjs";
+import { hasModel } from "./llm.mjs";
 import { SiYuan } from "./siyuan.mjs";
 import { Store } from "./store.mjs";
 import { normalizeTurns, toExchanges, extractEntries } from "./extract.mjs";
@@ -86,7 +87,7 @@ export async function processQueue({ dry = false, useModel = true, onLine = () =
   const { cfg, store } = open();
 
   const files = pending();
-  const sum = { sessions: files.length, written: 0, skipped: 0, failed: 0, degraded: 0 };
+  const sum = { sessions: files.length, written: 0, skipped: 0, failed: 0, degraded: 0, tokens: { prompt: 0, completion: 0 } };
   if (!files.length) return sum;
 
   assertModel(cfg, { useModel, dry });
@@ -110,11 +111,16 @@ export async function processQueue({ dry = false, useModel = true, onLine = () =
     }
 
     const fallbackEntity = (payload.cwd ?? "").split("/").filter(Boolean).pop() ?? "";
-    const { entries, mode, error, batches, dropped } = await extractEntries(cfg, exchanges, {
+    const { entries, mode, error, batches, dropped, usage } = await extractEntries(cfg, exchanges, {
       fallbackEntity,
       useModel,
     });
     if (error) onLine(`  ! 模型失败，退回规则：${error}`);
+    // 记账：回灌一百多个会话时，"花了多少 token"是唯一能判断该不该继续跑的指标。
+    if (usage) {
+      sum.tokens.prompt += usage.prompt;
+      sum.tokens.completion += usage.completion;
+    }
 
     const batchNote = batches > 1 ? ` / ${batches} 批` : "";
     onLine(`${payload.session_id ?? "?"}  ${exchanges.length} 轮${batchNote}  ${mode}  抽出 ${entries.length} 条`);

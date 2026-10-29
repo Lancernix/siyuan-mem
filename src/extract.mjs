@@ -5,6 +5,8 @@
  * 上下文全部丢掉——thinking 里一半是被否掉的方案，抽出来就是三条平行记忆。
  */
 
+import { chat } from "./llm.mjs";
+
 const STOP = new Set([
   "继续", "好的", "好", "嗯", "可以", "行", "谢谢", "ok", "OK", "是的", "不对",
   "然后呢", "还有吗", "明白了", "懂了",
@@ -69,8 +71,8 @@ const SYSTEM_PROMPT = `你是记忆整理器。输入是一段人机对话，按
 - 关于用户的稳定偏好、环境事实、外部工具版本，可以抽。
 - 没有值得记的，返回空数组。
 
-只输出 JSON，不要解释，不要代码块标记：
-[{"text":"...","entity":"核心对象，2-8字名词","type":"decision|fact|preference|reference","confidence":1}]
+只输出 JSON 对象，不要解释，不要代码块标记：
+{"entries":[{"text":"...","entity":"核心对象，2-8字名词","type":"decision|fact|preference|reference","confidence":1}]}
 
 entity 是以后用来检索的那个词，比如"风盾500""投影仪桌面""思源MCP"。
 confidence 1-5，5 表示这条是明确结论、以后一定会用到。`
@@ -79,16 +81,27 @@ function stripFence(s) {
   return s.replace(/^\s*```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
 }
 
+/**
+ * 解析模型输出。开了 JSON 模式时接口要求顶层是对象（不能是数组），所以两种都认：
+ * {"entries":[…]}/[…]。解析失败返回空数组，不抛——一段抽不出来不该让整个会话失败。
+ */
 function parseEntries(raw) {
   const text = stripFence(String(raw ?? ""));
-  const start = text.indexOf("[");
-  const end = text.lastIndexOf("]");
-  if (start < 0 || end <= start) return [];
-  let arr;
+  let arr = null;
   try {
-    arr = JSON.parse(text.slice(start, end + 1));
+    const obj = JSON.parse(text);
+    arr = Array.isArray(obj) ? obj : Array.isArray(obj?.entries) ? obj.entries : null;
   } catch {
-    return [];
+    // 模型偶尔会夹带解释，退回按括号抠。
+    const start = text.indexOf("[");
+    const end = text.lastIndexOf("]");
+    if (start >= 0 && end > start) {
+      try {
+        arr = JSON.parse(text.slice(start, end + 1));
+      } catch {
+        arr = null;
+      }
+    }
   }
   if (!Array.isArray(arr)) return [];
   return arr
@@ -192,25 +205,15 @@ async function callModel(cfg, batch) {
     throw new Error(`一批 ${dialog.length} 字，超过单次上限，分批有 bug`);
   }
 
-  const res = await fetch(`${cfg.model.baseUrl.replace(/\/+$/, "")}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${cfg.model.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: cfg.model.name,
-      temperature: 0.2,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: dialog },
-      ],
-    }),
-    signal: AbortSignal.timeout(cfg.model.timeoutMs ?? 45000),
+  const r = await chat(cfg, {
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: dialog },
+    ],
+    json: true,
+    tag: "extract",
   });
-  if (!res.ok) throw new Error(`模型接口 HTTP ${res.status}：${(await res.text()).slice(0, 200)}`);
-  const body = await res.json();
-  return parseEntries(body?.choices?.[0]?.message?.content);
+  return { entries: parseEntries(r.text), usage: r.usage };
 }
 
 /* ---------- 没有模型时的降级 ---------- */
@@ -274,7 +277,7 @@ function mergeEntries(all, limit) {
  * @param {{fallbackEntity?:string, useModel?:boolean}} opts
  */
 export async function extractEntries(cfg, exchanges, opts = {}) {
-  if (!exchanges.length) return { entries: [], mode: "empty", batches: 0, dropped: 0 };
+  if (!exchanges.length) return { entries: [], mode: "empty", batches: 0, dropped: 0, usage: { prompt: 0, completion: 0 } };
 
   const budget = cfg.extract?.maxCharsPerCall ?? DEFAULT_MAX_CHARS;
   const perBatch = cfg.extract?.maxEntriesPerBatch ?? 6;
@@ -288,15 +291,19 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
     const all = [];
     for (const batch of plan) all.push(...heuristicEntries(batch, opts.fallbackEntity ?? "", 1));
     const { entries, dropped } = mergeEntries(all, perSession);
-    return { entries, mode: "heuristic", batches: plan.length, dropped };
+    return { entries, mode: "heuristic", batches: plan.length, dropped, usage: { prompt: 0, completion: 0 } };
   }
 
   const all = [];
+  const usage = { prompt: 0, completion: 0 };
   let failures = 0;
   let lastError = "";
   for (const batch of plan) {
     try {
-      all.push(...(await callModel(cfg, batch)).slice(0, perBatch));
+      const r = await callModel(cfg, batch);
+      usage.prompt += r.usage.prompt;
+      usage.completion += r.usage.completion;
+      all.push(...r.entries.slice(0, perBatch));
     } catch (e) {
       failures++;
       lastError = e.message;
@@ -310,6 +317,7 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
     mode,
     batches: plan.length,
     dropped,
+    usage,
     error: failures ? `${failures}/${plan.length} 批失败：${lastError}` : undefined,
   };
 }

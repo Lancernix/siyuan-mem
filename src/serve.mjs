@@ -259,7 +259,8 @@ export async function serve({ once = false, dry = false, useModel = true, interv
       const secs = ((Date.now() - t0) / 1000).toFixed(1);
       log(
         `第 ${roundNo} 轮 ${secs}s：思源 v${r.version}，扫描 ${r.scanned} 个会话，` +
-          `新投 ${r.enqueued} 个（${r.turns} 轮），写入 ${r.written} 条，跳过 ${r.skipped}，失败 ${r.failed}`
+          `新投 ${r.enqueued} 个（${r.turns} 轮），写入 ${r.written} 条，跳过 ${r.skipped}，失败 ${r.failed}` +
+            (r.tokens?.prompt ? `，tokens ${r.tokens.prompt}+${r.tokens.completion}` : "")
       );
       if (r.degraded) log(`  · ${r.degraded} 个会话抽取不完整，原文留在队列里等重试`);
       if (!r.candidates && !r.sessions) log("  队列空，也没有新会话");

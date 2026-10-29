@@ -20,9 +20,13 @@ const DEFAULTS = {
     docs: { entries: "01-条目", raw: "02-原文", changes: "03-变更" },
   },
   model: {
-    baseUrl: "https://api.deepseek.com",
+    /** 预设名，见 llm.mjs 的 PROVIDERS；换成别家只改这一行 + apiKey。 */
+    provider: "deepseek",
+    baseUrl: "https://api.deepseek.com/v1",
     apiKey: "",
     name: "deepseek-chat",
+    /** 能开就开：接口要求顶层是对象，prompt 已按 {"entries":[…]} 写。 */
+    jsonMode: true,
     timeoutMs: 45000,
   },
   serve: {
@@ -101,6 +105,3 @@ export function saveOffsets(o) {
   writeFileSync(OFFSET_PATH, JSON.stringify(o, null, 2) + "\n");
 }
 
-export function hasModel(cfg) {
-  return Boolean(cfg.model?.apiKey);
-}
