@@ -69,6 +69,28 @@ node src/cli.mjs forget <块id>        # 标成过时，不删
 
 状态只有两种。**过时的不删**——"为什么当初不用 Oracle"这个问题的答案，就在那条被取代的条目里。
 
+## 三种接入方式，别再叫它"DSH 插件"
+
+核心（抽取、存储、查询、状态）**跟 harness 无关**，一行没绑定。绑不住的只有"怎么拿到会话"，每家一份薄适配：
+
+| harness | 接法 | 代码量 | 限制 |
+|---|---|---|---|
+| DSH | cordis 插件 | `plugin/` 约 60 行 | 只能用 DSH 的钩子事件名 |
+| Claude Code | hook 脚本（Stop / SessionEnd 里调 `mem ingest-log`） | 几十行 shell + settings 配置 | 要有 `~/.claude/projects` 写入 |
+| WorkBuddy | **无插件机制**，只能读日志 | 零代码，`mem ingest-log` 直接跑 | 闭源，拿不到进程内事件 |
+| 任意其他 | 能导出 jsonl/markdown 就能进 | 一个 reader | 见 `src/readers.mjs` |
+
+所以准确说法是：**一套核心 + 每家一份采集适配**。不是"一个插件通吃所有 harness"，那做不到。
+
+日志这条路还有个附带好处：插件截获会漏、会崩、会重复，日志是 append-only 的，harness 自己不会写丢。插件挂了，日志还在。
+
+```bash
+mem ingest-log ~/.workbuddy/projects/<ws>/<session>.jsonl
+mem ingest-log ~/.claude/projects/<proj>/<session>.jsonl --format claude
+```
+
+格式按内容嗅探，认不出才要 `--format`。用户消息里的 `<system-reminder>`、子代理事件、工具结果会在读取时剔掉。
+
 ## DSH 插件
 
 `plugin/` 是一个 cordis 插件，装到 profile 里：
