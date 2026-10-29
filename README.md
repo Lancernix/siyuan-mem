@@ -86,22 +86,25 @@ node src/cli.mjs forget <块id>        # 标成过时，不删
 
 ## 模型接口
 
-只认 OpenAI 兼容的 `/chat/completions` 一种形状，不引 SDK。DeepSeek、通义（compatible-mode）、Kimi、智谱、OpenRouter、火山、ollama、LM Studio、vLLM 全都吃这一条，装 SDK 等于为同一种请求形状背几百 KB 和一堆我们不需要的默认行为（流式、自动重试、把 provider 藏进 client 构造里）。配置里显式写 `baseUrl` + `name`，出问题时一眼看得出打的是谁。
+传输层用官方 `openai` SDK，只认 OpenAI 兼容的 `/chat/completions` 一种形状。DeepSeek、通义（compatible-mode）、Kimi、智谱、OpenRouter、火山、ollama、LM Studio、vLLM 全都吃这一条。
+
+为什么最后用了 SDK：重试（429/408/409/5xx，认 `retry-after`）、超时、代理、keep-alive、错误分类这些 HTTP 细节它都做过了，而且是**零传递依赖、纯 JS**：`node_modules` 33MB（多半是类型定义和 sourcemap），编译进单文件只多 1MB（85→86MB，bun 会 tree-shake）。
+
+代价是它顶层 import 很重：node 下 880ms、bun 产物里约 170ms。所以 `makeClient` 里是**懒加载**，只有真要发请求时才拉进来——`mem status`、`scan`、`search` 这些不碰模型的命令，启动仍是 33ms（这是实测，不是估算；第一版直接顶层 import 时启动从 30ms 掉到 207ms）。
+
+SDK 替不掉三件事，所以外面还包一层 `src/llm.mjs`：
+
+- **JSON 模式回退**：有些实现不认 `response_format`，会回 400。SDK 此时直接抛 `BadRequestError`，我们捕到后去掉字段重发一次——不让整段会话因此降级成规则抽取。prompt 相应要求顶层是对象 `{"entries":[…]}`。
+- **按调用打 tag 的用量账本**：SDK 只返回 `usage`，不知道这次是"抽取"还是"自证"。现在每次调用追加到 `~/.siyuan-mem/usage.jsonl`，`mem status` 显示今日汇总，`serve` 每轮日志带 tokens。回灌一百多个会话时，这是唯一能判断"还要不要继续跑"的指标。
+- **provider 预设**：`deepseek / qwen / moonshot / zhipu / openai / openrouter / ollama / lmstudio`，本地两家不需要 key（SDK 要传个占位 key）。
 
 ```bash
-mem model                                  # 看当前 provider / 地址 / 模型 / key（打码）/ 今日用量
+mem model                                  # 看 provider / 地址 / 模型 / key（打码）/ 今日用量
 mem model use qwen --key sk-... [--name qwen-max]   # 换一家，写进 ~/.siyuan-mem/config.json（0600）
 mem model test                             # 真发一次请求，自证 key、地址、JSON 模式、记账都通
 ```
 
-`src/llm.mjs` 补的是裸 fetch 缺的四件事：
-
-- **重试**：429 和 5xx 按 `Retry-After` 或指数退避重试（默认 3 次）；401/403/400 立刻抛，重试只会把同一个错误写三遍。
-- **JSON 模式**：能开就开（`response_format: {type:"json_object"}`，所以 prompt 要求顶层是对象 `{"entries":[…]}`）。有些实现不支持，回 400 且正文提到它时自动去掉这个字段重发，不算失败次数。
-- **用量记账**：每次调用的 prompt/completion tokens 追加到 `~/.siyuan-mem/usage.jsonl`，`mem status` 显示今日汇总，`serve` 每轮日志也带。回灌一百多个会话时，这是唯一能判断"还要不要继续跑"的指标。
-- **provider 预设**：`deepseek / qwen / moonshot / zhipu / openai / openrouter / ollama / lmstudio`，本地两家不要 key。
-
-`npm test` 用本地假接口测这几条：429 重试、`response_format` 被拒后回退、401 不重试、5xx 重试到上限、JSON 对象解析、记账可读。不发真请求、不花钱，跑完不碰真实 `usage.jsonl`。
+`npm test` 用本地假接口测这几条：429 重试（真的等了 `Retry-After`）、`response_format` 被拒后回退、401 不重试、5xx 重试到上限、JSON 对象解析、记账可读。不发真请求、不花钱，跑完不碰真实 `usage.jsonl`。
 
 ## 数据结构
 

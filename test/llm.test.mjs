@@ -82,7 +82,7 @@ test("429 会按 Retry-After 重试并成功", async () => {
   scenario = "retry";
   const t0 = Date.now();
   const r = await chat(cfg, { messages: msgs, tag: "retry" });
-  assert.equal(r.attempts, 2);
+  assert.equal(hit, 2, "SDK 应该自动重试一次");
   assert.ok(Date.now() - t0 >= 900, "应该真的等过 Retry-After");
   assert.match(r.text, /ok/);
 });
@@ -100,14 +100,15 @@ test("response_format 被 400 拒绝时自动回退成纯提示词", async () =>
 test("401 一次就抛，不浪费重试", async () => {
   hit = 0;
   scenario = "auth";
-  await assert.rejects(() => chat(cfg, { messages: msgs, retries: 3 }), /HTTP 401/);
+  await assert.rejects(() => chat(cfg, { messages: msgs }), /HTTP 401/);
   assert.equal(hit, 1);
 });
 
 test("5xx 会重试到上限后抛错", async () => {
   hit = 0;
   scenario = "always500";
-  await assert.rejects(() => chat(cfg, { messages: msgs, retries: 2 }), /模型调用失败/);
+  const two = { model: { ...cfg.model, retries: 2 } };
+  await assert.rejects(() => chat(two, { messages: msgs }), /模型调用失败/);
   assert.equal(hit, 3, "1 次首试 + 2 次重试");
 });
 
