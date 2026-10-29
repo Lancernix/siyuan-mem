@@ -4,6 +4,7 @@ import { SiYuan } from "./siyuan.mjs";
 import { Store, formatHits } from "./store.mjs";
 import { normalizeTurns, toExchanges, extractEntries } from "./extract.mjs";
 import { pending, readSession, archive, drop } from "./inbox.mjs";
+import { readLog } from "./readers.mjs";
 
 const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 
@@ -11,6 +12,7 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
   mem status                   连通性、条目数、待处理队列长度
   mem once [--dry] [--no-model] 处理 inbox 里的全部会话
   mem ingest <file.json>       把一个会话文件投入队列（测试用）
+  mem ingest-log <日志>        直接读 harness 的会话日志入队（workbuddy|claude|dsh）
   mem search <词...>           查记忆，默认只看 current
   mem search --all <词...>     查记忆，含已过时的
   mem review [n]               列最近 n 条，人工扫一眼
@@ -22,7 +24,7 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 `;
 
 /** 只有这几个键吃后面的值，其余 --xxx 一律当布尔，免得 "search --all 风盾" 把查询词吃掉。 */
-const VALUED = new Set(["entity", "type", "confidence", "limit"]);
+const VALUED = new Set(["entity", "type", "confidence", "limit", "format"]);
 
 function parseArgs(argv) {
   const flags = {};
@@ -144,6 +146,24 @@ async function cmdIngest(args) {
   console.log(`已入队：${target}`);
 }
 
+async function cmdIngestLog(flags, args) {
+  const file = args[0];
+  if (!file) throw new Error("要给一个日志文件路径");
+  const log = readLog(file, flags.format === true ? "" : flags.format ?? "");
+  if (!log.turns.length) {
+    console.log("这条日志里没有能用的问答。");
+    return;
+  }
+  const target = drop({
+    session_id: log.sessionId || `log-${Date.now()}`,
+    harness: log.harness,
+    cwd: log.cwd,
+    date: new Date().toISOString().slice(0, 10),
+    turns: log.turns,
+  });
+  console.log(`${log.harness}   ${log.turns.length} 轮   ${target}`);
+}
+
 async function cmdSearch(flags, words) {
   const { store } = make();
   const q = words.join(" ");
@@ -194,6 +214,8 @@ async function main() {
       return cmdOnce(flags);
     case "ingest":
       return cmdIngest(rest);
+    case "ingest-log":
+      return cmdIngestLog(flags, rest);
     case "search":
       return cmdSearch(flags, rest);
     case "review":
