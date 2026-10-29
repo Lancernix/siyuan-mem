@@ -9,14 +9,28 @@
 import { readFileSync } from "node:fs";
 
 const REMINDER = /<system-reminder[\s\S]*?<\/system-reminder>/g;
+/**
+ * 上下文压缩的摘要块会以 user 角色回放，一条能到 48 万字。
+ * 它是"之前聊过什么的纪要"，不是用户说的话；当成提问抽，抽出来的是摘要的摘要。
+ */
+const SUMMARY_BLOCK = /^\s*<cb_summary>/;
+const MAX_TURN_CHARS = 2000;
 const CONTEXT_TAGS = /<(?:user_info|craft_mode|additional-data|current_time|wecom_wedrive_references)[\s\S]*?<\/(?:user_info|craft_mode|additional-data|current_time|wecom_wedrive_references)>/g;
 
 function cleanUserText(text) {
-  return String(text ?? "")
+  const raw = String(text ?? "");
+  if (SUMMARY_BLOCK.test(raw)) return "";
+  const clean = raw
     .replace(REMINDER, "")
     .replace(CONTEXT_TAGS, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+  return clip(clean);
+}
+
+/** 粘贴进来的日志、文件、报错会到几十万字，整条发给模型是纯烧钱。留头部够判断了。 */
+function clip(text) {
+  return text.length <= MAX_TURN_CHARS ? text : text.slice(0, MAX_TURN_CHARS) + "…";
 }
 
 /** WorkBuddy：type=message，content 是 [{type:"input_text"|"text", text}]。 */
@@ -35,7 +49,7 @@ function readWorkbuddy(lines) {
       .filter((p) => p && typeof p.text === "string" && /text$/.test(p.type ?? "text"))
       .map((p) => p.text)
       .join("\n");
-    const clean = role === "user" ? cleanUserText(text) : String(text ?? "").trim();
+    const clean = role === "user" ? cleanUserText(text) : clip(String(text ?? "").trim());
     if (!clean) continue;
     // 工具结果和文件快照会以 user 角色出现，拦掉。
     if (role === "user" && /^<(?:function_call|file-history)/.test(clean)) continue;
@@ -60,7 +74,7 @@ function readClaude(lines) {
       .filter((p) => p?.type === "text" && typeof p.text === "string")
       .map((p) => p.text)
       .join("\n");
-    const clean = d.type === "user" ? cleanUserText(text) : String(text ?? "").trim();
+    const clean = d.type === "user" ? cleanUserText(text) : clip(String(text ?? "").trim());
     if (!clean) continue;
     turns.push({ role: d.type, text: clean });
   }
@@ -88,7 +102,7 @@ function readDsh(lines) {
       .filter((p) => p?.type === "text" && typeof p.text === "string")
       .map((p) => p.text)
       .join("\n");
-    const clean = role === "user" ? cleanUserText(text) : String(text ?? "").trim();
+    const clean = role === "user" ? cleanUserText(text) : clip(String(text ?? "").trim());
     if (!clean) continue;
     turns.push({ role, text: clean });
   }
