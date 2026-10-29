@@ -12,6 +12,8 @@ import { Store } from "./store.mjs";
 import { normalizeTurns, toExchanges, extractEntries } from "./extract.mjs";
 import { pending, readSession, archive, drop } from "./inbox.mjs";
 import { readLog } from "./readers/index.mjs";
+import { archive as archiveRaw } from "./raw.mjs";
+import { loadEntities, shotList, resolveEntities } from "./entities.mjs";
 
 /** 建连接。注入路径要能快速放弃，写路径慢一点没关系，但别无限等。 */
 export function open() {
@@ -55,6 +57,9 @@ export function enqueueLog(file, { format = "" } = {}) {
     machine: machineId(),
     cwd: log.cwd,
     date: new Date().toISOString().slice(0, 10),
+    // 这批 turns 在完整会话里从第几轮开始。归档要用它算全局轮次号，
+    // 没有它的话，增量推送会让轮次从 1 重新数，指针全错位。
+    turnFrom: before + 1,
     turns,
   });
   // 先投递再记偏移不成立：投递失败会重读同一段。反过来先记偏移再投递，
@@ -85,14 +90,33 @@ export function assertModel(cfg, { useModel = true, dry = false } = {}) {
   );
 }
 
+/** 条目落在哪个 part 上。跨 part 的批次只可能出现在首次回灌的超长会话里。 */
+function ptrFor(parts, from, to) {
+  const usable = parts.filter((p) => p && p.path && !p.skip && !p.dry);
+  if (!usable.length) return "";
+  const p =
+    usable.find((x) => x.from <= from && x.to >= from) ??
+    usable.find((x) => x.from >= from) ??
+    usable[usable.length - 1];
+  const a = Math.max(from, p.from);
+  const b = Math.min(to, p.to);
+  return `${p.path}#${a}-${b >= a ? b : a}`;
+}
+
 export async function processQueue({ dry = false, useModel = true, onLine = () => {} } = {}) {
-  const { cfg, store } = open();
+  const { cfg, sy, store } = open();
 
   const files = pending();
-  const sum = { sessions: files.length, written: 0, skipped: 0, failed: 0, degraded: 0, tokens: { prompt: 0, completion: 0 } };
+  const sum = { sessions: files.length, written: 0, skipped: 0, failed: 0, degraded: 0, raw: 0, entities: 0, pending: 0, tokens: { prompt: 0, completion: 0 } };
   if (!files.length) return sum;
 
   assertModel(cfg, { useModel, dry });
+
+  // 文档 id 要提前解析：归档和实体都要往对应文档里写。
+  const ids = await store.docIds();
+  // 实体表一轮只查一次，跨会话复用。刚建的实体在 SQL 索引里还查不到，
+  // 每个会话各查一遍的话，下一个会话会把它当新的再造一份。
+  let entityTable = null;
 
   for (const file of files) {
     let payload;
@@ -112,10 +136,37 @@ export async function processQueue({ dry = false, useModel = true, onLine = () =
       continue;
     }
 
+    const turnFrom = Math.max(1, Number(payload.turnFrom) || 1);
+
+    // 1) 先归档原文。顺序不能反：附件上传时内核会改名，路径只有传完才知道，
+    //    而条目要把它写进属性里。先抽后归档的话，就得事后回填几十条属性。
+    let parts = [];
+    if (cfg.raw?.enabled !== false) {
+      try {
+        parts = await archiveRaw({
+          sy,
+          cfg,
+          ids,
+          payload: { ...payload, turnFrom },
+          dry,
+          log: onLine,
+        });
+        if (!dry) sum.raw += parts.filter((p) => p.path).length;
+      } catch (e) {
+        // 归档失败不该挡住记忆本身：条目照写，只是暂时没有原文指针。
+        onLine(`  ! 原文归档失败：${e.message}（条目照写，只是没有原文）`);
+      }
+    }
+
+    // 2) 抽取时带上已有实体清单，从源头减少「同一款裤子五个名字」。
+    if (!entityTable) entityTable = await loadEntities(sy, ids.entities);
+    const entityShot = shotList(entityTable, cfg.extract?.entityShotList ?? 300);
+
     const fallbackEntity = (payload.cwd ?? "").split("/").filter(Boolean).pop() ?? "";
     const { entries, mode, error, batches, dropped, usage } = await extractEntries(cfg, exchanges, {
       fallbackEntity,
       useModel,
+      entityShot,
     });
     if (error) onLine(`  ! 模型失败，退回规则：${error}`);
     // 记账：回灌一百多个会话时，"花了多少 token"是唯一能判断该不该继续跑的指标。
@@ -128,24 +179,49 @@ export async function processQueue({ dry = false, useModel = true, onLine = () =
     onLine(`${payload.session_id ?? "?"}  ${exchanges.length} 轮${batchNote}  ${mode}  抽出 ${entries.length} 条`);
     if (dropped) onLine(`    · 超出单会话上限，${dropped} 条没写（调 extract.maxEntriesPerSession 可放开）`);
 
-    // 失败按会话计：一个会话写挂了，不能连累后面几个都不归档。
+    // 3) 实体归一。dry 时不写表（会往库里造垃圾），只按原名走。
+    let entityMap = new Map();
+    if (!dry) {
+      try {
+        const names = [...new Set(entries.map((e) => e.entity).filter(Boolean))];
+        const r = await resolveEntities({ sy, cfg, ids, names, useModel, table: entityTable, log: onLine });
+        entityMap = r.map;
+        sum.entities += r.created.length;
+        sum.pending += r.weak.length;
+        if (r.created.length) onLine(`    · 新实体 ${r.created.length} 个：${r.created.slice(0, 8).join("、")}`);
+        if (r.weak.length) onLine(`    · ${r.weak.length} 组拿不准，写进 05-实体待确认`);
+      } catch (e) {
+        onLine(`    ! 实体归一失败：${e.message}（先用原名写）`);
+      }
+    }
+
+    // 4) 写条目
     let failedHere = 0;
     for (const e of entries) {
+      const entity = entityMap.get(e.entity) ?? e.entity;
+      const rawPtr =
+        e.from != null && parts.length ? ptrFor(parts, turnFrom + e.from, turnFrom + e.to) : "";
       if (dry) {
-        onLine(`    [${e.entity || "-"}] ${e.text}`);
+        const span = parts[0];
+        const where = span?.dry ? `  · 原文第 ${span.from}–${span.to} 轮 / ${(span.bytes / 1024).toFixed(0)}KB` : "";
+        onLine(`    [${entity || "-"}] ${e.text}${where}`);
         continue;
       }
       try {
-        const r = await store.writeEntry(e, {
-          source: payload.harness ?? "",
-          session: payload.session_id ?? "",
-          date: payload.date ?? "",
-          machine: payload.machine ?? machineId(),
-        });
+        const r = await store.writeEntry(
+          { ...e, entity },
+          {
+            source: payload.harness ?? "",
+            session: payload.session_id ?? "",
+            date: payload.date ?? "",
+            machine: payload.machine ?? machineId(),
+            raw: rawPtr,
+          }
+        );
         if (r.duplicate) sum.skipped++;
         else {
           sum.written++;
-          onLine(`    + [${e.entity || "-"}] ${e.text}`);
+          onLine(`    + [${entity || "-"}] ${e.text}`);
         }
       } catch (err) {
         failedHere++;

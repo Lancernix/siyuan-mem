@@ -100,6 +100,73 @@ export class SiYuan {
     return this.#post("/api/attr/getBlockAttrs", { id });
   }
 
+  /** 批量设属性。回填一整批条目的实体名时用，几十次单发太慢。 */
+  async setBlockAttrsBatch(pairs) {
+    // pairs: [{ id, attrs }]。空数组会被内核当参数错误，直接跳过。
+    if (!pairs?.length) return null;
+    return this.#post("/api/attr/batchSetBlockAttrs", { blockAttrs: pairs }, 30000);
+  }
+
+  /** 读块的 kramdown（含属性注释）。读待确认文档用这个，比拼 SQL 稳。 */
+  async getBlockKramdown(id) {
+    const d = await this.#post("/api/block/getBlockKramdown", { id });
+    return d?.kramdown ?? "";
+  }
+
+  /**
+   * 上传附件到 data/assets 下的子目录，返回 assets 相对路径（`assets/xxx/yyy.jsonl`）。
+   *
+   * 两个必须知道的：内核会自动给文件名加时间戳和随机后缀，所以路径必须以返回值为准，
+   * 不能按传入的文件名推；同名文件不会被覆盖，只会变成另一个新名字。
+   * 返回的是相对路径，站内访问要拼 baseUrl，例如 `GET /assets/xxx/yyy.jsonl`。
+   */
+  async uploadAsset(dirPath, filename, buffer, mime = "application/octet-stream") {
+    const form = new FormData();
+    // 结尾的斜杠不能省：内核把它当 "assets/子目录/"，省了会落到 assets/ 根下。
+    form.append("assetsDirPath", dirPath.endsWith("/") ? dirPath : `${dirPath}/`);
+    form.append("file[]", new Blob([buffer], { type: mime }), filename);
+
+    const headers = {};
+    if (this.#token) headers.Authorization = `Token ${this.#token}`;
+
+    let res;
+    try {
+      res = await fetch(`${this.#base}/api/asset/upload`, {
+        method: "POST",
+        headers,
+        body: form,
+        signal: AbortSignal.timeout(120_000),
+      });
+    } catch (e) {
+      const reason = e.name === "TimeoutError" ? "超时 120s" : e.message;
+      throw new Error(`上传附件失败（${filename}）：${reason}`);
+    }
+    if (!res.ok) throw new Error(`上传附件 HTTP ${res.status}（${filename}）`);
+    const body = await res.json();
+    if (body.code !== 0) throw new SiYuanError("/api/asset/upload", body.code, body.msg);
+    const failed = body.data?.failedFiles ?? body.data?.errFiles;
+    if (failed?.length) throw new Error(`上传附件失败（${filename}）：${JSON.stringify(failed).slice(0, 200)}`);
+    const path = body.data?.succFiles?.[0]?.path;
+    if (!path) throw new Error(`上传附件没有返回路径：${JSON.stringify(body.data).slice(0, 200)}`);
+    return path;
+  }
+
+  /** 按 assets 相对路径取回文本。只用于读原文，二进制不要走这里。 */
+  async getAsset(path) {
+    const url = `${this.#base}/${String(path).replace(/^\/+/, "")}`;
+    const headers = {};
+    if (this.#token) headers.Authorization = `Token ${this.#token}`;
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(60_000) });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`读取附件 HTTP ${res.status}（${path}）`);
+    return await res.text();
+  }
+
+  removeDoc(id) {
+    // 注意：这个接口返回 code:0 之后，SQL 索引里还要几秒才消失。
+    return this.#post("/api/filetree/removeDocByID", { id });
+  }
+
   sql(stmt) {
     return this.#post("/api/query/sql", { stmt });
   }

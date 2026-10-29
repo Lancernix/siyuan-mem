@@ -13,6 +13,17 @@ export const ATTR = {
   confidence: "custom-mem-confidence",
   /** 哪台机器上产生的。多机汇聚之后，没有这一栏就分不清来源。 */
   machine: "custom-mem-machine",
+  /**
+   * 原文指针：`assets/mem-raw/Mac/workbuddy/xxx.p1-….jsonl#120-180`。
+   * 前半段是附件真实路径（上传时内核会改名，所以必须存下来），后半段是轮次范围。
+   * 物理路径指向一个写进去就不再变的文件，所以重写日志、重新切分都不会让指针错位。
+   */
+  raw: "custom-mem-raw",
+  /** 原文那一行在 02-原文 里的块 id。方便从条目跳到索引，不参与定位。 */
+  rawpart: "custom-mem-rawpart",
+  /** 被谁取代 / 什么时候。链是通的，顺着能走到最新那条。 */
+  supersededBy: "custom-mem-superseded-by",
+  supersededAt: "custom-mem-superseded-at",
 };
 
 const esc = (v) => String(v ?? "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
@@ -105,6 +116,38 @@ export class Store {
     if (key === "changes") {
       return [`# ${title}`, "", "追加式变更日志，一行一次改动。审阅看这一页，不看全库。", ""].join("\n");
     }
+    if (key === "raw") {
+      return [
+        `# ${title}`,
+        "",
+        "每个 part 一行，链到 `assets/mem-raw/` 下的 `.jsonl` 原文。",
+        "**这一行是附件的保活锚点**：删掉它，附件就变成「未引用资源」，下次清理会一起带走。",
+        "条目上的 `custom-mem-raw` 指向具体文件和轮次范围，不是指这里。",
+        "",
+      ].join("\n");
+    }
+    if (key === "entities") {
+      return [
+        `# ${title}`,
+        "",
+        "一个实体一个段落，内容就是规范名。别名挂在 `custom-mem-aliases`（竖线分隔）。",
+        "抽取时会把这批名字带进 prompt，让模型优先复用；新名字由 `entities.mjs` 做归一。",
+        "",
+      ].join("\n");
+    }
+    if (key === "pending") {
+      return [
+        `# ${title}`,
+        "",
+        "打勾 = 合并（`- [X]`），写 `[-]` = 不是同一个，不动 = 继续待确认。",
+        "worker 每轮读一次：勾了的合并并从上面删掉，`[-]` 记进否定表也删掉。",
+        "",
+        "## 待确认",
+        "",
+        "## 已否定",
+        "",
+      ].join("\n");
+    }
     return "";
   }
 
@@ -162,6 +205,8 @@ export class Store {
         [ATTR.date]: date,
         [ATTR.confidence]: String(entry.confidence ?? 3),
         ...(meta.machine ? { [ATTR.machine]: String(meta.machine) } : {}),
+        ...(meta.raw ? { [ATTR.raw]: String(meta.raw) } : {}),
+        ...(meta.rawpart ? { [ATTR.rawpart]: String(meta.rawpart) } : {}),
       });
     } catch (e) {
       // 建块和设属性不是一次事务。属性没写成，这个块就是没有身份的孤儿：
@@ -176,12 +221,25 @@ export class Store {
     return { id: blockId, duplicate: false };
   }
 
-  /** 把一条标成被取代。不删。 */
+  /**
+   * 把一条标成被取代。不删，也不动它的原文指针——
+   * 改主意的时候最想知道的就是「之前为什么那么想」，那段原话就在旧指针里。
+   */
   async supersede(id, byId = "") {
-    await this.#sy.setBlockAttrs(id, { [ATTR.status]: "superseded" });
+    const attrs = { [ATTR.status]: "superseded" };
+    if (byId) {
+      attrs[ATTR.supersededBy] = byId;
+      attrs[ATTR.supersededAt] = new Date().toISOString().slice(0, 10);
+    }
+    await this.#sy.setBlockAttrs(id, attrs);
     if (this.#cfg.siyuan.logChanges !== false) {
       await this.#logChange(`~ superseded ${id}${byId ? ` → ${byId}` : ""}`);
     }
+  }
+
+  /** 各文档的块 id。raw / entities 要往对应文档里写。 */
+  async docIds() {
+    return await this.#ensure();
   }
 
   /**

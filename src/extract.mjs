@@ -17,37 +17,44 @@ const INJECT_PREFIX = "plugin:";
 
 export function normalizeTurns(turns) {
   const out = [];
-  const push = (role, text) => {
+  const push = (role, text, at) => {
     const last = out[out.length - 1];
     // 相邻同角色合并：日志里一条回复常被拆成多个事件（流式、分段发送），
     // 一条提问也可能连着两条。当成两轮处理，第二条会因为没有配对而被整段丢掉。
     if (last && last.role === role) {
       last.text = `${last.text}\n\n${text}`;
+      last.to = at;
       return;
     }
-    out.push({ role, text });
+    out.push({ role, text, from: at, to: at });
   };
-  for (const t of turns ?? []) {
+  (turns ?? []).forEach((t, idx) => {
     const role = t?.role ?? t?.type;
-    if (role !== "user" && role !== "assistant") continue;
-    if (t?.source?.kind && String(t.source.kind).startsWith(INJECT_PREFIX)) continue;
+    if (role !== "user" && role !== "assistant") return;
+    if (t?.source?.kind && String(t.source.kind).startsWith(INJECT_PREFIX)) return;
     const text = String(t?.text ?? "").trim();
-    if (!text) continue;
-    push(role, text);
-  }
+    if (!text) return;
+    push(role, text, idx);
+  });
   return out;
 }
 
-/** 用户一句 + 模型一句算一个 exchange，落单的用户话也算。 */
+/**
+ * 用户一句 + 模型一句算一个 exchange，落单的用户话也算。
+ *
+ * 每条带 from/to（原始 turns 的下标）：结论要能指回「这一批对话是哪几轮」，
+ * 否则条目上的原文指针只能指整个会话，等于没有。
+ */
 export function toExchanges(turns, minTurnChars = 25) {
   const out = [];
   let pending = null;
   for (const t of turns) {
     if (t.role === "user") {
       if (pending) out.push(pending);
-      pending = { q: t.text, a: "" };
+      pending = { q: t.text, a: "", from: t.from, to: t.to };
     } else if (pending) {
       pending.a = t.text;
+      pending.to = t.to;
       out.push(pending);
       pending = null;
     }
@@ -199,15 +206,20 @@ export function planBatches(exchanges, budget = DEFAULT_MAX_CHARS) {
   return out;
 }
 
-async function callModel(cfg, batch) {
+async function callModel(cfg, batch, entityShot = []) {
   const dialog = render(batch);
   if (dialog.length > HARD_MAX_CHARS) {
     throw new Error(`一批 ${dialog.length} 字，超过单次上限，分批有 bug`);
   }
+  // 已有实体清单放 system 里：它是规则的一部分，不是对话内容。
+  // 不放会怎样：同一款裤子在五个会话里长出五个名字，检索时查一个漏四个。
+  const system = entityShot.length
+    ? `${SYSTEM_PROMPT}\n\n已有实体（能对上就复用同名；不是同一个具体对象就别硬套，用新名字）：\n${entityShot.join("、")}`
+    : SYSTEM_PROMPT;
 
   const r = await chat(cfg, {
     messages: [
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: system },
       { role: "user", content: dialog },
     ],
     json: true,
@@ -253,19 +265,33 @@ function heuristicEntries(exchanges, fallbackEntity, limit) {
       entity: guessEntity(e.q, fallbackEntity),
       type: DECISION_HINT.test(sentence) ? "decision" : "fact",
       confidence: 2,
+      from: e.from,
+      to: e.to,
     });
     if (out.length >= limit) break;
   }
   return out;
 }
 
-/** 同一句话被两批都抽到时留置信度高的那条。 */
+/**
+ * 同一句话被两批都抽到时留置信度高的那条，但轮次范围取并集：
+ * 两批都提到了它，说明这段对话里两次都在说同一件事，指针覆盖两处才是对的。
+ */
 function mergeEntries(all, limit) {
   const seen = new Map();
+  const span = (a, b) => ({
+    from: a?.from == null ? b?.from : b?.from == null ? a.from : Math.min(a.from, b.from),
+    to: a?.to == null ? b?.to : b?.to == null ? a.to : Math.max(a.to, b.to),
+  });
   for (const e of all) {
     const key = e.text.replace(/\s+/g, "").slice(0, 40);
     const prev = seen.get(key);
-    if (!prev || (e.confidence ?? 0) > (prev.confidence ?? 0)) seen.set(key, e);
+    if (!prev) {
+      seen.set(key, e);
+      continue;
+    }
+    const winner = (e.confidence ?? 0) > (prev.confidence ?? 0) ? e : prev;
+    seen.set(key, { ...winner, ...span(prev, e) });
   }
   const merged = [...seen.values()].sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
   return { entries: merged.slice(0, limit), dropped: Math.max(0, merged.length - limit) };
@@ -273,8 +299,8 @@ function mergeEntries(all, limit) {
 
 /**
  * @param {object} cfg
- * @param {{q:string,a:string,note?:string}[]} exchanges
- * @param {{fallbackEntity?:string, useModel?:boolean}} opts
+ * @param {{q:string,a:string,from?:number,to?:number,note?:string}[]} exchanges
+ * @param {{fallbackEntity?:string, useModel?:boolean, entityShot?:string[]}} opts
  */
 export async function extractEntries(cfg, exchanges, opts = {}) {
   if (!exchanges.length) return { entries: [], mode: "empty", batches: 0, dropped: 0, usage: { prompt: 0, completion: 0 } };
@@ -299,11 +325,15 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
   let failures = 0;
   let lastError = "";
   for (const batch of plan) {
+    // 这一批覆盖哪几轮。条目继承它，指针才落得到具体段落上——
+    // 否则一条结论只能指整个会话（几十万字），等于没有原文。
+    const from = batch[0]?.from;
+    const to = batch[batch.length - 1]?.to;
     try {
-      const r = await callModel(cfg, batch);
+      const r = await callModel(cfg, batch, opts.entityShot ?? []);
       usage.prompt += r.usage.prompt;
       usage.completion += r.usage.completion;
-      all.push(...r.entries.slice(0, perBatch));
+      all.push(...r.entries.slice(0, perBatch).map((e) => ({ ...e, from, to })));
     } catch (e) {
       failures++;
       lastError = e.message;

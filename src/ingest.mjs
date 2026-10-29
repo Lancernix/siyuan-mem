@@ -68,6 +68,9 @@ function normalize(body, fallbackMachine = "") {
       machine: String(body?.machine ?? fallbackMachine).slice(0, 60),
       cwd: String(body?.cwd ?? "").slice(0, 500),
       date: /^\d{4}-\d{2}-\d{2}$/.test(String(body?.date ?? "")) ? body.date : new Date().toISOString().slice(0, 10),
+      // 推送方给的 [from, to) 是 0-based 下标，换算成 1-based 的起始轮次。
+      // 少了这个，增量推过来的每一包都会被当成「从第 1 轮开始」，原文指针全错位。
+      turnFrom: Array.isArray(body?.range) && Number.isFinite(Number(body.range[0])) ? Number(body.range[0]) + 1 : 1,
       turns: clean,
     },
     chars: clean.reduce((n, t) => n + t.text.length, 0),
