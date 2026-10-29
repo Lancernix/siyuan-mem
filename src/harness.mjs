@@ -13,16 +13,20 @@ export const ROOTS = [
   {
     harness: "workbuddy",
     dir: "~/.workbuddy/projects",
+    depth: 1,
     match: (f) => f.endsWith(".jsonl"),
     // 同目录下还有 *.file-rollback.ndjson（文件回滚记录），不是对话。
     skip: (f) => /\.(file-rollback|meta)\./.test(f),
   },
-  { harness: "qoder", dir: "~/.qoder/projects", match: (f) => f.endsWith(".jsonl") },
-  { harness: "claude", dir: "~/.claude/projects", match: (f) => f.endsWith(".jsonl") },
-  { harness: "omp", dir: "~/.omp/agent/sessions", match: (f) => f.endsWith(".jsonl") },
+  { harness: "qoder", dir: "~/.qoder/projects", depth: 1, match: (f) => f.endsWith(".jsonl") },
+  { harness: "claude", dir: "~/.claude/projects", depth: 1, match: (f) => f.endsWith(".jsonl") },
+  // OMP 的子代理转录放在会话目录里再下一层（<会话>/T4impl.jsonl、__advisor.jsonl），
+  // 深度 1 才是真会话。不加这一条，99 个"会话"里有 63 个是子代理。
+  { harness: "omp", dir: "~/.omp/agent/sessions", depth: 1, match: (f) => f.endsWith(".jsonl") },
   {
     harness: "dsh",
     dir: "~/.dsh/sessions",
+    depth: 2,
     match: (f) => f === "session.v4.jsonl.zstd" || f === "session.v4.jsonl",
   },
 ];
@@ -31,7 +35,7 @@ function expand(dir) {
   return dir.startsWith("~") ? join(homedir(), dir.slice(1)) : dir;
 }
 
-function walk(dir, match, skip, out, depth = 0) {
+function walk(dir, match, skip, out, depth = 0, wantDepth = -1) {
   if (depth > 4) return;
   let entries;
   try {
@@ -42,10 +46,11 @@ function walk(dir, match, skip, out, depth = 0) {
   for (const e of entries) {
     const p = join(dir, e.name);
     if (e.isDirectory()) {
-      walk(p, match, skip, out, depth + 1);
+      walk(p, match, skip, out, depth + 1, wantDepth);
       continue;
     }
     if (!e.isFile() || !match(e.name)) continue;
+    if (wantDepth >= 0 && depth !== wantDepth) continue;
     if (skip?.(e.name)) continue;
     let st;
     try {
@@ -66,7 +71,7 @@ export function listSessions(only = "") {
   for (const root of ROOTS) {
     if (only && root.harness !== only) continue;
     const found = [];
-    walk(expand(root.dir), root.match, root.skip, found);
+    walk(expand(root.dir), root.match, root.skip, found, 0, root.depth);
     for (const f of found) out.push({ harness: root.harness, ...f });
   }
   return out.sort((a, b) => b.mtime - a.mtime);

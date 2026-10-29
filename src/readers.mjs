@@ -122,22 +122,99 @@ function blocksToText(content) {
 }
 
 /**
+ * 工具调用 id → 工具名。
+ *
+ * Claude Code 的 tool_result 里只有 tool_use_id，名字在上一轮的 tool_use 块里，
+ * 不建这张表就无法判断"这条结果是不是子代理交回来的"。
+ */
+function toolUseMap(lines) {
+  const map = new Map();
+  for (const d of lines) {
+    const m = messageNode(d);
+    const blocks = Array.isArray(m?.content) ? m.content : [];
+    for (const b of blocks) {
+      if (/^(tool_use|tool_call|tooluse|function_call)$/i.test(b?.type ?? "") && b?.id && b?.name) {
+        map.set(b.id, b.name);
+      }
+    }
+  }
+  return map;
+}
+
+/** 这些工具名背后是一个子代理，它的返回是结论，不是工具噪音。 */
+const DELEGATE_TOOL = /^(task|agent|subagent|delegate|delegate_task|spawn|vibe_wait)$/i;
+
+/**
+ * 子代理交回来的那份总结。
+ *
+ * 子代理自己的会话日志整份不读（它和主线是两个话题），但它的**结论**会回到主会话：
+ * Claude Code 是 Task 工具的 tool_result，OMP 是 job 工具结果里包一段 `<task-result>`。
+ * 这份东西是把子代理丢掉的前提——不认它，丢的就是结论本身。
+ */
+function delegationText(m, idToName) {
+  const blocks = Array.isArray(m?.content) ? m.content : [];
+  let name = String(m?.toolName ?? m?.name ?? "");
+  let text = "";
+  const collect = (s) => {
+    if (s) text += (text ? "\n" : "") + s;
+  };
+  for (const b of blocks) {
+    if (typeof b === "string") {
+      collect(b);
+      continue;
+    }
+    if (b?.toolName) name ||= String(b.toolName ?? "");
+    if (!name && b?.tool_use_id) name = idToName.get(b.tool_use_id) ?? "";
+    // OMP 把工具输出放在 type=text 的块里，Claude 放在 tool_result 块里，两种都要认。
+    if (/tool_?result/i.test(b?.type ?? "")) {
+      const c = b?.content;
+      collect(
+        typeof c === "string" ? c
+          : Array.isArray(c) ? c.map((x) => (typeof x === "string" ? x : x?.text ?? "")).join("\n")
+          : typeof b?.text === "string" ? b.text : "",
+      );
+    } else if (typeof b?.text === "string") {
+      collect(b.text);
+    }
+  }
+  if (!text) return "";
+  // 派发回执和参数校验报错不是结论。"Spawned agent X — the result will be delivered later"
+  // 这类只有一行，收进去就是纯噪音。
+  if (/^\s*(Spawned agent|Validation failed for tool|Still Running)/.test(text)) return "";
+  // `<task-result>` 是 OMP 的封装；工具名命中说明这是一次委托调用。
+  if (/<task-result[ >]/.test(text) || DELEGATE_TOOL.test(name)) return text;
+  return "";
+}
+
+/**
  * @returns {{turns:{role:string,text:string}[], sessionId:string, cwd:string, skipped?:string}}
  */
 export function readMessages(lines) {
   const turns = [];
+  const idToName = toolUseMap(lines);
   let sessionId = "";
   let cwd = "";
   for (const d of lines) {
     sessionId ||= d?.sessionId ?? d?.id ?? "";
     cwd ||= d?.cwd ?? "";
 
-    // 子代理：Claude/Qoder 标 isSidechain，OMP 用 parentSession 指向父会话。
+    // 子代理：Claude/Qoder 标 isSidechain，DSH 用 delegationDepth。
+    // 注意 OMP 的 parentSession 是 handoff 续接（同一话题换个文件继续），那是真会话，不能跳。
     if (d?.isSidechain) continue;
-    if (d?.type === "session" && d.parentSession) return { turns: [], sessionId, cwd, skipped: "subagent" };
+    if (d?.type === "session" && Number(d.delegationDepth ?? 0) > 0) {
+      return { turns: [], sessionId, cwd, skipped: "subagent" };
+    }
 
     const m = messageNode(d);
     if (!m) continue;
+
+    // 子代理回报：以结论的身份进语料，别当成工具输出扔掉。
+    const report = delegationText(m, idToName);
+    if (report) {
+      turns.push({ role: "assistant", text: `（子代理回报）${cleanAssistantText(report)}` });
+      continue;
+    }
+
     const role = ROLE_ALIAS[String(m.role).toLowerCase()];
     if (!role) continue;
 
@@ -184,7 +261,7 @@ export function auditMessages(lines) {
 
   // 整份子代理会话：readMessages 会整份丢掉，账本也要跟着记成"未采用"，
   // 否则两边对不上——账上说收了，实际一条都没写。
-  if (lines.some((d) => d?.type === "session" && d.parentSession)) {
+  if (lines.some((d) => d?.type === "session" && Number(d.delegationDepth ?? 0) > 0)) {
     for (const d of lines) {
       acc.events++;
       const m = messageNode(d);
@@ -195,6 +272,7 @@ export function auditMessages(lines) {
     return acc;
   }
 
+  const idToName = toolUseMap(lines);
   for (const d of lines) {
     acc.events++;
     // 单条 sidechain（Claude/Qoder 的子代理消息）同样不采用。
@@ -209,6 +287,10 @@ export function auditMessages(lines) {
       add(/system|developer|inbox|spliced|compaction|custom/.test(typed) ? "injected" : "other", own.length);
       continue;
     }
+
+    // 子代理回报算语料：readMessages 会把它当一轮助手发言收下，账本必须一致。
+    const report = delegationText(m, idToName);
+    if (report) { add("kept", report.length); acc.keeps++; continue; }
 
     const rawRole = String(m.role).toLowerCase();
     const role = ROLE_ALIAS[rawRole];
