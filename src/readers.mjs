@@ -158,6 +158,95 @@ export function readMessages(lines) {
   return { turns, sessionId, cwd };
 }
 
+/* ---------- 账本：每一段文字去哪了 ---------- */
+
+const TEXT_BLOCK = /^(text|input_text|output_text)$/;
+
+function blockChars(b) {
+  if (typeof b === "string") return b.length;
+  if (!b || typeof b !== "object") return 0;
+  if (typeof b.text === "string") return b.text.length;
+  if (typeof b.thinking === "string") return b.thinking.length;
+  if (typeof b.content === "string") return b.content.length;
+  return 0;
+}
+
+/**
+ * 逐块统计：收进语料多少字，丢了多少字，为什么丢。
+ *
+ * readMessages 只回答"留下了什么"，回答不了"有没有悄悄漏掉"。这里把每条消息的每个块
+ * 都归一次类，五类加起来等于日志里全部消息文字；剩下的只有 id、时间戳、模型名这类结构字段。
+ * 哪天冒出第六类，就说明出现了没认出来的新格式。
+ */
+export function auditMessages(lines) {
+  const acc = { kept: 0, thinking: 0, tool: 0, injected: 0, other: 0, events: 0, keeps: 0, skipped: 0 };
+  const add = (k, n) => { acc[k] += n; };
+
+  // 整份子代理会话：readMessages 会整份丢掉，账本也要跟着记成"未采用"，
+  // 否则两边对不上——账上说收了，实际一条都没写。
+  if (lines.some((d) => d?.type === "session" && d.parentSession)) {
+    for (const d of lines) {
+      acc.events++;
+      const m = messageNode(d);
+      const blocks = Array.isArray(m?.content) ? m.content : [];
+      for (const b of blocks) add("injected", blockChars(b));
+    }
+    acc.skipped = 1;
+    return acc;
+  }
+
+  for (const d of lines) {
+    acc.events++;
+    // 单条 sidechain（Claude/Qoder 的子代理消息）同样不采用。
+    if (d?.isSidechain) { add("injected", JSON.stringify(d).length); continue; }
+
+    const m = messageNode(d);
+    if (!m) {
+      // 没有 role 的结构性事件：只关心带正文的（OMP 的 handoff、DSH 的 system/message）。
+      const own = typeof d?.content === "string" ? d.content : "";
+      if (!own) continue;
+      const typed = String(d?.type ?? "");
+      add(/system|developer|inbox|spliced|compaction|custom/.test(typed) ? "injected" : "other", own.length);
+      continue;
+    }
+
+    const rawRole = String(m.role).toLowerCase();
+    const role = ROLE_ALIAS[rawRole];
+    // 不是对话角色的消息：工具结果、系统/开发者注入。先按角色定性，再看块类型。
+    const roleCat = /tool/.test(rawRole) ? "tool" : /system|developer|agent/.test(rawRole) ? "injected" : null;
+    const kind = m?.source?.kind;
+    const pluginInjected = typeof kind === "string" && (kind.startsWith("plugin:") || kind === "tool");
+    const agentInjected = Boolean(m.attribution && m.attribution !== "user");
+
+    const blocks = Array.isArray(m.content)
+      ? m.content
+      : typeof m.content === "string"
+        ? [{ type: "text", text: m.content }]
+        : [];
+
+    for (const b of blocks) {
+      const t = typeof b === "string" ? "text" : (b?.type ?? "text");
+      const n = blockChars(b);
+      if (!n) continue;
+      if (roleCat) { add(roleCat, n); continue; }              // toolResult / developer / system
+      if (!role) { add("other", n); continue; }                // fileMention 这类
+      if (t === "thinking" || t === "reasoning") { add("thinking", n); continue; }
+      if (!TEXT_BLOCK.test(t)) { add("tool", n); continue; }   // tool_use / tool_result / image
+      if (pluginInjected || agentInjected) { add("injected", n); continue; }
+
+      const raw = String(b.text ?? "");
+      if (INJECTED_BLOCK.test(raw)) { add("injected", n); continue; }
+      // WorkBuddy 把工具结果塞进 user 消息的正文里，带这两个前缀。
+      if (/^<(?:function_call|file-history)/.test(raw)) { add("tool", n); continue; }
+      const clean = role === "user" ? cleanUserText(raw) : cleanAssistantText(raw);
+      if (!clean) { add("injected", n); continue; }            // 整条都是 <system-reminder> 这类外壳
+      add("kept", clean.length);
+      acc.keeps++;
+    }
+  }
+  return acc;
+}
+
 /**
  * 判断这是哪家的日志——只用来给条目打来源标签，不参与解析。
  *
@@ -185,22 +274,27 @@ export function sniff(lines) {
 /** 允许用 --format 手动指定的来源名。只影响标签，不影响解析。 */
 export const HARNESS_NAMES = ["workbuddy", "claude", "qoder", "omp", "dsh", "generic"];
 
-/**
- * 读一个会话日志。format 留空则按内容嗅探（只影响标签）。
- * @returns {{turns:{role:string,text:string}[], sessionId:string, cwd:string, harness:string}}
- */
-export function readLog(file, format = "") {
-  const raw = readText(file);
+/** 读成 JSON 行。坏行跳过：日志可能在写的时候被读到，最后一行通常是半截。 */
+export function readJsonLines(file) {
   const lines = [];
-  for (const line of raw.split("\n")) {
+  for (const line of readText(file).split("\n")) {
     const s = line.trim();
     if (!s) continue;
     try {
       lines.push(JSON.parse(s));
     } catch {
-      // 坏行跳过：日志可能在写的时候被读到，最后一行通常是半截。
+      // 见上
     }
   }
+  return lines;
+}
+
+/**
+ * 读一个会话日志。format 留空则按内容嗅探（只影响标签）。
+ * @returns {{turns:{role:string,text:string}[], sessionId:string, cwd:string, harness:string}}
+ */
+export function readLog(file, format = "") {
+  const lines = readJsonLines(file);
   const out = readMessages(lines);
   out.harness = format || sniff(lines) || "unknown";
   out.turns = dedupe(out.turns);
