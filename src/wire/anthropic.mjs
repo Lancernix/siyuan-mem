@@ -56,7 +56,12 @@ export async function send(m, { messages, maxTokens, temperature, timeoutMs }) {
     .join("");
   return {
     text,
-    usage: { prompt: data.usage?.input_tokens ?? 0, completion: data.usage?.output_tokens ?? 0 },
+    usage: {
+      prompt: data.usage?.input_tokens ?? 0,
+      completion: data.usage?.output_tokens ?? 0,
+      cached: data.usage?.cache_read_input_tokens ?? 0,
+      cacheWrite: data.usage?.cache_creation_input_tokens ?? 0,
+    },
   };
 }
 

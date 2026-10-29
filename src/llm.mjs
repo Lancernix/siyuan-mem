@@ -18,15 +18,16 @@
 import { appendFileSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { HOME_DIR, CONFIG_PATH, ensureDirs } from "./config.mjs";
+import { loadCatalogSync, findProvider, wireOf, envKeyOf } from "./catalog.mjs";
 
 /** 各家预设。baseUrl 写到版本号为止，具体路径由 wire 拼。 */
 export const PROVIDERS = {
-  deepseek: { wire: "openai", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat", jsonMode: true },
+  deepseek: { wire: "openai", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-v4-flash", jsonMode: true },
   qwen: { wire: "openai", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus", jsonMode: true },
-  moonshot: { wire: "openai", baseUrl: "https://api.moonshot.cn/v1", model: "moonshot-v1-32k", jsonMode: true },
-  zhipu: { wire: "openai", baseUrl: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-plus", jsonMode: true },
-  openai: { wire: "openai", baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini", jsonMode: true },
-  openrouter: { wire: "openai", baseUrl: "https://openrouter.ai/api/v1", model: "deepseek/deepseek-chat", jsonMode: true },
+  moonshot: { wire: "openai", baseUrl: "https://api.moonshot.cn/v1", model: "kimi-k3", jsonMode: true },
+  zhipu: { wire: "openai", baseUrl: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4.7", jsonMode: true },
+  openai: { wire: "openai", baseUrl: "https://api.openai.com/v1", model: "gpt-5-mini", jsonMode: true },
+  openrouter: { wire: "openai", baseUrl: "https://openrouter.ai/api/v1", model: "deepseek/deepseek-v4-flash", jsonMode: true },
   anthropic: { wire: "anthropic", baseUrl: "https://api.anthropic.com/v1", model: "claude-sonnet-4-6", jsonMode: false },
   gemini: { wire: "gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-3.5-flash", jsonMode: true },
   ollama: { wire: "openai", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5:14b", jsonMode: false, keyless: true },
@@ -46,12 +47,21 @@ export const USAGE_PATH = join(HOME_DIR, "usage.jsonl");
 export function resolveModel(cfg) {
   const m = cfg?.model ?? {};
   const preset = PROVIDERS[m.provider] ?? null;
+  // 预设里没有的 provider 去 models.dev 目录里找：那边有 baseUrl、env 变量名、模型清单，
+  // 比手抄可靠，也不会因为哪家换了域名就失效。
+  const fromCatalog = preset ? null : findProvider(loadCatalogSync().providers, m.provider);
+  const envKey = m.apiKey ? null : fromCatalog ? envKeyOf(fromCatalog) : null;
+
+  const provider = m.provider ?? "custom";
+  const keyless = preset?.keyless || (!m.apiKey && Boolean(envKey));
   return {
-    provider: m.provider ?? "custom",
-    wire: m.wire || preset?.wire || "openai",
-    baseUrl: (m.baseUrl || preset?.baseUrl || "").replace(/\/+$/, ""),
+    provider,
+    wire: m.wire || preset?.wire || (fromCatalog ? wireOf(fromCatalog) : null) || "openai",
+    baseUrl: (m.baseUrl || preset?.baseUrl || fromCatalog?.api || "").replace(/\/+$/, ""),
     model: m.name || preset?.model || "",
-    apiKey: m.apiKey || "",
+    apiKey: m.apiKey || envKey?.value || "",
+    apiKeyFrom: envKey?.name ?? (m.apiKey ? "config" : ""),
+    keyless,
     jsonMode: m.jsonMode ?? preset?.jsonMode ?? false,
     timeoutMs: m.timeoutMs ?? 45_000,
     retries: m.retries ?? 3,
@@ -63,8 +73,7 @@ export function resolveModel(cfg) {
 /** 有 key，或者本地部署（ollama/lmstudio 不要 key）。 */
 export function hasModel(cfg) {
   const m = resolveModel(cfg);
-  const keyless = PROVIDERS[m.provider]?.keyless;
-  return Boolean(m.baseUrl && m.model && (m.apiKey || keyless));
+  return Boolean(m.baseUrl && m.model && (m.apiKey || m.keyless));
 }
 
 function record(entry) {
@@ -79,7 +88,7 @@ function record(entry) {
 /** 今天的调用次数与 token 消耗。没配 key 时返回全零，不报错。 */
 export function usageToday() {
   const day = new Date().toISOString().slice(0, 10);
-  const out = { calls: 0, prompt: 0, completion: 0, failed: 0 };
+  const out = { calls: 0, prompt: 0, completion: 0, cached: 0, cacheWrite: 0, failed: 0 };
   if (!existsSync(USAGE_PATH)) return out;
   for (const line of readFileSync(USAGE_PATH, "utf8").split("\n")) {
     if (!line.trim()) continue;
@@ -93,6 +102,8 @@ export function usageToday() {
     out.calls++;
     out.prompt += r.prompt ?? 0;
     out.completion += r.completion ?? 0;
+    out.cached += r.cached ?? 0;
+    out.cacheWrite += r.cacheWrite ?? 0;
     if (r.error) out.failed++;
   }
   return out;
@@ -209,16 +220,25 @@ export async function probe(cfg) {
 /** 把预设写进配置。key 只写进 home 下的 config.json（0600），不进项目目录。 */
 export function saveModelChoice(provider, { apiKey, model, wire } = {}) {
   const preset = PROVIDERS[provider];
-  if (!preset) throw new Error(`不认识的 provider：${provider}。可选：${Object.keys(PROVIDERS).join(", ")}`);
+  // 预设之外还有目录里的七十来家：有 api 地址和 env 变量名就够用了。
+  const fromCatalog = preset ? null : findProvider(loadCatalogSync().providers, provider);
+  if (!preset && !fromCatalog) {
+    throw new Error(
+      `不认识的 provider：${provider}。\n  预设：${Object.keys(PROVIDERS).join(", ")}\n  或先 mem model refresh 拉目录（models.dev，七十多家）`
+    );
+  }
+  const baseUrl = preset?.baseUrl || fromCatalog?.api || "";
+  const name = model || preset?.model || "";
+  if (!name) throw new Error(`目录里的 ${provider} 没有默认模型，加 --name 指定一个：mem model list ${provider}`);
   ensureDirs();
   let cfg = {};
   if (existsSync(CONFIG_PATH)) cfg = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
   cfg.model = {
     ...(cfg.model ?? {}),
     provider,
-    wire: wire || preset.wire,
-    baseUrl: preset.baseUrl,
-    name: model || preset.model,
+    wire: wire || preset?.wire || wireOf(fromCatalog),
+    baseUrl,
+    name,
     ...(apiKey ? { apiKey } : {}),
   };
   writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });

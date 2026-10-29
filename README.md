@@ -58,6 +58,8 @@ node src/cli.mjs audit --all         # 全部会话的对账表
 node src/cli.mjs review 20           # 最近 20 条，人工扫一眼
 node src/cli.mjs remember "..." --entity 思源MCP --type fact
 node src/cli.mjs forget <块id>        # 标成过时，不删
+node src/cli.mjs model list qwen     # 目录里的 provider / 某家的模型（带价格）
+node src/cli.mjs model refresh       # 刷新 models.dev 目录
 node src/cli.mjs ui                  # 本地面板 127.0.0.1:7787
 node src/cli.mjs service install     # 装成 launchd 服务
 ```
@@ -104,6 +106,20 @@ Gemini 那 1.0 是官方的建议：Gemini 3 调低温度反而会退化、循�
 
 预设十家：`deepseek / qwen / moonshot / zhipu / openai / openrouter / anthropic / gemini / ollama / lmstudio`（本地两家不要 key）。自定义端点用 `model.wire` 指定协议。
 
+### 模型目录（抄 OpenCode 的做法）
+
+预设里的模型名会过期，这不是假设：写这份文档时 `deepseek-chat` 已经下架，目录里现在是 `deepseek-v4-flash / v4-pro`；`moonshot-v1-32k` 换成了 `kimi-k3`。所以 provider 和模型元数据不自己维护，直接读 [models.dev](https://models.dev)（OpenCode 用的同一份）：233 家、8909 个模型，带价格、上下文长度、环境变量名。
+
+```bash
+mem model refresh            # 拉一份到 ~/.siyuan-mem/models.json（7 天自动过期）
+mem model list qwen          # 列 provider；给的是某一家就列它下面的模型（带价格）
+mem model                    # 当前模型的单价、上下文、目录日期
+```
+
+只抄它的**数据**，不抄它的**技术栈**。OpenCode 用 `npm` 字段去挑 SDK；我们是按同一个字段反推协议（`@ai-sdk/anthropic*` → anthropic，`@ai-sdk/google*` → gemini，其余 openai 兼容），请求还是自己那三个 wire 发。pi-ai（`@mariozechner/pi-ai`）走的是另一条路——每个协议装一个官方 SDK，连 Bedrock、Mistral 的 SDK 一起打包，实测 104 个包、132MB `node_modules`，编译时还会因为少一个 `@opentelemetry/api` 直接失败。我们只有一种调用形状，为一张表背这些重量不划算。
+
+目录还带来两个附带好处：配置里没写 key 时会去读 provider 对应的环境变量（`DEEPSEEK_API_KEY` 之类）；模型名不在目录里时 `mem model` 会提示"可能是旧名"。
+
 ```bash
 mem model                                            # provider、协议、地址、模型、key（打码）、今日用量
 mem model use anthropic --key sk-ant-... --name claude-sonnet-4-6
@@ -115,7 +131,7 @@ mem model test                                       # 真发一次请求，自�
 三件 SDK 替不掉、必须自己做的事：
 
 - **JSON 模式回退**：服务端不认 `response_format`（或 `responseMimeType`）会回 400。这时去掉该字段重发一次，并标记 `fallback`——不让整段会话因此降级成规则抽取。prompt 相应要求顶层是对象 `{"entries":[…]}`。
-- **按调用打 tag 的用量账本**：`~/.siyuan-mem/usage.jsonl` 记 model / wire / tag / tokens / 耗时，`mem status` 显示今日汇总，`serve` 每轮日志带 tokens。回灌一百多个会话时，这是唯一能判断"还要不要继续跑"的指标。
+- **按调用打 tag 的用量账本**：`~/.siyuan-mem/usage.jsonl` 记 model / wire / tag / tokens / 耗时，`mem status` 显示今日汇总，`serve` 每轮日志带 tokens。回灌一百多个会话时，这是唯一能判断"还要不要继续跑"的指标。**缓存命中的 token 单独记**（OpenAI 的 `prompt_tokens_details.cached_tokens`、Anthropic 的 `cache_read_input_tokens`、Gemini 的 `cachedContentTokenCount`）——缓存价便宜一个数量级，混在输入里会让成本估算虚高一截。
 - **统一的重试策略**：429/408/409/5xx 退避重试（认 `retry-after`），4xx 其余立刻抛。放在策略层而不是各家 adapter 里，这样"试了几次"在三种协议之间才可比。
 
 `npm test` 用本地假接口测九条：429 重试（真的等了 `Retry-After`）、`response_format` 被拒后回退、401 不重试、5xx 重试到上限、Anthropic 的请求形状与解析、Gemini 的路径与角色映射、预设映射、抽取整链、记账可读。不发真请求、不花钱，跑完不碰真实 `usage.jsonl`。
@@ -302,6 +318,7 @@ src/
   service.mjs   launchd / systemd 注册
   llm.mjs       模型调用层：重试、JSON 模式、用量记账、provider 预设
   wire/         三种协议各一份：openai（SDK）/ anthropic（fetch）/ gemini（fetch）
+  catalog.mjs   models.dev 目录：provider 地址、env 变量名、价格、上下文
 plugin/
   index.mjs     DSH 插件
 test/           模型调用层的回归测试（本地假接口，不花钱）

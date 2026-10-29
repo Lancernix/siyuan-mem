@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
 import { CONFIG_PATH, INBOX_DIR, loadConfig, LOG_PATH } from "./config.mjs";
+import { CATALOG_PATH } from "./catalog.mjs";
 import { PROVIDERS, resolveModel, hasModel, probe as probeModel, saveModelChoice, maskKey, usageToday } from "./llm.mjs";
+import { loadCatalog, loadCatalogSync, wireOf, findProvider, modelInfo } from "./catalog.mjs";
 import { formatHits } from "./store.mjs";
 import { normalizeTurns, toExchanges } from "./extract.mjs";
 import { pending } from "./inbox.mjs";
@@ -31,6 +33,8 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
   mem model                    看当前模型配置与今天的用量
   mem model use <provider> --key sk-...  [--name 模型名] [--wire openai|anthropic|gemini]
   mem model test               真发一次请求，自证 key / 地址 / JSON 模式都通
+  mem model list [关键词]      列目录里的 provider（models.dev，七十多家）
+  mem model refresh            刷新目录缓存（7 天自动过期）
   mem ui [--port 7787]         起本地面板（只读；点"跑一轮"会自己抢锁）
   mem service [status]         看系统服务状态
   mem service install [--interval 分钟] [--print]   装成 launchd 服务
@@ -93,7 +97,10 @@ async function cmdStatus() {
   const mm = resolveModel(cfg);
   console.log(`模型         ${hasModel(cfg) ? `${mm.provider} / ${mm.model}` : "未配置（走规则抽取）"}`);
   const u = usageToday();
-  if (u.calls) console.log(`今日用量     ${u.calls} 次调用，输入 ${u.prompt} / 输出 ${u.completion} tokens${u.failed ? `，失败 ${u.failed}` : ""}`);
+  if (u.calls) {
+    const cache = u.cached ? `（缓存命中 ${u.cached}）` : "";
+    console.log(`今日用量     ${u.calls} 次调用，输入 ${u.prompt}${cache} / 输出 ${u.completion} tokens${u.failed ? `，失败 ${u.failed}` : ""}`);
+  }
   console.log(`待处理       ${pending().length} 个会话在队列里`);
   console.log(`服务         ${svcLine}`);
 }
@@ -335,7 +342,22 @@ async function cmdModel(args, flags) {
     console.log(`模型         ${m.model || "（未配置）"}`);
     console.log(`key          ${maskKey(m.apiKey)}`);
     console.log(`JSON 模式    ${m.jsonMode ? "开" : "关"}`);
-    console.log(`今日用量     ${u.calls ? `${u.calls} 次，输入 ${u.prompt} / 输出 ${u.completion} tokens` : "还没有调用"}`);
+    const cat = loadCatalogSync();
+    if (cat.providers) {
+      console.log(`目录         ${Object.keys(cat.providers).length} 家（${new Date(cat.fetchedAt).toLocaleDateString("zh-CN")}）`);
+      const hit = findProvider(cat.providers, m.provider);
+      const info = hit && modelInfo(hit, m.model);
+      if (info?.cost) {
+        const c = info.cost;
+        console.log(`价格         $${c.input}/M 输入，$${c.output}/M 输出${c.cache_read ? `，缓存 $${c.cache_read}/M` : ""}`);
+      }
+      if (info?.limit?.context) console.log(`上下文       ${Math.round(info.limit.context / 1000)}k`);
+      if (hit && m.model && !info) {
+        // 预设里的模型名会过期（deepseek-chat 已经下架了），目录是最好的时间戳。
+        console.log(`提示         ${m.model} 不在目录里，可能是旧名：mem model list ${m.provider}`);
+      }
+    }
+    console.log(`今日用量     ${u.calls ? `${u.calls} 次，输入 ${u.prompt}${u.cached ? `（缓存 ${u.cached}）` : ""} / 输出 ${u.completion} tokens` : "还没有调用"}`);
     console.log(`\n可选 provider：${Object.keys(PROVIDERS).join(", ")}`);
     console.log(`协议三选一：openai / anthropic / gemini（自定义端点用 model.wire 指定）`);
     return;
@@ -348,6 +370,51 @@ async function cmdModel(args, flags) {
     console.log(`已写入 ${CONFIG_PATH}`);
     console.log(`  ${m.provider} / ${m.model}  协议 ${m.wire}  key ${maskKey(m.apiKey)}  JSON ${m.jsonMode ? "开" : "关"}`);
     console.log("  下一步：mem model test");
+    return;
+  }
+
+  if (sub === "list") {
+    const q = String(args[1] ?? "").toLowerCase();
+    const cat = await loadCatalog({ refresh: Boolean(flags.refresh) });
+    if (!cat.providers) throw new Error(`目录拿不到：${cat.error ?? "没缓存"}（联网跑一次 mem model refresh）`);
+
+    // 给了参数且正好是某一家 → 列它下面的模型（带价格），比列 233 家有用得多。
+    const one = findProvider(cat.providers, q);
+    if (q && one) {
+      const cur = resolveModel(cfg);
+      const ms = Object.entries(one.models ?? {});
+      console.log(`${one.id}（${one.name ?? one.id}）  ${ms.length} 个模型  ${wireOf(one)}  ${one.api ?? ""}\n`);
+      for (const [id, m] of ms.slice(0, 80)) {
+        const c = m.cost ?? {};
+        const price = c.input != null ? `$${c.input}/$${c.output} 每 M` : "-";
+        const ctx = m.limit?.context ? `${Math.round(m.limit.context / 1000)}k` : "";
+        const mark = id === cur.model && cur.provider === one.id ? " ← 当前" : "";
+        console.log(`  ${id.padEnd(38)} ${price.padEnd(20)} ${ctx}${mark}`);
+      }
+      if (ms.length > 80) console.log(`  …还有 ${ms.length - 80} 个`);
+      console.log(`\n用法：mem model use ${one.id} --name <上面某个 id>`);
+      return;
+    }
+
+    const rows = Object.entries(cat.providers)
+      .map(([id, p]) => ({ id, name: p.name ?? id, wire: wireOf(p), n: Object.keys(p.models ?? {}).length, env: (p.env ?? []).join(",") }))
+      .filter((r) => !q || r.id.toLowerCase().includes(q) || r.name.toLowerCase().includes(q))
+      .sort((a, b) => b.n - a.n);
+    console.log(`${rows.length} 家  （目录 ${cat.source}，${new Date(cat.fetchedAt).toLocaleString("zh-CN")}）\n`);
+    for (const r of rows.slice(0, 60)) {
+      console.log(`  ${r.id.padEnd(22)} ${String(r.n).padStart(3)} 个模型  ${r.wire.padEnd(9)} ${r.env || "-"}`);
+    }
+    if (rows.length > 60) console.log(`  …还有 ${rows.length - 60} 家，加关键词过滤`);
+    console.log("\n用法：mem model use <id> --name <模型> [--key ...]");
+    return;
+  }
+
+  if (sub === "refresh") {
+    const cat = await loadCatalog({ refresh: true });
+    if (!cat.providers) throw new Error(`刷新失败：${cat.error ?? "未知原因"}`);
+    const models = Object.values(cat.providers).reduce((n, p) => n + Object.keys(p.models ?? {}).length, 0);
+    console.log(`已更新 ${Object.keys(cat.providers).length} 家、${models} 个模型（${cat.source}）`);
+    console.log(`缓存：${CATALOG_PATH}`);
     return;
   }
 

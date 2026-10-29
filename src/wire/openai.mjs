@@ -28,7 +28,12 @@ export async function send(m, { messages, json, maxTokens, temperature, timeoutM
     });
     return {
       text: res.choices?.[0]?.message?.content ?? "",
-      usage: { prompt: res.usage?.prompt_tokens ?? 0, completion: res.usage?.completion_tokens ?? 0 },
+      usage: {
+        prompt: res.usage?.prompt_tokens ?? 0,
+        completion: res.usage?.completion_tokens ?? 0,
+        // 缓存命中的输入单独算钱（便宜一个数量级），不记下来就没法估真实成本。
+        cached: res.usage?.prompt_tokens_details?.cached_tokens ?? 0,
+      },
     };
   } catch (e) {
     throw shape(e);
