@@ -42,7 +42,7 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
   mem remember <文本> [--entity X] [--type decision|fact|preference|reference]
   mem forget <块id>            标成 superseded（不删）
   mem model                    看当前模型配置与今天的用量
-  mem model use <provider> --key sk-...  [--name 模型名] [--wire openai|anthropic|gemini]
+  mem model use <provider> [--key sk-...] [--name 模型名] [--wire openai|anthropic|gemini] [--base URL]
   mem model test               真发一次请求，自证 key / 地址 / JSON 模式都通
   mem model list [关键词]      列目录里的 provider（models.dev，七十多家）
   mem model refresh            刷新目录缓存（7 天自动过期）
@@ -63,7 +63,7 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 `;
 
 /** 只有这几个键吃后面的值，其余 --xxx 一律当布尔，免得 "search --all 风盾" 把查询词吃掉。 */
-const VALUED = new Set(["entity", "type", "confidence", "limit", "format", "n", "interval", "key", "name", "wire", "port", "to", "token", "machine", "quiet", "every", "bind", "alias", "chars"]);
+const VALUED = new Set(["entity", "type", "confidence", "limit", "format", "n", "interval", "key", "name", "wire", "port", "to", "token", "machine", "quiet", "every", "bind", "alias", "chars", "base"]);
 
 function parseArgs(argv) {
   const flags = {};
@@ -361,7 +361,12 @@ async function cmdModel(args, flags) {
     console.log(`provider     ${m.provider}（协议 ${m.wire}）`);
     console.log(`baseUrl      ${m.baseUrl || "（未配置）"}`);
     console.log(`模型         ${m.model || "（未配置）"}`);
-    console.log(`key          ${maskKey(m.apiKey)}`);
+    const fromEnv = m.apiKeyFrom && m.apiKeyFrom !== "config";
+    console.log(
+      `key          ${
+        fromEnv ? `${maskKey(m.apiKey)}  ← 环境变量 ${m.apiKeyFrom}（配置文件里没有）` : m.apiKey ? `${maskKey(m.apiKey)}  ← 配置文件` : "（未配置）"
+      }`
+    );
     console.log(`JSON 模式    ${m.jsonMode ? "开" : "关"}`);
     const cat = loadCatalogSync();
     if (cat.providers) {
@@ -387,9 +392,15 @@ async function cmdModel(args, flags) {
   if (sub === "use") {
     const provider = args[1];
     if (!provider) throw new Error(`要指定一家：${Object.keys(PROVIDERS).join(", ")}`);
-    const m = saveModelChoice(provider, { apiKey: flags.key, model: flags.name, wire: flags.wire });
+    const written = saveModelChoice(provider, { apiKey: flags.key, model: flags.name, wire: flags.wire, base: flags.base });
+    // 用 resolveModel 重新解析一遍再打印：saveModelChoice 只写了部分字段，
+    // 直接拿它打印会和 `mem model` 显示的不一致（jsonMode、key 来源都会打架）。
+    const m = resolveModel({ model: written });
     console.log(`已写入 ${CONFIG_PATH}`);
-    console.log(`  ${m.provider} / ${m.model}  协议 ${m.wire}  key ${maskKey(m.apiKey)}  JSON ${m.jsonMode ? "开" : "关"}`);
+    console.log(
+      `  ${m.provider} / ${m.model}  协议 ${m.wire}  ` +
+        `key ${m.apiKey ? maskKey(m.apiKey) : m.apiKeyFrom ? `从环境变量 ${m.apiKeyFrom} 读` : "（未配置）"}`
+    );
     console.log("  下一步：mem model test");
     return;
   }
@@ -440,7 +451,13 @@ async function cmdModel(args, flags) {
   }
 
   if (sub === "test") {
-    if (!hasModel(cfg)) throw new Error("还没配 key：mem model use deepseek --key sk-...");
+    if (!hasModel(cfg)) {
+      throw new Error(
+        "还没有可用的 key。两条路：\n" +
+          "  · 写进配置：mem model use <provider> --key sk-...（文件权限 0600）\n" +
+          "  · 只放环境变量：export ARK_API_KEY=... 然后 mem model use volcengine --name <模型>（配置里不落明文）"
+      );
+    }
     const r = await probeModel(cfg);
     console.log(`通了：${r.provider} / ${r.model}（${r.wire}）  ${r.ms}ms  ${r.attempts} 次尝试`);
     console.log(`  tokens 输入 ${r.usage.prompt} / 输出 ${r.usage.completion}  JSON 模式 ${r.jsonOk ? "生效" : "没生效（退回提示词约束）"}`);
