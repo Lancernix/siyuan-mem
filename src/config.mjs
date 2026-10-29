@@ -11,6 +11,9 @@ export const DONE_DIR = join(HOME_DIR, "done");
 export const STATE_PATH = join(HOME_DIR, "state.json");
 /** 每个会话日志读到哪儿了。没有它，同一个会话每次都要整份重发一遍。 */
 export const OFFSET_PATH = join(HOME_DIR, "offsets.json");
+/** 进程锁与轮次日志。放这里而不是 serve.mjs，免得 ui.mjs 为了拿路径反向依赖 serve。 */
+export const LOCK_PATH = join(HOME_DIR, "serve.lock");
+export const LOG_PATH = join(HOME_DIR, "serve.log");
 
 const DEFAULTS = {
   siyuan: {
@@ -36,6 +39,11 @@ const DEFAULTS = {
     quietSeconds: 180,
     /** 每轮最多投几个会话，防止第一次跑就把 105 个会话一起塞进模型。 */
     maxSessionsPerRound: 8,
+  },
+  ui: {
+    /** 本地面板。只有 127.0.0.1，没有鉴权，别绑 0.0.0.0。 */
+    enabled: true,
+    port: 7787,
   },
   extract: {
     minTurnChars: 25,

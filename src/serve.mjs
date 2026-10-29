@@ -23,13 +23,13 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { hostname } from "node:os";
-import { HOME_DIR, ensureDirs, loadConfig, loadOffsets } from "./config.mjs";
+import { HOME_DIR, ensureDirs, loadConfig, loadOffsets, LOCK_PATH, LOG_PATH } from "./config.mjs";
 import { listSessions } from "./harness.mjs";
 import { enqueueLog, processQueue, assertModel } from "./jobs.mjs";
 import { SiYuan } from "./siyuan.mjs";
+import { startUi } from "./ui.mjs";
 
-export const LOCK_PATH = join(HOME_DIR, "serve.lock");
-export const LOG_PATH = join(HOME_DIR, "serve.log");
+export { LOCK_PATH, LOG_PATH };
 
 /** 单轮失败后第一次等 1 分钟，之后翻倍，最多 30 分钟。 */
 const RETRY_BASE_MS = 60_000;
@@ -224,13 +224,36 @@ export async function serve({ once = false, dry = false, useModel = true, interv
   const log = makeLogger();
 
   // 起不来比起一直重试好：没 key 的时候每轮都会失败在同一个地方，日志只会刷屏。
-  assertModel(cfg, { useModel, dry });
+  // 这里"干净退出"（exit 0）是有意的：launchd 的 KeepAlive 只对失败重启，
+  // 配置不对就退出而不是每 30 秒撞一次同一个墙。
+  try {
+    assertModel(cfg, { useModel, dry });
+  } catch (e) {
+    log(`配置问题，这次不启动：${e.message.split("\n")[0]}`);
+    log("  配好之后：mem service install 再装一次，或 launchctl kickstart -k gui/$(id -u)/com.siyuan.mem");
+    return;
+  }
 
   acquire({ force, log });
   log(
     `启动 pid ${process.pid}，每 ${Math.round(gap / 60_000)} 分钟一轮${once ? "（单轮）" : ""}` +
       `${dry ? "，--dry 不写思源" : ""}${useModel ? "" : "，--no-model 走规则抽取"}`
   );
+
+  // 面板跟着常驻进程起：没有它就只能 tail 日志。绑定在 127.0.0.1，没有鉴权，
+  // 所以绝不绑 0.0.0.0——局域网里任何设备都能读你的记忆库。
+  let ui = null;
+  if (cfg.ui?.enabled !== false && !once) {
+    try {
+      ui = startUi({
+        port: cfg.ui?.port ?? 7787,
+        runRound: (logFn) => runRound({ dry, useModel, log: logFn ?? log }),
+      });
+      log(`面板 ${ui.url}`);
+    } catch (e) {
+      log(`  面板起不来（${e.message}），继续跑`);
+    }
+  }
 
   let stop = false;
   const onSignal = (sig) => {
@@ -276,6 +299,7 @@ export async function serve({ once = false, dry = false, useModel = true, interv
     await sleep(wait, () => stop);
   }
 
+  if (ui) await ui.close().catch(() => {});
   release();
   if (lastError) {
     process.exitCode = 1;

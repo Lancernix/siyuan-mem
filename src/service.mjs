@@ -1,0 +1,158 @@
+/**
+ * 注册成系统服务。macOS 用 launchd，Linux 只打印 systemd 单元（不自动装，
+ * 各发行版的路径和权限差太多，自动装比不装更危险）。
+ *
+ * 有个坑值得记：plist 里的可执行文件必须是绝对路径，而且 launchd 的 PATH 只有
+ * /usr/bin:/bin:/usr/sbin:/sbin。所以优先指向我们用 bun 编出来的 ~/.siyuan-mem/mem
+ * ——它是自带运行时的单文件，谁升级 node/bun 都影响不到它。
+ */
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { HOME_DIR } from "./config.mjs";
+
+export const LABEL = "com.siyuan.mem";
+export const PLIST_PATH = join(homedir(), "Library/LaunchAgents", `${LABEL}.plist`);
+const CLI = fileURLToPath(new URL("./cli.mjs", import.meta.url));
+
+/** 首选单文件二进制；没有就退回 mise 的 node shim；再不行用当前 node。 */
+export function resolveRunner() {
+  const bin = join(HOME_DIR, "mem");
+  if (existsSync(bin)) return { program: bin, args: ["serve"] };
+  const shim = join(homedir(), ".local/share/mise/shims/node");
+  if (existsSync(shim)) return { program: shim, args: [CLI, "serve"] };
+  return { program: process.execPath, args: [CLI, "serve"] };
+}
+
+function esc(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+export function plistFor({ intervalMinutes = 0 } = {}) {
+  const { program, args } = resolveRunner();
+  const sched = intervalMinutes
+    ? `  <key>StartInterval</key><integer>${intervalMinutes * 60}</integer>\n`
+    : `  <key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key><false/>\n  </dict>\n  <key>ThrottleInterval</key><integer>30</integer>\n`;
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+${[program, ...args].map((a) => `    <string>${esc(a)}</string>`).join("\n")}
+  </array>
+  <key>RunAtLoad</key><true/>
+${sched}  <key>WorkingDirectory</key><string>${esc(homedir())}</string>
+  <key>StandardOutPath</key><string>${esc(join(HOME_DIR, "launchd.out"))}</string>
+  <key>StandardErrorPath</key><string>${esc(join(HOME_DIR, "launchd.err"))}</string>
+</dict>
+</plist>
+`;
+}
+
+function launchctl(args) {
+  return execFileSync("launchctl", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
+
+/** 服务当前状态：装了没、跑没跑、pid 多少。 */
+export function serviceStatus() {
+  const installed = existsSync(PLIST_PATH);
+  if (process.platform !== "darwin") return { installed, running: false, note: "非 macOS，看 systemd 那节" };
+  let out = "";
+  try {
+    out = launchctl(["print", `gui/${process.getuid()}/${LABEL}`]);
+  } catch {
+    // 区分"没装"和"装了但没装载"：前者要 install，后者只要 bootstrap 一次。
+    return {
+      installed,
+      loaded: false,
+      running: false,
+      note: installed ? "plist 在，但 launchctl 里没有（需要装载一次）" : "没装",
+    };
+  }
+  const state = /state = (\w+)/.exec(out)?.[1] ?? "unknown";
+  const pid = /pid = (\d+)/.exec(out)?.[1];
+  return { installed, loaded: true, running: state === "running", state, pid: pid ? Number(pid) : null };
+}
+
+export function install({ intervalMinutes = 0, print = false } = {}) {
+  const text = plistFor({ intervalMinutes });
+  if (print) return { plist: text, path: PLIST_PATH };
+
+  mkdirSync(dirname(PLIST_PATH), { recursive: true });
+  writeFileSync(PLIST_PATH, text);
+
+  if (process.platform !== "darwin") return { path: PLIST_PATH, note: "已写 plist，但这不是 macOS，跳过 launchctl" };
+
+  // 先卸载同名的旧服务，否则会提示 already loaded。
+  try {
+    launchctl(["bootout", `gui/${process.getuid()}/${LABEL}`]);
+  } catch {}
+  const errors = [];
+  for (const args of [
+    ["bootstrap", `gui/${process.getuid()}`, PLIST_PATH],
+    ["load", "-w", PLIST_PATH], // 老系统只认这个
+  ]) {
+    try {
+      launchctl(args);
+    } catch (e) {
+      // execFileSync 的 message 只有 "Command failed: …"，真正的原因在 stderr。
+      const why = String(e.stderr ?? "").trim().split("\n")[0] || String(e.message).split("\n")[0];
+      errors.push(`${args[0]}: ${why.slice(0, 160)}`);
+      continue;
+    }
+    // 关键：launchctl 的退出码不可信。`load` 装失败也回 0（只往 stderr 打一句
+    // "Load failed: 5"），所以必须回查一次 print 才算数。
+    if (serviceStatus().loaded) return { path: PLIST_PATH, loaded: true };
+    errors.push(`${args[0]}: 退出码 0 但服务没出现在 launchctl 里`);
+  }
+  // 两种都失败：最常见于在沙箱/无 GUI 会话里跑（报 Input/output error, code 5）。
+  // 这时 plist 是好的，只是没装上，别谎报成功。
+  return {
+    path: PLIST_PATH,
+    loaded: false,
+    error: errors.join("；"),
+    hint: `在普通终端里执行：launchctl bootstrap gui/$(id -u) ${PLIST_PATH}`,
+  };
+}
+
+export function uninstall() {
+  if (process.platform === "darwin") {
+    try {
+      launchctl(["bootout", `gui/${process.getuid()}/${LABEL}`]);
+    } catch {}
+  }
+  if (existsSync(PLIST_PATH)) unlinkSync(PLIST_PATH);
+  return { path: PLIST_PATH };
+}
+
+/** Linux 用：把等价单元打印出来，不落盘。 */
+export function systemdUnit({ intervalMinutes = 0 } = {}) {
+  const { program, args } = resolveRunner();
+  const exec = [program, ...args].join(" ");
+  if (intervalMinutes) {
+    return `# ~/.config/systemd/user/siyuan-mem.{service,timer}，或直接 cron：
+# */${intervalMinutes} * * * * ${exec} --once
+`;
+  }
+  return `# ~/.config/systemd/user/siyuan-mem.service
+[Unit]
+Description=siyuan-mem
+After=network.target
+
+[Service]
+ExecStart=${exec}
+Restart=on-failure
+RestartSec=30
+WorkingDirectory=${homedir()}
+
+[Install]
+WantedBy=default.target
+
+# systemctl --user daemon-reload && systemctl --user enable --now siyuan-mem
+`;
+}
+

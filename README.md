@@ -58,6 +58,8 @@ node src/cli.mjs audit --all         # 全部会话的对账表
 node src/cli.mjs review 20           # 最近 20 条，人工扫一眼
 node src/cli.mjs remember "..." --entity 思源MCP --type fact
 node src/cli.mjs forget <块id>        # 标成过时，不删
+node src/cli.mjs ui                  # 本地面板 127.0.0.1:7787
+node src/cli.mjs service install     # 装成 launchd 服务
 ```
 
 软链到 PATH 之后就是 `mem status`、`mem once`。
@@ -207,39 +209,36 @@ dsh --profile desktop --dump-config   # 确认它出现在配置树里
 
 `Ctrl-C` 会跑完当前这一轮再退，退的时候还锁；再按一次直接退出。`kill -9` 也不会把队列搞乱——归档是 `rename`，要么发生要么没发生。
 
-### launchd
+## 服务与面板
 
-两个选择：常驻加 `KeepAlive`，或定时调 `serve --once`。前者不用反复冷启动 node，后者崩了不会无限重启刷日志。
+### 装成系统服务
 
-**plist 里的 node 必须写绝对路径**，因为 launchd 的 `PATH` 只有 `/usr/bin:/bin:/usr/sbin:/sbin`，`node` 不在里面。别信 `which node`：它只反映当前 shell 的 PATH 顺序，这台机器上排第一的是 WorkBuddy 自带的那份（`~/.workbuddy/binaries/node/versions/<版本>/bin/node`），写进 plist 就是给别的软件的升级绑定。
-
-用 mise 的话，`~/.local/share/mise/shims/node` 是稳定路径（指向 mise，按全局配置解析版本，现在解析到 v24.22.1），我用 launchd 那种最小环境（`env -i HOME=… PATH=/usr/bin:/bin:/usr/sbin:/sbin`）验过能跑。升级 node 不用改 plist。或者干脆用编译出来的单文件二进制（见下），连运行时都不用。
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.siyuan.mem</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/Users/<你>/.local/share/mise/shims/node</string>
-    <string>/Users/<你>/Codes/siyuan-mem/src/cli.mjs</string>
-    <string>serve</string>
-  </array>
-  <key>KeepAlive</key><true/>
-  <key>RunAtLoad</key><true/>
-  <key>StandardErrorPath</key><string>/tmp/siyuan-mem.err</string>
-</dict>
-</plist>
+```bash
+mem service            # 看状态：plist 在不在、launchctl 里有没有、最近一行日志
+mem service install    # 常驻（KeepAlive，崩溃后 30 秒重试）
+mem service install --interval 10   # 或者定时：每 10 分钟跑一次 serve --once
+mem service uninstall
+mem service unit       # Linux：打印 systemd 单元，不落盘
 ```
 
-定时版把 `serve` 换成 `serve --once`，`KeepAlive` 换成 `<key>StartInterval</key><integer>600</integer>`。
+plist 里的可执行文件优先指向 `~/.siyuan-mem/mem`（用 bun 编出来的单文件，自带运行时），其次退回 mise 的 node shim。**不要信 `which node`**——它只反映当前 shell 的 PATH 顺序，而 launchd 的 PATH 只有 `/usr/bin:/bin:/usr/sbin:/sbin`。这台机器上排第一的是 WorkBuddy 自带的那份，写进 plist 就是给别的软件的升级绑定。
 
-`launchctl load ~/Library/LaunchAgents/com.siyuan.mem.plist`
+两个坑在代码里处理了：
 
-写 `StandardErrorPath` 是为了接住启动阶段的崩溃（比如 Node 路径不对、锁被占）：这些发生在 `serve` 自己的日志之前。
+- **`launchctl` 的退出码不可信**：`load` 装失败也返回 0，只在 stderr 打一句 `Load failed: 5`。所以装完必须回查一次 `launchctl print`，否则会谎报成功。
+- **配置错的时候不要每 30 秒撞一次墙**：没配 `model.apiKey` 时 `serve` 会干净退出（exit 0），`KeepAlive` 只对失败重启，所以不会热循环。配好之后 `mem service install` 再装一次，或 `launchctl kickstart -k gui/$(id -u)/com.siyuan.mem`。
 
-没有配 `model.apiKey` 时 `serve` 会直接拒绝启动，`--no-model` 是显式的规则抽取开关。理由见下一节。
+在沙箱/无 GUI 会话里 `bootstrap` 会报 `Bootstrap failed: 5: Input/output error`，这是环境限制不是 plist 的问题——换到普通终端执行那条命令即可。
+
+### 面板
+
+`mem serve` 起来时顺带在 `127.0.0.1:7787` 开一个面板（`mem ui` 可以单独开）。看状态、翻最近条目、看队列和日志尾部，点一下能跑一轮。
+
+![面板](docs/面板.png)
+
+只有 127.0.0.1，**没有鉴权**，所以绝不绑 `0.0.0.0`——局域网上任何设备都能读你的记忆库。总共一个 HTML 字符串加六个接口，没引入任何前端依赖：它的意义是"不用开终端就知道它在不在干活"，真管理还是去思源里改。
+
+心跳（第几轮、pid）来自进程锁文件；点"跑一轮"会自己抢锁，服务正在跑时返回 409 并说明原因。
 
 ### 单文件二进制（可选）
 
@@ -299,6 +298,8 @@ src/
   serve.mjs     常驻：锁、节奏、退避、轮次日志
   store.mjs     写入、去重、查询、状态
   inbox.mjs     队列（就是目录）
+  ui.mjs        本地面板（一个 HTML + 几个只读接口）
+  service.mjs   launchd / systemd 注册
   llm.mjs       模型调用层：重试、JSON 模式、用量记账、provider 预设
   wire/         三种协议各一份：openai（SDK）/ anthropic（fetch）/ gemini（fetch）
 plugin/

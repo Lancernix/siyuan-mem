@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { CONFIG_PATH, INBOX_DIR, loadConfig } from "./config.mjs";
+import { readFileSync } from "node:fs";
+import { CONFIG_PATH, INBOX_DIR, loadConfig, LOG_PATH } from "./config.mjs";
 import { PROVIDERS, resolveModel, hasModel, probe as probeModel, saveModelChoice, maskKey, usageToday } from "./llm.mjs";
 import { formatHits } from "./store.mjs";
 import { normalizeTurns, toExchanges } from "./extract.mjs";
@@ -7,7 +8,9 @@ import { pending } from "./inbox.mjs";
 import { readLog, readJsonLines, auditMessages, HARNESS_NAMES } from "./readers/index.mjs";
 import { listSessions, summarize } from "./harness.mjs";
 import { open, enqueueLog, processQueue } from "./jobs.mjs";
-import { serve, acquire, release, lockInfo, LOG_PATH } from "./serve.mjs";
+import { serve, acquire, release, lockInfo } from "./serve.mjs";
+import { startUi } from "./ui.mjs";
+import { install, uninstall, serviceStatus, systemdUnit, PLIST_PATH } from "./service.mjs";
 
 const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 
@@ -28,6 +31,11 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
   mem model                    看当前模型配置与今天的用量
   mem model use <provider> --key sk-...  [--name 模型名] [--wire openai|anthropic|gemini]
   mem model test               真发一次请求，自证 key / 地址 / JSON 模式都通
+  mem ui [--port 7787]         起本地面板（只读；点"跑一轮"会自己抢锁）
+  mem service [status]         看系统服务状态
+  mem service install [--interval 分钟] [--print]   装成 launchd 服务
+  mem service uninstall        卸载
+  mem service unit             打印 systemd 单元（Linux 用，不落盘）
 
 配置：${CONFIG_PATH}
 队列：${INBOX_DIR}
@@ -35,7 +43,7 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 `;
 
 /** 只有这几个键吃后面的值，其余 --xxx 一律当布尔，免得 "search --all 风盾" 把查询词吃掉。 */
-const VALUED = new Set(["entity", "type", "confidence", "limit", "format", "n", "interval", "key", "name", "wire"]);
+const VALUED = new Set(["entity", "type", "confidence", "limit", "format", "n", "interval", "key", "name", "wire", "port"]);
 
 function parseArgs(argv) {
   const flags = {};
@@ -355,6 +363,76 @@ async function cmdModel(args, flags) {
   throw new Error(`不认识的子命令：${sub}（可用：use / test）`);
 }
 
+async function cmdService(args, flags) {
+  const sub = args[0] ?? "status";
+  if (sub === "status") {
+    const s = serviceStatus();
+    console.log(`plist        ${PLIST_PATH}${s.installed ? "" : "（不存在）"}`);
+    console.log(`服务         ${s.running ? `运行中 pid ${s.pid}` : s.state ?? "未运行"}`);
+    if (s.note) console.log(`备注         ${s.note}`);
+    const svc = lockInfo();
+    if (svc.running) console.log(`内部心跳     pid ${svc.pid}，第 ${svc.round ?? 0} 轮`);
+    // 服务"装了但没跑"最常见的原因是配置问题，把日志最后一行贴出来，省得再去找文件。
+    const last = (() => {
+      try {
+        const lines = readFileSync(LOG_PATH, "utf8").trimEnd().split("\n");
+        return lines[lines.length - 1] ?? "";
+      } catch {
+        return "";
+      }
+    })();
+    if (last) console.log(`最近日志     ${last}`);
+    return;
+  }
+  if (sub === "install") {
+    const minutes = Number(flags.interval) || 0;
+    const r = install({ intervalMinutes: minutes, print: Boolean(flags.print) });
+    if (flags.print) return void console.log(r.plist);
+    console.log(`已写入 ${r.path}`);
+    console.log(minutes ? `  每 ${minutes} 分钟跑一次（StartInterval）` : "  常驻（KeepAlive，崩溃后 30 秒重试）");
+    if (r.loaded) {
+      console.log("  已装载。看状态：mem service status");
+    } else {
+      console.log(`  但装载失败：${r.error}`);
+      console.log(`  ${r.hint}`);
+      process.exitCode = 1;
+    }
+    return;
+  }
+  if (sub === "uninstall") {
+    const r = uninstall();
+    console.log(`已卸载，plist ${r.path} 已删除`);
+    return;
+  }
+  if (sub === "unit") {
+    return void console.log(systemdUnit({ intervalMinutes: Number(flags.interval) || 0 }));
+  }
+  throw new Error(`不认识的子命令：${sub}（可用：status / install / uninstall / unit）`);
+}
+
+async function cmdUi(flags) {
+  const cfg = loadConfig();
+  const port = Number(flags.port) || cfg.ui?.port || 7787;
+  // 面板本身只读；点"跑一轮"时才抢锁，抢不到就报"服务正在跑"。
+  const runRound = async (logFn) => {
+    acquire({ log: logFn ?? console.log });
+    try {
+      return await processQueue({ useModel: !flags["no-model"] });
+    } finally {
+      release();
+    }
+  };
+  const ui = startUi({ port, runRound });
+  console.log(`面板 ${ui.url}（Ctrl-C 退出）`);
+  const stop = async () => {
+    await ui.close().catch(() => {});
+    process.exit(0);
+  };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+  await new Promise(() => {});
+}
+
 async function main() {
   const [cmd, ...args] = process.argv.slice(2);
   const { flags, rest } = parseArgs(args);
@@ -385,6 +463,10 @@ async function main() {
       return cmdForget(rest);
     case "model":
       return cmdModel(rest, flags);
+    case "ui":
+      return cmdUi(flags);
+    case "service":
+      return cmdService(rest, flags);
     case undefined:
     case "-h":
     case "--help":
