@@ -84,6 +84,25 @@ node src/cli.mjs forget <块id>        # 标成过时，不删
 | `extract.maxEntriesPerSession` | 60 | 一个会话最多入库几条（防噪音，撞到会提示） |
 | `extract.minTurnChars` | 25 | 短于这个且两边都短的寒暄直接跳过 |
 
+## 模型接口
+
+只认 OpenAI 兼容的 `/chat/completions` 一种形状，不引 SDK。DeepSeek、通义（compatible-mode）、Kimi、智谱、OpenRouter、火山、ollama、LM Studio、vLLM 全都吃这一条，装 SDK 等于为同一种请求形状背几百 KB 和一堆我们不需要的默认行为（流式、自动重试、把 provider 藏进 client 构造里）。配置里显式写 `baseUrl` + `name`，出问题时一眼看得出打的是谁。
+
+```bash
+mem model                                  # 看当前 provider / 地址 / 模型 / key（打码）/ 今日用量
+mem model use qwen --key sk-... [--name qwen-max]   # 换一家，写进 ~/.siyuan-mem/config.json（0600）
+mem model test                             # 真发一次请求，自证 key、地址、JSON 模式、记账都通
+```
+
+`src/llm.mjs` 补的是裸 fetch 缺的四件事：
+
+- **重试**：429 和 5xx 按 `Retry-After` 或指数退避重试（默认 3 次）；401/403/400 立刻抛，重试只会把同一个错误写三遍。
+- **JSON 模式**：能开就开（`response_format: {type:"json_object"}`，所以 prompt 要求顶层是对象 `{"entries":[…]}`）。有些实现不支持，回 400 且正文提到它时自动去掉这个字段重发，不算失败次数。
+- **用量记账**：每次调用的 prompt/completion tokens 追加到 `~/.siyuan-mem/usage.jsonl`，`mem status` 显示今日汇总，`serve` 每轮日志也带。回灌一百多个会话时，这是唯一能判断"还要不要继续跑"的指标。
+- **provider 预设**：`deepseek / qwen / moonshot / zhipu / openai / openrouter / ollama / lmstudio`，本地两家不要 key。
+
+`npm test` 用本地假接口测这几条：429 重试、`response_format` 被拒后回退、401 不重试、5xx 重试到上限、JSON 对象解析、记账可读。不发真请求、不花钱，跑完不碰真实 `usage.jsonl`。
+
 ## 数据结构
 
 一条记忆 = `01-条目` 里的一个段落块 + 八个属性：
@@ -265,8 +284,11 @@ src/
   serve.mjs     常驻：锁、节奏、退避、轮次日志
   store.mjs     写入、去重、查询、状态
   inbox.mjs     队列（就是目录）
+  llm.mjs       模型调用层：重试、JSON 模式、用量记账、provider 预设
 plugin/
   index.mjs     DSH 插件
+test/           模型调用层的回归测试（本地假接口，不花钱）
+scripts/        dist：打包 + 对账
 docs/           设计过程与调研（含思源能力盘点）
 ```
 

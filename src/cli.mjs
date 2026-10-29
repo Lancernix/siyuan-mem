@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { CONFIG_PATH, INBOX_DIR, hasModel } from "./config.mjs";
+import { CONFIG_PATH, INBOX_DIR, loadConfig } from "./config.mjs";
+import { PROVIDERS, resolveModel, hasModel, probe as probeModel, saveModelChoice, maskKey, usageToday } from "./llm.mjs";
 import { formatHits } from "./store.mjs";
 import { normalizeTurns, toExchanges } from "./extract.mjs";
 import { pending } from "./inbox.mjs";
@@ -24,6 +25,9 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
   mem review [n]               列最近 n 条，人工扫一眼
   mem remember <文本> [--entity X] [--type decision|fact|preference|reference]
   mem forget <块id>            标成 superseded（不删）
+  mem model                    看当前模型配置与今天的用量
+  mem model use <provider> --key sk-...   [--name 模型名] 换一家
+  mem model test               真发一次请求，自证 key / 地址 / JSON 模式都通
 
 配置：${CONFIG_PATH}
 队列：${INBOX_DIR}
@@ -31,7 +35,7 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 `;
 
 /** 只有这几个键吃后面的值，其余 --xxx 一律当布尔，免得 "search --all 风盾" 把查询词吃掉。 */
-const VALUED = new Set(["entity", "type", "confidence", "limit", "format", "n", "interval"]);
+const VALUED = new Set(["entity", "type", "confidence", "limit", "format", "n", "interval", "key", "name"]);
 
 function parseArgs(argv) {
   const flags = {};
@@ -78,7 +82,10 @@ async function cmdStatus() {
   console.log(`思源         ${cfg.siyuan.baseUrl}  v${version}`);
   console.log(`笔记本       ${cfg.siyuan.notebook}`);
   console.log(`条目         current ${stats.current ?? 0} / superseded ${stats.superseded ?? 0}`);
-  console.log(`模型         ${hasModel(cfg) ? cfg.model.name : "未配置（走规则抽取）"}`);
+  const mm = resolveModel(cfg);
+  console.log(`模型         ${hasModel(cfg) ? `${mm.provider} / ${mm.model}` : "未配置（走规则抽取）"}`);
+  const u = usageToday();
+  if (u.calls) console.log(`今日用量     ${u.calls} 次调用，输入 ${u.prompt} / 输出 ${u.completion} tokens${u.failed ? `，失败 ${u.failed}` : ""}`);
   console.log(`待处理       ${pending().length} 个会话在队列里`);
   console.log(`服务         ${svcLine}`);
 }
@@ -96,7 +103,8 @@ async function cmdOnce(flags) {
       console.log("队列是空的。");
       return;
     }
-    console.log(`\n写入 ${sum.written}，跳过 ${sum.skipped}，失败 ${sum.failed}`);
+    const tk = sum.tokens ? `，tokens 输入 ${sum.tokens.prompt} / 输出 ${sum.tokens.completion}` : "";
+    console.log(`\n写入 ${sum.written}，跳过 ${sum.skipped}，失败 ${sum.failed}${tk}`);
     if (sum.degraded) console.log(`${sum.degraded} 个会话抽取不完整，原文留在队列里等重试。`);
     if (sum.failed) process.exitCode = 1;
   } finally {
@@ -307,6 +315,45 @@ async function cmdForget(args) {
   console.log(`已标为 superseded：${id}`);
 }
 
+async function cmdModel(args, flags) {
+  const sub = args[0];
+  const cfg = loadConfig();
+
+  if (!sub) {
+    const m = resolveModel(cfg);
+    const u = usageToday();
+    console.log(`provider     ${m.provider}`);
+    console.log(`baseUrl      ${m.baseUrl || "（未配置）"}`);
+    console.log(`模型         ${m.model || "（未配置）"}`);
+    console.log(`key          ${maskKey(m.apiKey)}`);
+    console.log(`JSON 模式    ${m.jsonMode ? "开" : "关"}`);
+    console.log(`今日用量     ${u.calls ? `${u.calls} 次，输入 ${u.prompt} / 输出 ${u.completion} tokens` : "还没有调用"}`);
+    console.log(`\n可选 provider：${Object.keys(PROVIDERS).join(", ")}`);
+    return;
+  }
+
+  if (sub === "use") {
+    const provider = args[1];
+    if (!provider) throw new Error(`要指定一家：${Object.keys(PROVIDERS).join(", ")}`);
+    const m = saveModelChoice(provider, { apiKey: flags.key, model: flags.name });
+    console.log(`已写入 ${CONFIG_PATH}`);
+    console.log(`  ${m.provider} / ${m.model}  key ${maskKey(m.apiKey)}  JSON ${m.jsonMode ? "开" : "关"}`);
+    console.log("  下一步：mem model test");
+    return;
+  }
+
+  if (sub === "test") {
+    if (!hasModel(cfg)) throw new Error("还没配 key：mem model use deepseek --key sk-...");
+    const r = await probeModel(cfg);
+    console.log(`通了：${r.provider} / ${r.model}  ${r.ms}ms  ${r.attempts} 次尝试`);
+    console.log(`  tokens 输入 ${r.usage.prompt} / 输出 ${r.usage.completion}  JSON 模式 ${r.jsonOk ? "生效" : "没生效（退回提示词约束）"}`);
+    console.log(`  回包：${r.sample}`);
+    return;
+  }
+
+  throw new Error(`不认识的子命令：${sub}（可用：use / test）`);
+}
+
 async function main() {
   const [cmd, ...args] = process.argv.slice(2);
   const { flags, rest } = parseArgs(args);
@@ -335,6 +382,8 @@ async function main() {
       return cmdRemember(flags, rest);
     case "forget":
       return cmdForget(rest);
+    case "model":
+      return cmdModel(rest, flags);
     case undefined:
     case "-h":
     case "--help":
