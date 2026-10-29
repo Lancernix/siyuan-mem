@@ -67,6 +67,8 @@ export function resolveModel(cfg) {
     retries: m.retries ?? 3,
     anthropicVersion: m.anthropicVersion,
     temperature: m.temperature,
+    /** 默认关思考。某些模型（DeepSeek V4、豆包 Seed）默认会先想一遍，成本差十倍。 */
+    noThinking: m.noThinking ?? true,
   };
 }
 
@@ -147,7 +149,10 @@ export async function chat(cfg, { messages, json = false, maxTokens, tag = "" } 
   const adapter = await loader();
 
   let wantJson = json && m.jsonMode && adapter.caps.json;
-  const opts = { messages, json: wantJson, maxTokens, temperature: m.temperature };
+  // noThinking 交给 wire 决定怎么表达（OpenAI 兼容是 thinking:{type:"disabled"}）。
+  // 关掉思考不是为了省钱——虽然确实省十倍输出 token——是因为这个任务不需要推理：
+  // 规则写在 prompt 里，要的是照着抽，思考反而把它往「过程叙述」上带。
+  const opts = { messages, json: wantJson, maxTokens, temperature: m.temperature, noThinking: m.noThinking };
   let fallback = false;
   const t0 = Date.now();
 
@@ -204,7 +209,9 @@ export async function probe(cfg) {
       { role: "user", content: '回复 {"ok":true}，不要别的。' },
     ],
     json: true,
-    maxTokens: 32,
+    // 留够余量：max_tokens 在部分模型里把「思考」也算进去，32 会把正文挤成空，
+    // 于是自证误报「JSON 模式没生效」。
+    maxTokens: 128,
     tag: "probe",
   });
   const trimmed = r.text.trim();
