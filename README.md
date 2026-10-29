@@ -111,9 +111,11 @@ node src/cli.mjs forget <块id>        # 标成过时，不删
 
 采集层分两条路：能装插件的（DSH、Claude Code）走进程内钩子，其余读日志。
 
-**读取只有一份代码，不按 harness 分支**——按形状认，不按名字认。四家的差别全在"消息挂在哪一层"和"角色叫什么"，共同点是每条消息都有 role 和 content，所以候选节点挨个试比逐家写适配器稳。之前写过四份专用适配器，和形状识别在本机 168 个会话上逐字节一致，已删除。
+读取分两层：**共用引擎 + 每家一份声明**。
 
-代价：字段不叫 `role` 的格式（比如叫 `author`）认不出，加个别名即可。
+`readers/base.mjs` 是引擎——解压、找消息节点、role 归一、注入块、子代理回报、逐块对账。`readers/<harness>.mjs` 只声明差异，每个十几到几十行：WorkBuddy 的 `<function_call>` 前缀、Qoder 的 `origin.kind`、OMP 的 `attribution`、DSH 的 `plugin:` 和 `delegationDepth`、Claude 的 `isSidechain`。`readers/index.mjs` 是注册表。
+
+为什么不全塞进一个通用函数：试过，四家在 105 个会话上逐字节一致，但那是"读文本"一致；各家特有的**过滤规则**混进共用代码之后，改一家的规则会波及另外三家。现在升级或排障只看一个文件。新增一家是写一份声明，不是抄一遍解析循环——`readers/generic.mjs` 就是零声明的样子。
 
 格式细节、各家的坑和实测数字在 [`docs/harness-会话格式横向对比.md`](docs/harness-会话格式横向对比.md)。
 
@@ -198,7 +200,15 @@ src/
   config.mjs    配置与本地状态
   siyuan.mjs    HTTP 客户端（只走 HTTP，不走 CLI）
   extract.mjs   会话过滤 + 抽取
-  readers.mjs   会话日志读取（一份形状识别，含 zstd 多帧）
+  readers/
+    base.mjs      共用引擎：解压、找消息、role 归一、子代理回报、对账
+    workbuddy.mjs 各家只声明差异（十几个到几十行）
+    claude.mjs
+    qoder.mjs
+    omp.mjs
+    dsh.mjs
+    generic.mjs   兜底：不认识的格式按形状读
+    index.mjs     注册表与分发
   harness.mjs   在磁盘上找各家的会话目录
   store.mjs     写入、去重、查询、状态
   inbox.mjs     队列（就是目录）
