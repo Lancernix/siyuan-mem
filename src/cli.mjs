@@ -104,13 +104,15 @@ async function cmdOnce(flags) {
       continue;
     }
     const fallbackEntity = (payload.cwd ?? "").split("/").filter(Boolean).pop() ?? "";
-    const { entries, mode, error } = await extractEntries(cfg, exchanges, {
+    const { entries, mode, error, batches, dropped } = await extractEntries(cfg, exchanges, {
       fallbackEntity,
       useModel: !flags["no-model"],
     });
     if (error) console.error(`  ! 模型失败，退回规则：${error}`);
 
-    console.log(`${payload.session_id ?? "?"}  ${exchanges.length} 轮  ${mode}  抽出 ${entries.length} 条`);
+    const batchNote = batches > 1 ? ` / ${batches} 批` : "";
+    console.log(`${payload.session_id ?? "?"}  ${exchanges.length} 轮${batchNote}  ${mode}  抽出 ${entries.length} 条`);
+    if (dropped) console.log(`    · 超出单会话上限，${dropped} 条没写（调 extract.maxEntriesPerSession 可放开）`);
     for (const e of entries) {
       if (flags.dry) {
         console.log(`    [${e.entity || "-"}] ${e.text}`);
@@ -132,8 +134,11 @@ async function cmdOnce(flags) {
         console.error(`    ! 写入失败：${err.message}`);
       }
     }
-    // 只有全部写完才归档，否则留在队列里下次重来（writeEntry 自带去重，重跑安全）。
-    if (!flags.dry && failed === 0) archive(file);
+    // 归档意味着原文出队，之后再也拿不回。所以只有"正常处理完"才归档：
+    // 模型挂了退回规则抽取时留在队列里，等模型恢复重跑（writeEntry 自带去重，重跑安全）。
+    const degraded = mode === "heuristic-after-error" || mode === "partial";
+    if (!flags.dry && failed === 0 && !degraded) archive(file);
+    else if (degraded) console.log("    · 抽取没跑完整，原文留在队列里，下次重试");
   }
   console.log(`\n写入 ${written}，跳过 ${skipped}，失败 ${failed}`);
 }

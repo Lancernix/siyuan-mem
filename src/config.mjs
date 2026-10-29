@@ -25,8 +25,12 @@ const DEFAULTS = {
   },
   extract: {
     minTurnChars: 25,
-    maxExchangesPerCall: 12,
-    maxEntriesPerSession: 6,
+    /** 一次模型调用最多塞多少字符。超了拆批，不截内容。 */
+    maxCharsPerCall: 16000,
+    /** 每批最多出几条。批与批之间是独立的，不会互相挤掉。 */
+    maxEntriesPerBatch: 6,
+    /** 一个会话最多入库几条，纯防噪音；撞到了会打印出来。 */
+    maxEntriesPerSession: 60,
   },
 };
 
