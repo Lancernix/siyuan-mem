@@ -80,8 +80,13 @@ export class SiYuan {
    * 返回值不是 id，是一个 transaction 数组：`[{doOperations:[{action:"insert", id:"..."}]}]`。
    * 直接当字符串用会静默变成 undefined，后面的 setBlockAttrs 才报错，排查会绕远。
    */
-  async appendBlock(parentID, data, dataType = "markdown") {
-    const r = await this.#post("/api/block/appendBlock", { parentID, dataType, data });
+  async appendBlock(parentID, data, dataType = "markdown", { previousID } = {}) {
+    // 标题（h1-h6）在思源里是**叶子块**，不能有子块：appendBlock 传 parentID=标题
+    // 会直接报 "heading is a leaf block and cannot have children"。
+    // 想让内容落在某个标题下面，只能传 previousID，把块插在它后面。
+    const payload = { parentID, dataType, data };
+    if (previousID) payload.previousID = previousID;
+    const r = await this.#post("/api/block/appendBlock", payload);
     const tx = Array.isArray(r) ? r[0] : r;
     const op = tx?.doOperations?.find((o) => o?.action === "insert" && o?.id);
     if (!op?.id) throw new Error(`appendBlock 没有返回块 id：${JSON.stringify(r).slice(0, 120)}`);

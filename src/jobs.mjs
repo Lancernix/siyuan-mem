@@ -216,6 +216,7 @@ export async function processQueue({ dry = false, useModel = true, onLine = () =
             session: payload.session_id ?? "",
             date: payload.date ?? "",
             machine: payload.machine ?? machineId(),
+            project: (payload.cwd ?? "").split("/").filter(Boolean).pop() ?? "",
             raw: rawPtr,
           }
         );

@@ -30,6 +30,21 @@ const DEFAULTS = {
     baseUrl: "http://127.0.0.1:6806",
     token: "",
     notebook: "90-记忆",
+    /**
+     * 变更日志（03-变更）。默认关：它是审计流水，一行一次写入，
+     * 106 个会话跑完就是上千行「+ [实体] 半句话」，人不会去读。
+     * 要排查时手动打开。
+     */
+    logChanges: false,
+    /**
+     * 是否把同一会话的条目归到一个 `## 日期 · 项目` 标题下面。
+     *
+     * 默认关，因为思源的**标题是叶子块**，不能有子块：只能把条目用 previousID
+     * 插在标题后面，于是每写一条都要记住"这一组最后一块是谁"。这个记录一旦错位
+     * （块被手删、进程重启、多次重跑），就会变成每条前面顶一个标题。
+     * 可靠的做法是一个会话一篇子文档，那要改写入路径，还没做。
+     */
+    groupEntries: false,
     docs: {
       entries: "01-条目",
       raw: "02-原文",
@@ -99,9 +114,13 @@ const DEFAULTS = {
     /** 一次模型调用最多塞多少字符。超了拆批，不截内容。 */
     maxCharsPerCall: 16000,
     /** 每批最多出几条。批与批之间是独立的，不会互相挤掉。 */
-    maxEntriesPerBatch: 6,
-    /** 一个会话最多入库几条，纯防噪音；撞到了会打印出来。 */
-    maxEntriesPerSession: 60,
+    maxEntriesPerBatch: 5,
+    /**
+     * 一个会话最多入库几条。
+     * 这个数字不是"能写多少"，是"应该写多少"的提示：设成 60 的时候实测
+     * 一个会话抽出 54 条技术细节，每条都缺上下文，读起来像清单。
+     */
+    maxEntriesPerSession: 18,
     /** 抽取时带多少个已有实体进 prompt。多了会挤掉正文，少了复用率下降。 */
     entityShotList: 300,
   },
@@ -164,6 +183,25 @@ export function loadState() {
 export function saveState(state) {
   ensureDirs();
   writeFileSync(STATE_PATH, JSON.stringify(state, null, 2) + "\n");
+}
+
+/**
+ * 会话 → 标题块 id。写入时靠它判断「这个会话的标题是不是已经插过了」。
+ * 不查 SQL：块的索引是异步的，刚插完查不到，会重复插入标题。
+ */
+export const GROUPS_PATH = join(HOME_DIR, "entry-groups.json");
+
+export function loadGroups() {
+  try {
+    return JSON.parse(readFileSync(GROUPS_PATH, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+export function saveGroups(o) {
+  ensureDirs();
+  writeFileSync(GROUPS_PATH, JSON.stringify(o, null, 2) + "\n");
 }
 
 /** 本机标识。三台机器的日志路径长得一模一样，不分开就会互相顶掉。 */
