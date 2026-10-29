@@ -25,6 +25,14 @@ const DEFAULTS = {
     name: "deepseek-chat",
     timeoutMs: 45000,
   },
+  serve: {
+    /** 常驻模式的轮询间隔。 */
+    intervalMinutes: 10,
+    /** 会话安静多久才切片投递：正在写的会话每十分钟切一刀，切出来全是半句话。 */
+    quietSeconds: 180,
+    /** 每轮最多投几个会话，防止第一次跑就把 105 个会话一起塞进模型。 */
+    maxSessionsPerRound: 8,
+  },
   extract: {
     minTurnChars: 25,
     /** 一次模型调用最多塞多少字符。超了拆批，不截内容。 */

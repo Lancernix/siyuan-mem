@@ -8,15 +8,17 @@
 ## 它做什么
 
 ```
-DSH 插件  ──会话──▶  ~/.siyuan-mem/inbox/  ──mem once──▶  思源（90-记忆）
-   ▲                                                          │
-   └──────────── agent/pre-step 注入最近结论 ◀─────────────────┘
+各 harness 会话日志 ┐
+                    ├─▶ ~/.siyuan-mem/inbox/ ──mem serve──▶ 思源（90-记忆）
+DSH 插件（实时）     ┘                                         │
+   ▲                                                           │
+   └───────── agent/pre-step 注入最近结论 ◀──────────────────────┘
 ```
 
 三件事：
 
-- **采集**：插件把用户说的话和模型说的话投进本地队列。thinking、工具调用、自己注入的上下文全部丢掉。
-- **抽取**：`mem once` 把一段会话压成几条带实体名的结论，写进思源，挂上状态属性。
+- **采集**：插件把用户说的话和模型说的话投进本地队列，`mem serve` 每十分钟扫一遍其余四家的日志补上。thinking、工具调用、自己注入的上下文全部丢掉。
+- **抽取**：把一段会话压成几条带实体名的结论，写进思源，挂上状态属性。
 - **注入**：开会话时，插件查一次思源，把可能相关的既有结论贴进上下文。查不到就跳过，不阻塞对话。
 
 ## 为什么是思源
@@ -43,8 +45,10 @@ node src/cli.mjs init
 ## 用法
 
 ```bash
-node src/cli.mjs status              # 连通性、条目数、队列长度
+node src/cli.mjs status              # 连通性、条目数、队列长度、服务在不在
 node src/cli.mjs once                # 处理队列（--dry 先看要写什么）
+node src/cli.mjs serve               # 常驻：每轮找新会话 → 投队列 → 写思源
+node src/cli.mjs serve --once        # 只跑一轮（给 launchd 定时用）
 node src/cli.mjs search 风盾500       # 查
 node src/cli.mjs search --all 风盾500 # 连已过时的一起查
 node src/cli.mjs scan                # 本机有哪些 harness 的会话，各多少
@@ -149,9 +153,29 @@ dsh --profile desktop --dump-config   # 确认它出现在配置树里
 
 **思源没开也安全**：注入超时 800ms 就放弃，采集只写本地文件。
 
-## 定时
+## 常驻：锁、节奏、退避
 
-队列不处理就一直是队列。macOS 用 launchd（`~/Library/LaunchAgents/com.siyuan.mem.plist`）：
+`mem serve` 就是"每十分钟自己跑一轮"，但只写个定时循环会踩三个坑，所以它多做三件事。
+
+**锁。** 思源没有行级合并，两个进程同时写同一份文档，后写的整块覆盖先写的。锁用 `O_EXCL` 建 `~/.siyuan-mem/serve.lock`，靠内核保证只有一个进程能建成，不靠"先查再写"那种有竞态的判断。持锁进程被 `kill -9` 或断电时锁会留在磁盘上，所以启动时先看 `process.kill(pid, 0)`：进程不在了就接管并打印一行，还在就报错退出（确认是僵尸再加 `--force`）。锁里记 host，换台机器或重启之后 pid 不可信。`mem once` 也走同一把锁，服务在跑时手动跑会被拒。
+
+**节奏。** 正在写的会话不能切：每十分钟切一刀，切出来全是半句话。所以只投"安静了 180 秒"的会话（`serve.quietSeconds`）。另外只读**体积变过**的文件——本机 105 个会话共 500MB，每轮全解析一遍纯属浪费，而 `stat` 是微秒级的，体积没变不可能出新内容。每轮最多投 8 个（`serve.maxSessionsPerRound`），第一次启动不会把 105 个会话一次塞给模型，剩下的每轮接着投。
+
+**退避。** 思源没开、模型 429 的时候不要连着重试。失败后第一次等 1 分钟，之后翻倍，最多 30 分钟；成功一次就归零。一轮的顺序也是固定的：**先探思源活着没有，再看有没有新会话，最后才调模型**——反过来，思源一天没开，模型的钱就白花一天，因为抽出来的东西写不进去，下轮还得重抽。
+
+日志在 `~/.siyuan-mem/serve.log`，超过 2MB 轮转成 `.1`，每轮一行：
+
+```
+2026-10-29 15:06:37  启动 pid 14444，每 10 分钟一轮
+2026-10-29 15:06:40  投递 qoder  312 轮  ~/.qoder/projects/.../c276c7b5.jsonl
+2026-10-29 15:06:40  第 1 轮 4.0s：思源 v3.8.6，扫描 105 个会话，新投 2 个（697 轮），写入 33 条，跳过 0，失败 0
+```
+
+`Ctrl-C` 会跑完当前这一轮再退，退的时候还锁；再按一次直接退出。`kill -9` 也不会把队列搞乱——归档是 `rename`，要么发生要么没发生。
+
+### launchd
+
+两个选择：常驻加 `KeepAlive`，或定时调 `serve --once`。前者不用反复冷启动 node，后者崩了不会无限重启刷日志。
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -162,17 +186,20 @@ dsh --profile desktop --dump-config   # 确认它出现在配置树里
   <array>
     <string>/usr/local/bin/node</string>
     <string>/Users/<你>/Codes/siyuan-mem/src/cli.mjs</string>
-    <string>once</string>
+    <string>serve</string>
   </array>
-  <key>StartInterval</key><integer>1800</integer>
+  <key>KeepAlive</key><true/>
   <key>RunAtLoad</key><true/>
+  <key>StandardErrorPath</key><string>/tmp/siyuan-mem.err</string>
 </dict>
 </plist>
 ```
 
+定时版把 `serve` 换成 `serve --once`，`KeepAlive` 换成 `<key>StartInterval</key><integer>600</integer>`。
+
 `launchctl load ~/Library/LaunchAgents/com.siyuan.mem.plist`
 
-常驻版本 `mem serve` 还没写——`once` 加定时足够，而且崩了能手动补跑。
+写 `StandardErrorPath` 是为了接住启动阶段的崩溃（比如 Node 路径不对、锁被占）：这些发生在 `serve` 自己的日志之前。
 
 ## 已经踩过的坑
 
@@ -192,6 +219,10 @@ dsh --profile desktop --dump-config   # 确认它出现在配置树里
 
 **删除文档要用 `filetree/removeDocByID`**，`block/deleteBlock` 对它无效，而且删除后 SQL 里还要几秒才消失。
 
+**状态缓存的键要带笔记本名。** 缓存原来只按 `baseUrl` 存，`state["http://127.0.0.1:6806"].entries` 就是一个块 id。把 config 里的 `notebook` 改成测试笔记本之后，`init` 命中缓存，33 条测试数据直接写进了正式笔记本——缓存只证明了"文档还在"，没证明"文档在这本笔记本里"。现在键是 `baseUrl#笔记本名`，并且缓存命中时要按 `blocks.box` 验一次归属。
+
+**归档的失败计数要按会话算。** 原来一个全局 `failed` 计数器决定归档：第三个会话写失败，第四、五个明明写成功了也不归档，原文卡在队列里下轮重抽一遍。现在每个会话单独计。
+
 ## 目录
 
 ```
@@ -210,6 +241,8 @@ src/
     generic.mjs   兜底：不认识的格式按形状读
     index.mjs     注册表与分发
   harness.mjs   在磁盘上找各家的会话目录
+  jobs.mjs      两件可复用的活：投递增量、把队列写进思源
+  serve.mjs     常驻：锁、节奏、退避、轮次日志
   store.mjs     写入、去重、查询、状态
   inbox.mjs     队列（就是目录）
 plugin/
@@ -219,7 +252,7 @@ docs/           设计过程与调研（含思源能力盘点）
 
 ## 还没做
 
-- `mem serve` 常驻与 fs.watch 即时触发
+- fs.watch 即时触发（现在最慢要等 10 分钟一轮 + 3 分钟静默）
 - 向量与 rerank（思源内核已内置，未开索引；4 万个块全量建索引要先决定云端还是本地模型）
 - 注入的关键词匹配现在只取首句前 16 字做 LIKE，召回很粗
 - 本机现有的 105 个会话、350 万字还没回灌（`mem scan --all` 看得见，`mem ingest-log` 逐个进）

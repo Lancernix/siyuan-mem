@@ -41,7 +41,9 @@ export class Store {
   async init({ force = false } = {}) {
     const name = this.#cfg.siyuan.notebook;
     const state = loadState();
-    const key = this.#cfg.siyuan.baseUrl;
+    // 缓存要按"实例 + 笔记本"隔离。只按 baseUrl 存的话，改了 config 里的笔记本名，
+    // 缓存的还是旧笔记本的文档 id，接着往旧笔记本里写——实测踩过一次。
+    const key = `${this.#cfg.siyuan.baseUrl}#${name}`;
     const cache = force ? {} : state[key] ?? {};
     // --force 的语义是"从思源重新解析"，不是"再建一套"。所以它只读不建：
     // 解析不到就报错，让人去看库里到底有几份同名文档。
@@ -57,7 +59,9 @@ export class Store {
     for (const [docKey, title] of Object.entries(this.#cfg.siyuan.docs)) {
       const hpath = `/${title}`;
       let id = cache[docKey];
-      // 缓存命中就直接用，不再回查：刚创建的文档在 SQL 索引里还查不到，一查就会重复建。
+      // 缓存命中一般直接用，不再回查：刚创建的文档在 SQL 索引里还查不到，一查就会重复建。
+      // 但老缓存要验一次归属：文档可能被删了，也可能属于另一个同名笔记本。
+      if (id && !(await this.#inNotebook(id, nbId))) id = "";
       if (!id) {
         id = await this.#sy.docIdByHPath(nbId, hpath);
         if (!id && force) {
@@ -78,6 +82,12 @@ export class Store {
   async #exists(id) {
     const rows = await this.#sy.sql(`SELECT id FROM blocks WHERE id='${id}' LIMIT 1`);
     return Boolean(rows?.length);
+  }
+
+  /** 这个块是不是真在这本笔记本里。blocks.box 就是笔记本 id。 */
+  async #inNotebook(id, nbId) {
+    const rows = await this.#sy.sql(`SELECT box FROM blocks WHERE id='${id}' LIMIT 1`);
+    return rows?.[0]?.box === nbId;
   }
 
   #docSeed(key, title) {
