@@ -45,6 +45,8 @@ node src/cli.mjs status              # 连通性、条目数、队列长度
 node src/cli.mjs once                # 处理队列（--dry 先看要写什么）
 node src/cli.mjs search 风盾500       # 查
 node src/cli.mjs search --all 风盾500 # 连已过时的一起查
+node src/cli.mjs scan                # 本机有哪些 harness 的会话，各多少
+node src/cli.mjs scan --all          # 全读一遍，数轮数和字数
 node src/cli.mjs review 20           # 最近 20 条，人工扫一眼
 node src/cli.mjs remember "..." --entity 思源MCP --type fact
 node src/cli.mjs forget <块id>        # 标成过时，不删
@@ -91,27 +93,35 @@ node src/cli.mjs forget <块id>        # 标成过时，不删
 
 状态只有两种。**过时的不删**——"为什么当初不用 Oracle"这个问题的答案，就在那条被取代的条目里。
 
-## 三种接入方式，别再叫它"DSH 插件"
+## 五家 harness，一份读取器
 
-核心（抽取、存储、查询、状态）**跟 harness 无关**，一行没绑定。绑不住的只有"怎么拿到会话"，每家一份薄适配：
+核心（抽取、存储、查询、状态）**跟 harness 无关**，一行没绑定。绑不住的只有"怎么拿到会话"。
 
-| harness | 接法 | 代码量 | 限制 |
+| harness | 会话日志 | 接法 | 限制 |
 |---|---|---|---|
-| DSH | cordis 插件 | `plugin/` 约 60 行 | 只能用 DSH 的钩子事件名 |
-| Claude Code | hook 脚本（Stop / SessionEnd 里调 `mem ingest-log`） | 几十行 shell + settings 配置 | 要有 `~/.claude/projects` 写入 |
-| WorkBuddy | **无插件机制**，只能读日志 | 零代码，`mem ingest-log` 直接跑 | 闭源，拿不到进程内事件 |
-| 任意其他 | 能导出 jsonl/markdown 就能进 | 一个 reader | 见 `src/readers.mjs` |
+| WorkBuddy | `~/.workbuddy/projects/*/*.jsonl` | 读日志（无插件机制） | 闭源，拿不到进程内事件 |
+| Qoder | `~/.qoder/projects/*/*.jsonl` | 读日志 | 格式照抄 Claude Code |
+| OMP | `~/.omp/agent/sessions/*/*.jsonl` | 读日志 | 子会话用 `parentSession` 标 |
+| DSH | `~/.dsh/sessions/*/*/session.v4.jsonl.zstd` | cordis 插件，或读日志兜底 | 多帧 zstd |
+| Claude Code | `~/.claude/projects/*/*.jsonl` | hook 脚本，或读日志 | 子代理标 `isSidechain` |
 
-所以准确说法是：**一套核心 + 每家一份采集适配**。不是"一个插件通吃所有 harness"，那做不到。
+采集层分两条路：能装插件的（DSH、Claude Code）走进程内钩子，其余读日志。
+
+**读取只有一份代码，不按 harness 分支**——按形状认，不按名字认。四家的差别全在"消息挂在哪一层"和"角色叫什么"，共同点是每条消息都有 role 和 content，所以候选节点挨个试比逐家写适配器稳。之前写过四份专用适配器，和形状识别在本机 168 个会话上逐字节一致，已删除。
+
+代价：字段不叫 `role` 的格式（比如叫 `author`）认不出，加个别名即可。
+
+格式细节、各家的坑和实测数字在 [`docs/harness-会话格式横向对比.md`](docs/harness-会话格式横向对比.md)。
 
 日志这条路还有个附带好处：插件截获会漏、会崩、会重复，日志是 append-only 的，harness 自己不会写丢。插件挂了，日志还在。
 
 ```bash
 mem ingest-log ~/.workbuddy/projects/<ws>/<session>.jsonl
-mem ingest-log ~/.claude/projects/<proj>/<session>.jsonl --format claude
+mem ingest-log ~/.omp/agent/sessions/<slug>/<file>.jsonl
+mem ingest-log ~/.dsh/sessions/<ws>/<sid>/session.v4.jsonl.zstd
 ```
 
-格式按内容嗅探，认不出才要 `--format`。用户消息里的 `<system-reminder>`、子代理事件、工具结果会在读取时剔掉。
+格式按内容嗅探（只影响来源标签，不影响解析）。用户消息里的 `<system-reminder>`、`<cb_summary>` 摘要块、子代理事件、工具结果会在读取时剔掉。
 
 ## DSH 插件
 
@@ -180,6 +190,8 @@ src/
   config.mjs    配置与本地状态
   siyuan.mjs    HTTP 客户端（只走 HTTP，不走 CLI）
   extract.mjs   会话过滤 + 抽取
+  readers.mjs   会话日志读取（一份形状识别，含 zstd 多帧）
+  harness.mjs   在磁盘上找各家的会话目录
   store.mjs     写入、去重、查询、状态
   inbox.mjs     队列（就是目录）
 plugin/
@@ -192,4 +204,5 @@ docs/           设计过程与调研（含思源能力盘点）
 - `mem serve` 常驻与 fs.watch 即时触发
 - 向量与 rerank（思源内核已内置，未开索引；4 万个块全量建索引要先决定云端还是本地模型）
 - 注入的关键词匹配现在只取首句前 16 字做 LIKE，召回很粗
+- 本机现有的 168 个会话、335 万字还没回灌（`mem scan --all` 看得见，`mem ingest-log` 逐个进）
 - 画像层（人格与用户偏好的统一管理）没做，设计在 `docs/记忆系统-分层与召回设计.md`
