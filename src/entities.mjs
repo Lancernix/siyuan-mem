@@ -399,8 +399,31 @@ export async function resolveEntities({ sy, cfg, ids, names, useModel = true, ta
     }
   }
 
-  // 进待确认：所有「判过但没合并」的对
-  const toPending = weak.filter((w) => w.needsHuman || map.get(w.name) === w.name);
+  // 话题收敛：新名一出现就看一眼全表，把子话题并回父话题。
+  //
+  // 为什么不在写条目之后做：这时条目还没写，合并只改内存里的 map 和本地表，
+  // 不需要回填块属性——省一次批量接口，也不会出现「条目写进去了但实体名是旧的」。
+  if (created.length && useModel && hasModel(cfg)) {
+    const merges = await convergeTopics({ cfg, table, extra: created, log });
+    for (const [from, to] of merges) {
+      const dst = table.find((e) => e.name === to && e.status !== "merged");
+      if (!dst) continue;
+      const src = table.find((e) => e.name === from);
+      dst.aliases = Array.from(new Set([...dst.aliases, from, ...(src?.aliases ?? [])].filter((x) => x && x !== to)));
+      if (src) {
+        src.status = "merged";
+        src.mergedInto = to;
+      }
+      for (const [k, v] of map) if (v === from) map.set(k, to);
+      const i = created.indexOf(from);
+      if (i >= 0) created.splice(i, 1);
+    }
+    if (merges.size) saveEntities(table);
+  }
+
+  // 进待确认：所有「判过但没合并」的对。
+  // 已经被收敛掉的（map 指向了别人）不用再问人。
+  const toPending = weak.filter((w) => map.get(w.name) === w.name);
   if (toPending.length && ids.pending) {
     try {
       await appendPending(sy, ids.pending, toPending);
@@ -410,6 +433,90 @@ export async function resolveEntities({ sy, cfg, ids, names, useModel = true, ta
   }
 
   return { map, created, weak: toPending };
+}
+
+/* ---------- 话题收敛 ---------- */
+
+const CONVERGE_PROMPT = `你是记忆系统的话题管理员。系统里有一个人，他把自己的对话沉淀成了笔记，
+每条笔记挂在一个「话题」下。话题是「一个项目、一个东西、一件事」，比如「MiniWMS」「风盾500」。
+
+现在给你现存的全部话题，以及这次新产生的话题。请找出**应该合并**的。
+
+只合并这一种情况：
+- A 是 B 的一个方面、一部分、一个细节，B 是更根本的那个名字。
+  「MiniWMS SKU 模型」「MiniWMS 接口设计」「MiniWMS 技术栈」都应该并回「MiniWMS」。
+
+绝对不要合并：
+- 两个平行的、不同的东西。「MiniWMS」和「精简WMS设计」是两个不同的项目/文档，不并。
+- 型号、版本、规格不同的东西。「风盾500」和「风盾500pro」是两个 SKU，不并。
+- 只是字面像但实际无关的。
+
+拿不准就不合并——留着两个名字的代价，远小于合错了再拆开。
+
+只输出 JSON，不要解释：
+{"merge": {"要并掉的旧名字": "保留的名字", ...}}
+没有需要合并的就输出 {"merge": {}}
+保留的名字必须是下面出现过的名字之一。`;
+
+/**
+ * 话题收敛：一次看全表，把子话题并回父话题。
+ *
+ * 为什么必须有这一步：本地字面匹配解决不了「MiniWMS SKU 模型 → MiniWMS」——
+ * 差了 7 个字，`long.includes(short) && diff <= 4` 不成立，于是只能进待确认。
+ * 而调松阈值会把「风盾500」和「风盾500pro」也吃进去，那是更糟的错误。
+ * 这件事只有语义判断能做，所以攒成一次调用看全表。
+ *
+ * 只在新话题出现时才跑（`created` 非空）。没有新名字的轮次跑它纯属浪费。
+ */
+export async function convergeTopics({ cfg, table, extra = [], log = () => {} }) {
+  const names = Array.from(new Set([...table.filter((e) => e.status !== "merged").map((e) => e.name), ...extra])).filter(Boolean);
+  if (names.length < 2) return new Map();
+
+  let r;
+  try {
+    r = await chat(cfg, {
+      messages: [
+        { role: "system", content: CONVERGE_PROMPT },
+        { role: "user", content: names.map((n, i) => `${i + 1}. ${n}`).join("\n") },
+      ],
+      json: true,
+      tag: "converge",
+    });
+  } catch (e) {
+    log(`    · 话题收敛没跑成（${e.message}），名字保持原样`);
+    return new Map();
+  }
+
+  const raw = String(r.text ?? "");
+  let obj = null;
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    const a = raw.indexOf("{");
+    const b = raw.lastIndexOf("}");
+    if (a >= 0 && b > a) {
+      try {
+        obj = JSON.parse(raw.slice(a, b + 1));
+      } catch {
+        obj = null;
+      }
+    }
+  }
+  // 解析不出来就一个都不合并。收敛是优化，不是必需路径。
+  if (!obj?.merge || typeof obj.merge !== "object") return new Map();
+
+  const known = new Set(names);
+  const out = new Map();
+  for (const [from, to] of Object.entries(obj.merge)) {
+    const a = String(from).trim();
+    const b = String(to).trim();
+    // 三道校验：两个名字都得在列表里、不能自己并自己、不能链式（A→B 而 B→C）。
+    if (!known.has(a) || !known.has(b) || a === b) continue;
+    if (obj.merge[b] && obj.merge[b] !== b) continue;
+    out.set(a, b);
+  }
+  if (out.size) log(`    话题收敛：${Array.from(out.entries()).map(([a, b]) => `${a}→${b}`).join("，")}`);
+  return out;
 }
 
 /* ---------- 05-实体待确认 ---------- */
