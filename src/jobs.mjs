@@ -13,7 +13,7 @@ import { normalizeTurns, toExchanges, extractEntries } from "./extract.mjs";
 import { pending, readSession, archive, drop } from "./inbox.mjs";
 import { readLog } from "./readers/index.mjs";
 import { archive as archiveRaw } from "./raw.mjs";
-import { loadEntities, shotList, resolveEntities } from "./entities.mjs";
+import { loadEntities, shotList, resolveEntities, convergeTopics, mergeEntities } from "./entities.mjs";
 
 /** 建连接。注入路径要能快速放弃，写路径慢一点没关系，但别无限等。 */
 export function open() {
@@ -32,7 +32,27 @@ export function open() {
  * 会话日志是 append-only 的，所以"读到第几轮"就是进度；文件变短说明被重写
  * 或轮转过，那就从头再来。返回 added 为 0 表示没有新内容，不算失败。
  */
-export function enqueueLog(file, { format = "" } = {}) {
+/**
+ * 这个日志是不是还在被写。
+ *
+ * 正在进行的会话切出来全是半句话——「等等」「你先别」这类没说完的轮次，
+ * 抽出来的结论也是半截。serve 靠 quietSeconds 过滤，手动 ingest-log 也要。
+ * （实测踩过：投了当前正在进行的那个 1183 轮会话，178 万字跑 112 批、
+ *   二十分钟，抽出来全是「用户要求先探清楚能力」这类过程叙述。）
+ */
+export function isActive(file, quietSeconds = 180) {
+  try {
+    const st = statSync(file);
+    return Date.now() - st.mtimeMs < quietSeconds * 1000;
+  } catch {
+    return false;
+  }
+}
+
+export function enqueueLog(file, { format = "", quietSeconds = 180 } = {}) {
+  if (quietSeconds > 0 && isActive(file, quietSeconds)) {
+    return { added: 0, reason: "active", quietSeconds };
+  }
   const log = readLog(file, format);
   if (!log.turns.length) {
     return {
@@ -238,6 +258,29 @@ export async function processQueue({ dry = false, useModel = true, onLine = () =
     if (degraded) sum.degraded++;
     if (!dry && failedHere === 0 && !degraded) archive(file);
     else if (degraded) onLine("    · 抽取没跑完整，原文留在队列里，下次重试");
+  }
+
+  // 一轮处理完再收敛，不是每个会话跑一次。
+  //
+  // 逐会话收敛有两个问题：一是同一批会话说的是同一件事时，先收进来的名字还没齐，
+  // 收敛看不到全貌；二是每会话一次调用，回灌一百个会话就是一百次，而且模型每次
+  // 都可能给出稍有不同的保留名，合并结果会漂。放到最后统一看一次全表，稳得多。
+  //
+  // 这时条目已经写进库了，所以必须走 mergeEntities——它会回填块属性。
+  if (!dry && useModel && hasModel(cfg) && entityTable?.length) {
+    try {
+      const merges = await convergeTopics({ cfg, table: entityTable, log: onLine });
+      for (const [from, to] of merges) {
+        try {
+          const r = await mergeEntities(sy, from, to, { log: onLine });
+          onLine(`    · 收敛 ${from} → ${to}，回填 ${r.changed} 条`);
+        } catch (err) {
+          onLine(`    ! 收敛失败 ${from} → ${to}：${err.message}`);
+        }
+      }
+    } catch (err) {
+      onLine(`    · 话题收敛跳过：${err.message}`);
+    }
   }
 
   return sum;

@@ -399,28 +399,6 @@ export async function resolveEntities({ sy, cfg, ids, names, useModel = true, ta
     }
   }
 
-  // 话题收敛：新名一出现就看一眼全表，把子话题并回父话题。
-  //
-  // 为什么不在写条目之后做：这时条目还没写，合并只改内存里的 map 和本地表，
-  // 不需要回填块属性——省一次批量接口，也不会出现「条目写进去了但实体名是旧的」。
-  if (created.length && useModel && hasModel(cfg)) {
-    const merges = await convergeTopics({ cfg, table, extra: created, log });
-    for (const [from, to] of merges) {
-      const dst = table.find((e) => e.name === to && e.status !== "merged");
-      if (!dst) continue;
-      const src = table.find((e) => e.name === from);
-      dst.aliases = Array.from(new Set([...dst.aliases, from, ...(src?.aliases ?? [])].filter((x) => x && x !== to)));
-      if (src) {
-        src.status = "merged";
-        src.mergedInto = to;
-      }
-      for (const [k, v] of map) if (v === from) map.set(k, to);
-      const i = created.indexOf(from);
-      if (i >= 0) created.splice(i, 1);
-    }
-    if (merges.size) saveEntities(table);
-  }
-
   // 进待确认：所有「判过但没合并」的对。
   // 已经被收敛掉的（map 指向了别人）不用再问人。
   const toPending = weak.filter((w) => map.get(w.name) === w.name);
