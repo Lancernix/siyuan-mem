@@ -29,7 +29,7 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
   mem serve [--once]           常驻：每轮找新会话 → 投队列 → 写思源
       [--interval 分钟] [--dry] [--no-model] [--force]
   mem ingest <file.json>       把一个会话文件投入队列（测试用）
-  mem ingest-log <日志>        直接读 harness 的会话日志入队
+  mem ingest-log <日志> [--force] [--quiet 秒]   直接读会话日志入队（默认跳过还在写的）
   mem scan [--n 3] [--all]     列出本机各 harness 的会话（--all 逐个读一遍数轮数）
   mem audit [文件...]          逐块对账：收了多少字，丢了多少字，为什么丢
   mem search <词...>           查记忆，默认只看 current
@@ -175,10 +175,16 @@ async function cmdIngestLog(flags, args) {
   const file = args[0];
   if (!file) throw new Error("要给一个日志文件路径");
 
-  const r = enqueueLog(file, { format: flags.format === true ? "" : flags.format ?? "" });
+  // 默认跳过还在写的会话（3 分钟内改过），--force 强投。
+  const r = enqueueLog(file, {
+    format: flags.format === true ? "" : flags.format ?? "",
+    quietSeconds: flags.force ? 0 : Number(flags.quiet) || 180,
+  });
   if (!r.added) {
     if (r.reason === "subagent") console.log("这是子代理会话（归属于另一个会话），不进记忆。");
     else if (r.reason === "empty") console.log("这条日志里没有能用的问答。");
+    else if (r.reason === "active")
+      console.log(`这条会话还在写（${r.quietSeconds} 秒内改过），先不动。加 --force 强投。`);
     else console.log(`${r.harness}  没有新内容（上次读到第 ${r.before} 轮）`);
     return;
   }
