@@ -46,7 +46,10 @@ export async function groupByEntity({ sy, ids }) {
       WHERE box = (SELECT box FROM blocks WHERE id='${ids.entries}')
         AND ial LIKE '%${ATTR.hash}="%'
         AND ial LIKE '%${ATTR.status}="current"%'
-      ORDER BY created ASC`
+      ORDER BY created ASC
+      -- 必须显式写 LIMIT：思源 SQL 不写的话默认只回 64 行，
+      -- 库一过 64 条，视图就只剩最早那 64 条，而且它不报错。
+      LIMIT 5000`
   );
   const map = new Map();
   for (const r of rows ?? []) {
@@ -57,7 +60,7 @@ export async function groupByEntity({ sy, ids }) {
     list.push({
       id: r.id,
       text,
-      brief: attrOf(r.ial, ATTR.brief) || text.slice(0, 24),
+      brief: attrOf(r.ial, ATTR.brief) || text.slice(0, 30),
       type: attrOf(r.ial, ATTR.type) || "fact",
       date: attrOf(r.ial, ATTR.date),
     });
@@ -69,9 +72,8 @@ export async function groupByEntity({ sy, ids }) {
 }
 
 export function render(groups, { total } = {}) {
+  // 不写 # 02-实体：文档标题栏已经显示文档名了，正文再来一个 h1 就是同一行字出现两次。
   const out = [
-    "# 02-实体",
-    "",
     `${groups.length} 个话题 · ${total} 条结论。括号里是条数，点条目能跳到它本身。`,
     "",
   ];
