@@ -51,7 +51,7 @@ export async function collect({ sy, ids }) {
       WHERE box = (SELECT box FROM blocks WHERE id='${ids.entries}')
         AND ial LIKE '%${ATTR.hash}="%'
         AND ial LIKE '%${ATTR.status}="current"%'
-      ORDER BY created ASC`
+      ORDER BY created ASC LIMIT 5000`
   );
 
   const bySession = new Map();

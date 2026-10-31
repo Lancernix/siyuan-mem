@@ -83,12 +83,17 @@ function snackName(a) {
   return a.name;
 }
 
-/** 同一个问题可能被重试回放两次，内容完全相同的相邻轮去掉。 */
-function dedupe(turns) {
+/**
+ * 同一个问题可能被重试回放两次，**内容完全相同**的相邻轮去掉。
+ *
+ * 比的必须是全文。原来比的是「角色 + 前 120 字」，于是两条开头相同、后面不同的
+ * 消息会被当成同一条丢掉——这是确定性的内容丢失，而且丢的是用户的第二条提问。
+ */
+export function dedupe(turns) {
   const out = [];
   let prev = "";
   for (const t of turns) {
-    const key = `${t.role}:${t.text.slice(0, 120)}`;
+    const key = `${t.role}:${t.text}`;
     if (key === prev) continue;
     prev = key;
     out.push(t);

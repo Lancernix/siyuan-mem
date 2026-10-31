@@ -95,8 +95,15 @@ export function startIngest({ port, bind = "127.0.0.1", token = "", maxBytes = 2
   }
 
   const server = http.createServer(async (req, res) => {
-    const host = req.headers.host ?? "";
-    const url = new URL(req.url ?? "/", `http://${host || "127.0.0.1"}`);
+    // Host 可能是畸形值。`new URL()` 在 try 外面抛，就是一个没人接的异常，
+    // 常驻进程会直接死——而这是写入通道，死了等于整个中心停止收数据。
+    let url;
+    try {
+      const host = req.headers.host ?? "";
+      url = new URL(req.url ?? "/", `http://${host || "127.0.0.1"}`);
+    } catch {
+      return json(res, 400, { error: "请求头不合法" });
+    }
 
     if (req.method === "GET" && url.pathname === "/api/ping") {
       // 不带敏感信息：只用来确认"连得到、地址对不对"。
@@ -141,6 +148,10 @@ export function startIngest({ port, bind = "127.0.0.1", token = "", maxBytes = 2
     });
   });
 
+  server.on("error", (e) => {
+    log(`  接收端起不来：${e.code === "EADDRINUSE" ? `端口 ${port} 被占用` : e.message}`);
+    if (e.code === "EADDRINUSE") process.exitCode = 1;
+  });
   server.listen(port, bind);
   // port 传 0 时真实端口要等 listening 之后才知道，所以 url 用 getter。
   const addr = () => {
