@@ -99,7 +99,9 @@ export async function pushOnce({
 
   for (const s of sessions) {
     const prev = offsets[s.file];
-    if (prev && prev.bytes === s.size) continue;
+    // 只比体积会漏掉"同尺寸重写"（日志被改写、同一段长度刚好一样）。
+    // 老记录没有 mtimeMs：退回只比体积，别把"不知道"当成"变了"。
+    if (prev && prev.bytes === s.size && (prev.mtimeMs == null || prev.mtimeMs === s.mtimeMs)) continue;
     // 还在写的会话先别推：切出来全是半句话，而且下一轮还得再推一遍。
     if (now - s.mtime < quietMs && (!prev || s.size >= prev.bytes)) continue;
     candidates.push(s);

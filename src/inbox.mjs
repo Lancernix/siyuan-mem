@@ -27,11 +27,18 @@ export function drop(payload, { key } = {}) {
   return { file, duplicate: false };
 }
 
-/** 会话增量包的幂等键：只取"哪个机器的哪个会话、哪几轮"，跟时间无关。 */
-export function ingestKey({ machine = "", harness = "", session_id: sid = "", turns = [] } = {}) {
+/**
+ * 会话增量包的幂等键：哪个机器的哪个会话、从第几轮开始的哪几轮。
+ *
+ * 起始轮次必须进去。原来只算「会话 + 条数 + 内容哈希」，于是同一场会话里
+ * 两段**内容恰好相同**的区间（比如两次一模一样的问答）会算出同一个键，
+ * 后一段被中心当成重复拒掉——合法的分片就这么没了。
+ */
+export function ingestKey({ machine = "", harness = "", session_id: sid = "", turns = [], turnFrom = 1 } = {}) {
+  const from = Math.max(1, Number(turnFrom) || 1);
   const body = turns.map((t) => `${t.role}\u0000${t.text}`).join("\u0001");
-  const tail = createHash("sha1").update(body).digest("hex").slice(0, 12);
-  return `${createHash("sha1").update(`${machine}|${harness}|${sid}`).digest("hex").slice(0, 10)}-${turns.length}-${tail}`;
+  const tail = createHash("sha1").update(`${from}\u0002${body}`).digest("hex").slice(0, 12);
+  return `${createHash("sha1").update(`${machine}|${harness}|${sid}`).digest("hex").slice(0, 10)}-${from}-${turns.length}-${tail}`;
 }
 
 export function pending() {
