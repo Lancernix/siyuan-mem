@@ -7,7 +7,7 @@
  * ——它是自带运行时的单文件，谁升级 node/bun 都影响不到它。
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,13 +17,57 @@ export const LABEL = "com.siyuan.mem";
 export const PLIST_PATH = join(homedir(), "Library/LaunchAgents", `${LABEL}.plist`);
 const CLI = fileURLToPath(new URL("./cli.mjs", import.meta.url));
 
-/** 首选单文件二进制；没有就退回 mise 的 node shim；再不行用当前 node。 */
+/**
+ * 源码比二进制新的时候，别用二进制。
+ *
+ * 这个坑很实：`~/.siyuan-mem/mem` 是 bun 编出来的 90MB 单文件，一旦它存在，
+ * resolveRunner 就一直选它。开发期间改了源码却忘了重编，服务跑的还是几天前的
+ * 旧代码，而且日志上完全看不出来——表现是"我明明改了 prompt，抽出来的还是老样子"。
+ *
+ * 所以这里比 mtime：src 目录里任何一个 .mjs 比二进制新，就用 node 跑源码。
+ */
+function srcNewerThan(binPath) {
+  try {
+    const binMs = statSync(binPath).mtimeMs;
+    const dir = dirname(CLI);
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith(".mjs")) continue;
+      if (statSync(join(dir, f)).mtimeMs > binMs) return true;
+    }
+    for (const sub of ["readers", "wire"]) {
+      const p = join(dir, sub);
+      if (!existsSync(p)) continue;
+      for (const f of readdirSync(p)) {
+        if (!f.endsWith(".mjs")) continue;
+        if (statSync(join(p, f)).mtimeMs > binMs) return true;
+      }
+    }
+    return false;
+  } catch {
+    return true; // 读不出来就当源码更新，宁可跑源码
+  }
+}
+
+/** 首选单文件二进制（且不比源码旧）；否则退回 node 跑源码。 */
 export function resolveRunner() {
   const bin = join(HOME_DIR, "mem");
-  if (existsSync(bin)) return { program: bin, args: ["serve"] };
-  const shim = join(homedir(), ".local/share/mise/shims/node");
-  if (existsSync(shim)) return { program: shim, args: [CLI, "serve"] };
-  return { program: process.execPath, args: [CLI, "serve"] };
+  if (existsSync(bin) && !srcNewerThan(bin)) return { program: bin, args: ["serve"], kind: "binary" };
+  // 不用 mise 的 shim（脚本，launchd 里没有 mise 环境会找不到版本），
+  // 也不用 process.execPath（可能是宿主 App 自带的那份，升级就换路径）。
+  // 按稳定性排：mise 装的真身 > homebrew > 当前进程。
+  const cands = [
+    join(homedir(), ".local/share/mise/installs/node/lts/bin/node"),
+    join(homedir(), ".local/share/mise/installs/node/latest/bin/node"),
+    "/opt/homebrew/bin/node",
+    "/usr/local/bin/node",
+    process.execPath,
+  ];
+  const node = cands.find((c) => existsSync(c)) ?? process.execPath;
+  return {
+    program: node,
+    args: [CLI, "serve"],
+    kind: existsSync(bin) ? "source-over-stale-binary" : "source",
+  };
 }
 
 function esc(s) {

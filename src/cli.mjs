@@ -7,12 +7,15 @@ import { CATALOG_PATH } from "./catalog.mjs";
 import { PROVIDERS, resolveModel, hasModel, probe as probeModel, saveModelChoice, maskKey, usageToday } from "./llm.mjs";
 import { loadCatalog, loadCatalogSync, wireOf, findProvider, modelInfo } from "./catalog.mjs";
 import { formatHits, ATTR } from "./store.mjs";
-import { readRange, listParts, parsePtr } from "./raw.mjs";
+import { parseArgs } from "./args.mjs";
+import { loadRawIndex, readRange, parsePtr } from "./raw.mjs";
 import { loadEntities, addEntity, mergeEntities, applyPending, shotList } from "./entities.mjs";
 import { print as printDigest } from "./digest.mjs";
 import { writeEntities } from "./entity-view.mjs";
+import { readDays, stats as logStats, dayOf } from "./log.mjs";
 import { normalizeTurns, toExchanges } from "./extract.mjs";
-import { pending } from "./inbox.mjs";
+import { drop, pending, readSession } from "./inbox.mjs";
+import { searchEntries } from "./search.mjs";
 import { readLog, readJsonLines, auditMessages, HARNESS_NAMES } from "./readers/index.mjs";
 import { listSessions, summarize } from "./harness.mjs";
 import { open, enqueueLog, processQueue } from "./jobs.mjs";
@@ -60,6 +63,8 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
   mem service install [--interval 分钟] [--print]   装成 launchd 服务
   mem service uninstall        卸载
   mem service unit             打印 systemd 单元（Linux 用，不落盘）
+  mem log [stats|tail|grep]    结构化事件日志：stats 看汇总，tail 看最近，grep 搜字段
+  mem search <关键词>           召回：查记忆条目（--limit=8 / --topic= / --type= / --days= / --json）
 
 配置：${CONFIG_PATH}
 队列：${INBOX_DIR}
@@ -67,29 +72,6 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 `;
 
 /** 只有这几个键吃后面的值，其余 --xxx 一律当布尔，免得 "search --all 风盾" 把查询词吃掉。 */
-const VALUED = new Set(["entity", "type", "confidence", "limit", "format", "n", "interval", "key", "name", "wire", "port", "to", "token", "machine", "quiet", "every", "bind", "alias", "chars", "base"]);
-
-function parseArgs(argv) {
-  const flags = {};
-  const rest = [];
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (!a.startsWith("--")) {
-      rest.push(a);
-      continue;
-    }
-    const key = a.slice(2);
-    const next = argv[i + 1];
-    if (VALUED.has(key) && next && !next.startsWith("--")) {
-      flags[key] = next;
-      i++;
-    } else {
-      flags[key] = true;
-    }
-  }
-  return { flags, rest };
-}
-
 function make() {
   return open();
 }
@@ -321,14 +303,6 @@ async function cmdAudit(flags, rest) {
     const pct = ((r.kept / r.total) * 100).toFixed(1);
     console.log(`${r.harness.padEnd(10)} 收 ${String(r.kept).padStart(9)} / 共 ${String(r.total).padStart(9)} 字 = ${pct}%`);
   }
-}
-
-async function cmdSearch(flags, words) {
-  const { store } = make();
-  const q = words.join(" ");
-  if (!q) throw new Error("要给一个查询词");
-  const hits = await store.search(q, { includeSuperseded: Boolean(flags.all) });
-  console.log(formatHits(hits));
 }
 
 async function cmdReview(args) {
@@ -699,42 +673,40 @@ async function cmdShow(args, flags) {
   }
 }
 
+/**
+ * 看原文归档到了哪些 part。
+ *
+ * 数据源是本地 raw-index.json，不是思源里的块：原文本身是附件，索引是我们自己的
+ * 账本。以前这里查的是一批早就不写的 raw-part 块，所以这个命令一直"没有归档过原文"。
+ */
 async function cmdRaw(args) {
   const sub = args[0] ?? "list";
   if (sub !== "list") throw new Error(`不认识的子命令：${sub}（可用：list）`);
-  const { sy, store } = make();
-  const ids = await store.docIds();
   const session = args[1] ?? "";
 
-  const rows = await sy.sql(
-    `SELECT id, content, ial FROM blocks WHERE parent_id='${ids.raw}' AND ial LIKE '%custom-mem-kind="raw-part"%' ORDER BY created ASC`
-  );
-  const parts = (rows ?? [])
-    .map((r) => ({
-      id: r.id,
-      content: String(r.content ?? "").replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").trim(),
-      session: attrOf(r.ial, "custom-mem-session"),
-      harness: attrOf(r.ial, "custom-mem-harness"),
-      machine: attrOf(r.ial, "custom-mem-machine"),
-      range: attrOf(r.ial, "custom-mem-range"),
-      bytes: Number(attrOf(r.ial, "custom-mem-bytes")) || 0,
-    }))
-    .filter((p) => !session || p.session === session);
+  const idx = loadRawIndex();
+  // 键是 machine|harness|session，拆回来才是人要看的三段。
+  const rows = Object.entries(idx)
+    .map(([key, parts]) => {
+      const [machine, harness, ...rest] = key.split("|");
+      return { machine, harness, session: rest.join("|"), parts: Array.isArray(parts) ? parts : [] };
+    })
+    .filter((r) => r.parts.length)
+    .filter((r) => !session || r.session.includes(session))
+    .sort((a, b) => a.session.localeCompare(b.session));
 
-  if (!parts.length) {
+  if (!rows.length) {
     console.log(session ? `会话 ${session} 没有归档过原文` : "还没有归档过原文");
     return;
   }
-  const by = new Map();
-  for (const p of parts) {
-    const k = p.session;
-    (by.get(k) ?? by.set(k, []).get(k)).push(p);
-  }
-  console.log(`${parts.length} 个 part，${by.size} 个会话\n`);
-  for (const [sid, list] of by) {
-    console.log(`${sid.slice(0, 24)}  ${list[0].machine}/${list[0].harness}  ${list.length} 段`);
-    for (const p of list) {
-      console.log(`  ${String(p.range).padEnd(10)} ${(p.bytes / 1024).toFixed(0).padStart(5)}KB  ${p.content}`);
+
+  const total = rows.reduce((n, r) => n + r.parts.length, 0);
+  console.log(`${total} 个 part，${rows.length} 个会话\n`);
+  for (const r of rows) {
+    console.log(`${r.session.slice(0, 26)}  ${r.machine}/${r.harness}  ${r.parts.length} 段`);
+    for (const p of r.parts) {
+      const range = `${p.from ?? "?"}-${p.to ?? "?"}`.padEnd(10);
+      console.log(`  ${range} ${(p.path ?? "").replace(/^.*\/assets\//, "assets/")}`);
     }
   }
 }
@@ -780,7 +752,7 @@ async function cmdEntity(args, flags) {
   if (sub === "merge") {
     const [from, into] = args.slice(1);
     if (!from || !into) throw new Error("mem entity merge <旧名> <新名>");
-    const r = await mergeEntities(sy, from, into, { log: console.log });
+    const r = await mergeEntities(sy, from, into, { log: console.log, box: ids.notebook });
     console.log(`已合并：${from} → ${into}，回填 ${r.changed} 条`);
     if (r.aliases?.length) console.log(`  现在的别名：${r.aliases.join("、")}`);
     return;
@@ -810,6 +782,115 @@ async function cmdEntity(args, flags) {
   throw new Error(`不认识的子命令：${sub}（可用：list / add / merge / review / reindex）`);
 }
 
+/**
+ * 结构化事件日志的查看入口。
+ *
+ * 三件事：
+ *   stats  一周的汇总：写了多少、拦了多少、错了多少次、条目多长、用的哪个 prompt
+ *   tail   最近 N 条原始事件，按行打
+ *   grep   在字段里搜（会话 id、话题、错误信息都行）
+ *
+ * 为什么不用 grep 直接翻 jsonl：一行一个 JSON，人眼找字段很费劲，
+ * 而且想看的往往是"这个会话到底被判重判成了什么"，要跨事件拼。
+ */
+async function cmdLog(args, flags) {
+  const sub = args[0] ?? "stats";
+
+  if (sub === "stats") {
+    const days = Number(flags.days ?? 7);
+    const s = logStats({ days });
+    if (!s.events) {
+      console.log(`最近 ${days} 天没有事件。服务没跑过，或者日志被清了。`);
+      return;
+    }
+    console.log(`最近 ${days} 天：${s.events} 条事件，${s.sessions} 个会话`);
+    console.log(`  写入 ${s.written} 条 | 跳过 ${s.skipped} | 取代 ${s.replaced} | 错误 ${s.errors}`);
+    if (s.degraded) console.log(`  ⚠ 降级 ${s.degraded} 次（没走模型，写进去的是规则抽取的半句话）`);
+    if (s.hits) console.log(`  召回 ${s.hits} 次（memory.hit，按话题去重）`);
+    if (s.tokens) console.log(`  tokens ${s.tokens}`);
+    if (s.written) {
+      console.log(`  条目长度 P10/P50/P90/max: ${s.len.p10}/${s.len.p50}/${s.len.p90}/${s.len.max}`);
+    }
+    if (s.models?.length) console.log(`  模型: ${s.models.map(([k, v]) => `${k}×${v}`).join("  ")}`);
+    if (s.prompts?.length) console.log(`  prompt: ${s.prompts.map(([k, v]) => `${k}×${v}`).join("  ")}`);
+    console.log("  事件分布: " + s.byEv.map(([k, v]) => `${k}:${v}`).join("  "));
+    return;
+  }
+
+  if (sub === "tail") {
+    const n = Number(flags.n ?? 20);
+    const rows = readDays(1).slice(-n);
+    if (!rows.length) return void console.log("今天还没有事件。");
+    for (const r of rows) {
+      const t = String(r.ts ?? "").slice(11, 19);
+      const { ts, ev, ...rest } = r;
+      const brief = Object.entries(rest)
+        .filter(([, v]) => v !== "" && v != null)
+        .map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`)
+        .join(" ")
+        .slice(0, 150);
+      console.log(`${t} ${String(ev).padEnd(14)} ${brief}`);
+    }
+    return;
+  }
+
+  if (sub === "grep") {
+    const pat = args[1];
+    if (!pat) throw new Error("用法：mem log grep <关键词> [--days 7]");
+    const days = Number(flags.days ?? 7);
+    const hit = readDays(days).filter((r) => JSON.stringify(r).toLowerCase().includes(pat.toLowerCase()));
+    console.log(`${hit.length} 条命中（最近 ${days} 天）`);
+    for (const r of hit.slice(-60)) {
+      const t = String(r.ts ?? "").slice(5, 19).replace("T", " ");
+      const { ts, ev, ...rest } = r;
+      console.log(`${t} ${String(ev).padEnd(14)} ${JSON.stringify(rest).slice(0, 160)}`);
+    }
+    return;
+  }
+
+  if (sub === "today") return void console.log(dayOf());
+
+  throw new Error(`不认识的子命令：${sub}（可用：stats / tail / grep）`);
+}
+
+/**
+ * 召回。这是整套系统第一个"读"的入口——在这之前只能人手写 SQL。
+ *
+ * 用法：
+ *   mem search 车架
+ *   mem search "mcp adapter 元工具" --limit=5
+ *   mem search 索引 --topic=精简WMS设计 --days=30
+ */
+async function cmdSearch(args, flags) {
+  const q = args.join(" ").trim();
+  if (!q) throw new Error("用法：mem search <关键词>");
+  const r = await searchEntries({
+    q,
+    limit: flags.limit,
+    topic: flags.topic,
+    type: flags.type,
+    days: flags.days,
+    // --all 连过时的也一起看：查"当初为什么改"时需要，默认只给在用的。
+    status: flags.all ? "" : undefined,
+  });
+  if (flags.json) {
+    console.log(JSON.stringify(r, null, 2));
+    return;
+  }
+  if (!r.hits.length) {
+    console.log(`没找到。检索词：${r.terms.join(" / ") || "（空）"}`);
+    return;
+  }
+  console.log(`找到 ${r.hits.length} 条（检索词：${r.terms.join(" / ")}）\n`);
+  r.hits.forEach((h, i) => {
+    console.log(`${i + 1}. [${h.entity || "-"}] ${h.date || ""} · ${h.type || ""}`);
+    if (h.brief) console.log(`   ${h.brief}`);
+    if (h.text && h.text !== h.brief) console.log(`   ${h.text.slice(0, 120)}${h.text.length > 120 ? "…" : ""}`);
+    if (h.raw) console.log(`   原文 ${h.raw}`);
+    console.log("");
+  });
+}
+
 async function main() {
   const [cmd, ...args] = process.argv.slice(2);
   const { flags, rest } = parseArgs(args);
@@ -831,7 +912,7 @@ async function main() {
     case "audit":
       return cmdAudit(flags, rest);
     case "search":
-      return cmdSearch(flags, rest);
+      return cmdSearch(rest, flags);
     case "review":
       return cmdReview(rest);
     case "show":
@@ -852,6 +933,8 @@ async function main() {
       return cmdUi(flags);
     case "service":
       return cmdService(rest, flags);
+    case "log":
+      return cmdLog(rest, flags);
     case "center":
       return cmdCenter(rest, flags);
     case "push":
