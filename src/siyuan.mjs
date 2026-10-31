@@ -97,6 +97,40 @@ export class SiYuan {
     return this.#post("/api/block/deleteBlock", { id });
   }
 
+  /**
+   * 直接子块。**实时**，不走 SQL 索引——刚写完的结构只能靠这个看，
+   * SQL 那边要等三秒，而且列表的层级在 ial 里看不出来。
+   */
+  async childBlocks(id) {
+    const d = await this.#post("/api/block/getChildBlocks", { id });
+    return Array.isArray(d) ? d : [];
+  }
+
+  /**
+   * 通用事务。搬块、加列、写属性视图单元格都走它——前端也是这么调的。
+   *
+   * `reqId` 必填：漏了会报 "Field [reqId] is required"，而且这个错误很容易
+   * 被当成"这个接口不支持该操作"。
+   */
+  transaction(doOperations, undoOperations = []) {
+    const reqId = Date.now() + Math.floor(Math.random() * 1000);
+    return this.#post("/api/transactions", {
+      reqId,
+      transactions: [{ doOperations, undoOperations }],
+    }, 30000);
+  }
+
+  /**
+   * 改已有块的正文。
+   *
+   * 注意：这个接口会**重写整块的 IAL**，块上挂的 custom-* 属性会一并消失。
+   * 所以只能用在没有属性的块上（分组标题），条目一律不许走这条路——改一条
+   * 属性全丢，而且不报错。真要改条目，先用 getBlockAttrs 存一份再补回去。
+   */
+  updateBlock(id, data, dataType = "markdown") {
+    return this.#post("/api/block/updateBlock", { id, dataType, data });
+  }
+
   setBlockAttrs(id, attrs) {
     return this.#post("/api/attr/setBlockAttrs", { id, attrs });
   }

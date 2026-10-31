@@ -206,7 +206,7 @@ export function addEntity(name, { aliases = [], source = "" } = {}) {
  * 反过来的话，改完条目属性再写表失败，下次抽取又会造一个新实体，
  * 而那一批被改过的条目已经指向新名字了，两边对不上。
  */
-export async function mergeEntities(sy, fromName, intoName, { log = () => {} } = {}) {
+export async function mergeEntities(sy, fromName, intoName, { log = () => {}, box = "" } = {}) {
   const table = loadEntities();
   const target = table.find((e) => e.status !== "merged" && norm(e.name) === norm(intoName));
   if (!target) throw new Error(`找不到实体「${intoName}」，先用 mem entity add 建一个`);
@@ -230,8 +230,12 @@ export async function mergeEntities(sy, fromName, intoName, { log = () => {} } =
   const names = [fromName, ...(src?.aliases ?? [])].filter(Boolean);
   let changed = 0;
   if (sy && names.length) {
-    const cond = names.map((n) => `ial LIKE '%custom-mem-entity="${n.replace(/"/g, '\\"')}"%'`).join(" OR ");
-    const rows = await sy.sql(`SELECT id FROM blocks WHERE (${cond}) AND ial LIKE '%custom-mem-hash="%'`);
+    // 两个都必须：不限定 box 会跨笔记本改别人的条目；不转义单引号会让
+    // 带 ' 的名字直接把 SQL 弄坏（严重时能扩大更新范围）。
+    if (!box) throw new Error("mergeEntities 必须传 box（笔记本 id）：不加限定会跨笔记本批量改属性");
+    const esc = (n) => String(n).replace(/'/g, "''").replace(/"/g, '\\"');
+    const cond = names.map((n) => `ial LIKE '%custom-mem-entity="${esc(n)}"%'`).join(" OR ");
+    const rows = await sy.sql(`SELECT id FROM blocks WHERE box='${box}' AND (${cond}) AND ial LIKE '%custom-mem-hash="%' LIMIT 20000`);
     const pairs = (rows ?? []).map((r) => ({ id: r.id, attrs: { "custom-mem-entity": target.name } }));
     if (pairs.length) {
       await sy.setBlockAttrsBatch(pairs);
@@ -404,7 +408,8 @@ export async function resolveEntities({ sy, cfg, ids, names, useModel = true, ta
   const toPending = weak.filter((w) => map.get(w.name) === w.name);
   if (toPending.length && ids.pending) {
     try {
-      await appendPending(sy, ids.pending, toPending);
+      const skipped = await appendPending(sy, ids.pending, toPending, table);
+      if (skipped) log(`    · 待确认跳过 ${skipped} 对（已经合并过或否定过）`);
     } catch (e) {
       log(`    ! 待确认写不进去：${e.message}`);
     }
@@ -436,14 +441,26 @@ const CONVERGE_PROMPT = `你是记忆系统的话题管理员。系统里有一�
 不同侧面（目标 / 选型 / 具体线路 / 具体厂商 / 踩到的坑），应该收敛到 1-2 个。
 把它们强行并列成 5 个话题，以后搜的时候哪个都搜不全。
 
+## 一个东西和一类东西，不能合并
+
+具体项目名、仓库名、产品名，不能并进它所属的领域、生态、上级概念。
+
+- 「mcp-adapter」是一个具体项目，「DSH MCP 插件生态」是它装进去的那个宿主生态，
+  「MCP 生态」是一整类东西。粒度不同，强行合并会把「查这个项目」变成「翻一整个生态」。
+- 但同一个对象的两种叫法要合：「MCP 网关架构」和「mcp-adapter」指的是同一件东西，
+  只是一个人按作用叫、一个按仓库名叫——这种必须合。
+
+判断方法：把两个名字分别填进「我要查 ___ 怎么做的」。
+两句问的是同一件事 → 合；一句的范围明显包住另一句 → 不合，那是粒度错。
+
 ## 绝对不要合并
 
 - 两个不同的项目、不同的东西（MiniWMS 和 精简WMS设计 是两个项目/两份文档）。
 - 型号、版本、规格不同的东西（风盾500 和 风盾500pro 是两个 SKU）。
 - 只是字面像但实际无关的。
 
-合并的代价是「以后查这件事要记两个名字」，所以宁可多合一点；
-但把两个不同的东西合了，会造成信息串味，那个更糟。
+拿不准就不合。错合一次会让人以后查这件事时翻到一堆不相干的东西，
+而且合并是单向的——事后没人知道当初为什么要合。
 
 只输出 JSON，不要解释：
 {"merge": {"要并掉的旧名字": "保留的名字", ...}}
@@ -459,9 +476,13 @@ const CONVERGE_PROMPT = `你是记忆系统的话题管理员。系统里有一�
  *
  * 只在新话题出现时才跑（`created` 非空）。没有新名字的轮次跑它纯属浪费。
  */
-export async function convergeTopics({ cfg, table, extra = [], log = () => {} }) {
+export async function convergeTopics({ cfg, table, extra = [], samples = null, log = () => {} }) {
   const names = Array.from(new Set([...table.filter((e) => e.status !== "merged").map((e) => e.name), ...extra])).filter(Boolean);
   if (names.length < 2) return new Map();
+  const describe = (n) => {
+    const s = samples?.get(n);
+    return s?.length ? `- ${n}（${s.slice(0, 3).join(" / ")}）` : `- ${n}`;
+  };
 
   let r;
   try {
@@ -470,10 +491,13 @@ export async function convergeTopics({ cfg, table, extra = [], log = () => {} })
         { role: "system", content: CONVERGE_PROMPT },
         {
         role: "user",
+        // 每个话题挂两三条摘要当证据。只给名字的话，「DSH MCP 插件生态」和
+        // 「mcp-adapter」在字面上就是一大一小两个名字，看不出前者桶里装的其实是后者；
+        // 给了摘要才看得出哪边是项目、哪边是生态。
         content:
           "现存的：\n" +
-          names.filter((n) => !extra.includes(n)).map((n) => `- ${n}`).join("\n") +
-          (extra.length ? `\n\n这次新出现的（同一段对话）：\n${extra.map((n) => `- ${n}`).join("\n")}` : ""),
+          names.filter((n) => !extra.includes(n)).map((n) => describe(n)).join("\n") +
+          (extra.length ? `\n\n这次新出现的（同一段对话）：\n${extra.map((n) => describe(n)).join("\n")}` : ""),
       },
       ],
       json: true,
@@ -555,19 +579,38 @@ export function parsePending(kramdown) {
   return out;
 }
 
-/** 往待确认区追加。已存在同一对就不重复写。 */
-export async function appendPending(sy, pendingDocId, items) {
+/**
+ * 往待确认区追加。三件事都不写：同一对已经在里面了、这一对已经被别的路径处理过、
+ * 或者两边有一个已经并到别处去了。
+ *
+ * 第三条是补的：resolveEntities 会自动合并一部分，话题收敛又会合并一批，
+ * 但这些都不会回头擦掉待确认里的那一行，于是文档里躺着一堆「早已合并」的旧问题。
+ */
+export async function appendPending(sy, pendingDocId, items, table = null) {
   const kramdown = await sy.getBlockKramdown(pendingDocId);
   const existing = parsePending(kramdown);
   const seen = new Set(existing.map((x) => `${norm(x.a)}|${norm(x.b)}`));
+  let skipped = 0;
   for (const w of items) {
-    const key = `${norm(w.name)}|${norm(w.candidates[0].entity.name)}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
     const cand = w.candidates[0];
+    const key = `${norm(w.name)}|${norm(cand.entity.name)}`;
+    if (seen.has(key)) continue;
+    if (table) {
+      // lookup 会跳过已 merged 的条目，走别名找到的是最终落点。
+      // 只要其中一个名字的落点不是它自己，这个「该不该合并」的问题就已经有答案了。
+      const a = lookup(table, w.name);
+      const b = lookup(table, cand.entity.name);
+      const settled = (a && norm(a.name) !== norm(w.name)) || (b && norm(b.name) !== norm(cand.entity.name));
+      if (settled || isNegated(w.name, cand.entity.name)) {
+        skipped++;
+        continue;
+      }
+    }
+    seen.add(key);
     const note = w.modelSaidSame ? "（模型认为是同一个，但字面差得远，得你定）" : "";
     await sy.appendBlock(pendingDocId, `- [ ] ${w.name} ← ${cand.entity.name}${note}`, "markdown");
   }
+  if (skipped) return skipped;
 }
 
 /**
@@ -598,7 +641,7 @@ export async function applyPending({ sy, cfg, ids, log = () => {}, dry = false }
         continue;
       }
       try {
-        const r = await mergeEntities(sy, it.a, it.b, { log });
+        const r = await mergeEntities(sy, it.a, it.b, { log, box: ids.notebook });
         stat.merged++;
         merged.push({ ...it, changed: r.changed });
         await deleteItem(sy, it.blockId);
