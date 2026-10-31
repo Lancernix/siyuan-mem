@@ -114,54 +114,21 @@ export function sliceByBytes(meta, turns, maxBytes) {
 }
 
 /**
- * 02-原文 里已经归档过哪些区间。返回 [{id, path, from, to}]，按 from 升序。
+ * 这场会话已经归档过哪些区间。只读本地索引。
  *
- * 按 box（笔记本）查而不是按 parent_id：文档被手动挪过、或者同一个会话的块
- * 因为历史原因挂在别的文档下时，按 parent_id 会漏。属性已经把范围收窄了。
- */
-export async function listParts(sy, rawDocId, session) {
-  if (!session) return [];
-  const rows = await sy.sql(
-    `SELECT id, ial FROM blocks
-      WHERE box = (SELECT box FROM blocks WHERE id='${rawDocId}')
-        AND ial LIKE '%custom-mem-kind="raw-part"%'
-        AND ial LIKE '%custom-mem-session="${session.replace(/"/g, '\\"')}"%'
-      ORDER BY created ASC`
-  );
-  const out = [];
-  for (const r of rows ?? []) {
-    const sid = /custom-mem-session="([^"]*)"/.exec(r.ial ?? "")?.[1] ?? "";
-    if (sid !== session) continue;
-    const range = /custom-mem-range="(\d+)-(\d+)"/.exec(r.ial ?? "");
-    if (!range) continue;
-    out.push({
-      id: r.id,
-      path: /custom-mem-path="([^"]*)"/.exec(r.ial ?? "")?.[1] ?? "",
-      from: Number(range[1]),
-      to: Number(range[2]),
-    });
-  }
-  return out.sort((a, b) => a.from - b.from);
-}
-
-/**
- * 已有的 part。先看本地索引，没有再问思源。
+ * 以前还有一条"回思源查 raw-part 块"的兜底，但那批块早就不写了（链接现在挂在
+ * 01-条目的分组标题上），所以那条路永远返回空——留着比没有更坏，因为它暗示
+ * "索引丢了也能从思源恢复"，而实际上不能。
  *
- * 顺序不能反：块的 SQL 索引是异步的，刚 append 完立刻查是空的，
- * 于是幂等判断失效、同一段原文被传两遍。本地索引在归档成功后立刻写，可靠。
+ * 现在的代价是：raw-index.json 一旦丢了，下次增量会重新上传一遍（附件不覆盖，
+ * 只会多出重复文件），不会丢内容，但会脏。要真能自愈，得能按文件名把
+ * 轮次范围反推出来，那是另一件事，先记着。
+ *
+ * 也不查 SQL：块索引是异步的，刚 append 完立刻查是空的，幂等判断会失效。
  */
-export async function knownParts(sy, rawDocId, { machine, harness, session }) {
+export function knownParts({ machine, harness, session }) {
   const idx = loadRawIndex();
-  const key = indexKey(machine, harness, session);
-  const local = idx[key];
-  if (Array.isArray(local) && local.length) return local;
-
-  const fromDb = await listParts(sy, rawDocId, session);
-  if (fromDb.length) {
-    idx[key] = fromDb.map((p) => ({ blockId: p.id, path: p.path, from: p.from, to: p.to }));
-    saveRawIndex(idx);
-  }
-  return idx[key] ?? [];
+  return idx[indexKey(machine, harness, session)] ?? [];
 }
 
 /**
@@ -184,40 +151,61 @@ export async function archive({ sy, cfg, ids, payload, dry = false, log = () => 
   const from = Math.max(1, Number(payload.turnFrom) || 1);
   const to = from + turns.length - 1;
 
-  const existing = await knownParts(sy, ids.raw, {
+  const existing = knownParts({
     machine: payload.machine,
     harness: payload.harness,
     session,
   });
   const covered = existing.find((p) => p.from <= from && p.to >= to);
-  if (covered) return [{ skip: true, ptr: null, from, to, existing: covered }];
+  // path 必须带上：调用方靠它给会话分组项挂 `[原文](assets/…)`，那是附件唯一的
+  // 保活引用。漏了这个字段，重跑一遍已归档的会话，链接就全没了——条目属性里
+  // 指针还在，但正文里没人引用，下次「清理未引用资源」就把附件扫走。
+  if (covered) return [{ skip: true, ptr: null, from, to, path: covered.path, existing: covered }];
 
   const maxBytes = rawCfg.forcePartBytes ?? 8 * 1024 * 1024;
   const chunks = sliceByBytes({ machine: payload.machine, harness: payload.harness }, turns, maxBytes);
   const dir = `/assets/${safe(rawCfg.dir ?? "mem-raw")}/${safe(payload.machine, "local")}/${safe(payload.harness, "harness")}/`;
-  const partIndex = existing.length + 1;
   const out = [];
 
-  let offset = from;
+  // 先把每段该覆盖哪几轮算出来。切分只跟 turns 和字节预算有关，跟"已经传过什么"无关，
+  // 所以重试时会切出一模一样的段——必须跳过已经传过的，否则第 2 段失败之后整批重传，
+  // 索引里会出现 9 段内容重叠的附件，指针都说不清该指哪份。
+  const ranges = [];
+  for (let o = from, k = 0; k < chunks.length; k++) {
+    ranges.push([o, o + chunks[k].length - 1]);
+    o += chunks[k].length;
+  }
+
+  let uploaded = 0;
   for (let k = 0; k < chunks.length; k++) {
     const chunk = chunks[k];
+    const [a, b] = ranges[k];
+    const done = existing.find((p) => p.from <= a && p.to >= b);
+
     const meta = {
       machine: payload.machine ?? "",
       harness: payload.harness ?? "",
       session,
       cwd: payload.cwd ?? "",
       date: payload.date ?? "",
-      from: offset,
+      from: a,
     };
     const part = buildPart(meta, chunk);
+    if (part.from !== a || part.to !== b) throw new Error(`分段范围算错了：${part.from}-${part.to} vs ${a}-${b}`);
 
+    if (done) {
+      // 这一段上轮已经传成功了。不重传，但要出现在返回值里——调用方靠 parts 算指针。
+      out.push({ ptr: `${done.path}#${done.from}-${done.to}`, path: done.path, from: done.from, to: done.to, reused: true });
+      log(`    原文已存在 ${String(done.path).split("/").pop()}  第 ${done.from}–${done.to} 轮`);
+      continue;
+    }
     if (dry) {
       out.push({ dry: true, from: part.from, to: part.to, bytes: part.buf.length, chars: part.chars });
-      offset = part.to + 1;
       continue;
     }
 
-    const name = `${safe(session || `log-${Date.now()}`, "session").slice(0, 28)}.p${partIndex + k}.jsonl`;
+    uploaded++;
+    const name = `${safe(session || `log-${Date.now()}`, "session").slice(0, 28)}.p${existing.length + uploaded}.jsonl`;
     const path = await sy.uploadAsset(dir, name, part.buf, "application/x-ndjson");
     const ptr = `${path}#${part.from}-${part.to}`;
 
@@ -230,7 +218,6 @@ export async function archive({ sy, cfg, ids, payload, dry = false, log = () => 
     existing.push({ path, from: part.from, to: part.to });
 
     out.push({ ptr, path, from: part.from, to: part.to, bytes: part.buf.length, chars: part.chars });
-    offset = part.to + 1;
     log(`    原文 ${path.split("/").pop()}  第 ${part.from}–${part.to} 轮  ${fmtChars(part.chars)}`);
   }
   return out;
