@@ -26,6 +26,7 @@ import { hostname } from "node:os";
 import { HOME_DIR, ensureDirs, loadConfig, loadOffsets, offsetsOf, machineId, LOCK_PATH, LOG_PATH } from "./config.mjs";
 import { listSessions } from "./harness.mjs";
 import { enqueueLog, processQueue, assertModel } from "./jobs.mjs";
+import { event } from "./log.mjs";
 import { SiYuan } from "./siyuan.mjs";
 import { startUi } from "./ui.mjs";
 import { startIngest } from "./ingest.mjs";
@@ -56,6 +57,46 @@ function alive(pid, host) {
     // EPERM：进程在，只是不归我管。
     return e.code === "EPERM";
   }
+}
+
+/**
+ * 同一时刻只许一轮在跑。
+ *
+ * 进程锁挡的是"第二个进程"，挡不住同一个进程里的两条异步流：面板上点「跑一轮」，
+ * 走的是另一个入口，和定时那一轮各跑各的 `processQueue`，两边同时往同一批块上
+ * append、同时改 supersede 标记。思源没有行级合并，撞上去只表现为"偶尔有条目写到
+ * 一半"或"旧条目没被标过时"——不报错，最难查。
+ *
+ * 所以这里在进程内加一道单飞：谁先来谁跑，后来者直接被告知"等它跑完"。
+ */
+let inFlight = null;
+let inFlightKind = "";
+let inFlightSince = 0;
+
+export function roundStatus() {
+  return inFlight
+    ? { running: true, kind: inFlightKind, seconds: Math.round((Date.now() - inFlightSince) / 1000) }
+    : { running: false };
+}
+
+export function beginRound(kind, fn) {
+  if (inFlight) {
+    throw new Error(
+      `有一轮正在跑（${inFlightKind}，已 ${Math.round((Date.now() - inFlightSince) / 1000)} 秒），等它跑完再来`
+    );
+  }
+  inFlightKind = kind;
+  inFlightSince = Date.now();
+  inFlight = (async () => {
+    try {
+      return await fn();
+    } finally {
+      inFlight = null;
+      inFlightKind = "";
+      inFlightSince = 0;
+    }
+  })();
+  return inFlight;
 }
 
 /** 给 `mem status` 看的：服务在不在、跑到第几轮、上次心跳什么时候。 */
@@ -181,7 +222,8 @@ async function runRound({ dry, useModel, log }) {
 
   for (const s of sessions) {
     const prev = offsets[s.file];
-    if (prev && prev.bytes === s.size) continue; // 一个字节没变
+    // 老记录没有 mtimeMs：那就只认体积（回到原来的行为），别把"不知道"当成"变了"。
+    if (prev && prev.bytes === s.size && (prev.mtimeMs == null || prev.mtimeMs === s.mtimeMs)) continue;
     // 还在写的会话先别切：等它安静，或者文件被轮转（变小）就立刻处理。
     if (now - s.mtime < quietMs && (!prev || s.size >= prev.bytes)) continue;
     candidates.push(s);
@@ -249,7 +291,27 @@ export async function serve({ once = false, dry = false, useModel = true, interv
     try {
       ui = startUi({
         port: cfg.ui?.port ?? 7787,
-        runRound: (logFn) => runRound({ dry, useModel, log: logFn ?? log }),
+        // 面板那一轮也要在 serve.log 里留痕：不然"我刚点了一下"和"什么都没发生"
+        // 在日志上长得一样，排查时会怀疑按钮坏了。
+        runRound: async () => {
+          const t0 = Date.now();
+          log("面板手动触发一轮");
+          const r = await beginRound("面板", () => runRound({ dry, useModel, log }));
+          log(`面板那一轮 ${((Date.now() - t0) / 1000).toFixed(1)}s：写入 ${r.written} 条，跳过 ${r.skipped}，失败 ${r.failed}`);
+          event("round", {
+            no: 0,
+            trigger: "panel",
+            ms: Date.now() - t0,
+            scanned: r.scanned,
+            enqueued: r.enqueued,
+            written: r.written,
+            skipped: r.skipped,
+            failed: r.failed,
+            degraded: r.degraded ?? 0,
+            tokens: r.tokens ?? { prompt: 0, completion: 0 },
+          });
+          return r;
+        },
       });
       log(`面板 ${ui.url}`);
     } catch (e) {
@@ -296,7 +358,7 @@ export async function serve({ once = false, dry = false, useModel = true, interv
     let wait = gap;
     try {
       heartbeat(roundNo);
-      const r = await runRound({ dry, useModel, log });
+      const r = await beginRound("定时", () => runRound({ dry, useModel, log }));
       failures = 0;
       lastError = null;
       const secs = ((Date.now() - t0) / 1000).toFixed(1);
@@ -307,11 +369,28 @@ export async function serve({ once = false, dry = false, useModel = true, interv
       );
       if (r.degraded) log(`  · ${r.degraded} 个会话抽取不完整，原文留在队列里等重试`);
       if (!r.candidates && !r.sessions) log("  队列空，也没有新会话");
+      event("round", {
+        no: roundNo,
+        ms: Date.now() - t0,
+        scanned: r.scanned,
+        enqueued: r.enqueued,
+        written: r.written,
+        skipped: r.skipped,
+        failed: r.failed,
+        degraded: r.degraded ?? 0,
+        tokens: r.tokens ?? { prompt: 0, completion: 0 },
+      });
     } catch (e) {
-      failures++;
-      lastError = e;
-      wait = backoff(failures);
-      log(`第 ${roundNo} 轮失败：${e.message}（连续 ${failures} 次，${Math.round(wait / 1000)} 秒后再试）`);
+      // 面板那一轮还没跑完不算故障：不记账、不退避，等下一轮就好。
+      if (/有一轮正在跑/.test(e.message)) {
+        log(`第 ${roundNo} 轮跳过：${e.message}`);
+      } else {
+        failures++;
+        lastError = e;
+        wait = backoff(failures);
+        event("error", { where: "round", no: roundNo, message: e.message });
+        log(`第 ${roundNo} 轮失败：${e.message}（连续 ${failures} 次，${Math.round(wait / 1000)} 秒后再试）`);
+      }
     }
 
     if (once || stop) break;

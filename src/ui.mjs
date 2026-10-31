@@ -13,7 +13,8 @@ import { LOG_PATH } from "./config.mjs";
 import { open } from "./jobs.mjs";
 import { pending } from "./inbox.mjs";
 import { usageToday, resolveModel, hasModel } from "./llm.mjs";
-import { lockInfo } from "./serve.mjs";
+import { lockInfo, roundStatus } from "./serve.mjs";
+import { searchEntries } from "./search.mjs";
 
 /** 队列项只读头部：完整会话可能有几 MB，面板不需要。 */
 function queueItem(file) {
@@ -49,6 +50,8 @@ async function state() {
     usage: usageToday(),
     log: tailLog(40),
     service: lockInfo(),
+    // 有一轮在跑的时候按钮要灰掉：面板和定时是同一进程里的两条流，撞一起会互相踩写。
+    busy: roundStatus(),
     now: Date.now(),
   };
 }
@@ -117,14 +120,24 @@ function chip(label, value, cls = "") {
 
 function draw(s) {
   const online = s.siyuan.version !== "离线";
+  const busy = s.busy && s.busy.running;
   $("chips").innerHTML = [
     chip("思源", online ? "v" + s.siyuan.version : "离线", online ? "ok" : "bad"),
     chip("条目", s.stats.current + " 在用 / " + s.stats.superseded + " 过时"),
     chip("队列", s.queue.length + " 个会话", s.queue.length ? "bad" : "ok"),
     chip("模型", s.model.configured ? s.model.provider + " / " + s.model.model : "未配置", s.model.configured ? "ok" : "bad"),
     chip("今日", s.usage.calls ? s.usage.calls + " 次 · " + (s.usage.prompt + s.usage.completion) + " tok" : "无调用"),
-    chip("调度", s.service?.running ? "第 " + (s.service.round ?? 0) + " 轮" : "单次面板", s.service?.running ? "ok" : ""),
+    busy
+      ? chip("正在跑", s.busy.kind + " " + s.busy.seconds + "s", "ok")
+      : chip("调度", s.service?.running ? "第 " + (s.service.round ?? 0) + " 轮" : "单次面板", s.service?.running ? "ok" : ""),
   ].join("");
+
+  // 有一轮在跑就把按钮灰掉：面板和定时是同一进程里的两条流，同时写会互相踩。
+  const btn = $("run");
+  if (btn && !btn.dataset.busy) {
+    btn.disabled = Boolean(busy);
+    btn.title = busy ? "有一轮正在跑，等它跑完" : "";
+  }
 
   const rows = s._hits ?? s.entries;
   $("list").innerHTML = rows.length
@@ -154,13 +167,17 @@ async function refresh() {
 $("run").onclick = async () => {
   const btn = $("run");
   btn.disabled = true;
+  btn.dataset.busy = "1";
   btn.textContent = "跑着…";
   try {
     const r = await fetch("/api/run", { method: "POST" });
     const j = await r.json();
-    btn.textContent = r.ok ? "写完 " + (j.written ?? 0) + " 条" : "失败";
+    if (r.status === 409) btn.textContent = "有轮在跑";
+    else btn.textContent = r.ok ? "写完 " + (j.written ?? 0) + " 条" : "失败";
   } catch {
     btn.textContent = "失败";
+  } finally {
+    delete btn.dataset.busy;
   }
   await refresh();
   setTimeout(() => { btn.disabled = false; btn.textContent = "跑一轮"; }, 2500);
@@ -171,8 +188,11 @@ $("q").onkeydown = async (ev) => {
   const q = $("q").value.trim();
   if (!q) { delete last._hits; return draw(last); }
   const r = await fetch("/api/search?q=" + encodeURIComponent(q));
-  const hits = await r.json();
-  draw({ ...last, _hits: hits });
+  const j = await r.json();
+  // 要写回 last：refresh() 每 5 秒用 /api/state 整体覆盖一次，只放在临时对象里
+  // 的话，搜索结果活不到 5 秒就被"最近条目"顶掉。
+  last = { ...last, _hits: j.hits ?? [] };
+  draw(last);
 };
 
 refresh();
@@ -185,6 +205,27 @@ setInterval(refresh, 5000);
  * @param {number} opts.port
  * @param {(log:Function)=>Promise<any>} [opts.runRound] 传了就显示"跑一轮"；不传也能点，走独立跑法
  */
+
+/**
+ * 这个请求是不是面板自己发的。
+ *
+ * 没有 Origin 的是非浏览器客户端（curl、脚本），放行——它们要伪造也拦不住，
+ * 而这个服务只绑 127.0.0.1。有 Origin 的就必须是 loopback：跨站页面 POST localhost
+ * 是能打进来的（响应读不到，但"跑一轮"这个副作用照样发生）。
+ */
+function fromThisPage(req) {
+  const site = req.headers["sec-fetch-site"];
+  if (site && site !== "same-origin" && site !== "none") return false;
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  try {
+    const host = new URL(origin).hostname;
+    return host === "127.0.0.1" || host === "localhost" || host === "::1";
+  } catch {
+    return false;
+  }
+}
+
 export function startUi({ port = 7787, host = "127.0.0.1", runRound } = {}) {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
@@ -203,24 +244,42 @@ export function startUi({ port = 7787, host = "127.0.0.1", runRound } = {}) {
       }
       if (req.method === "GET" && url.pathname === "/api/search") {
         const q = url.searchParams.get("q") ?? "";
-        const { store } = open();
-        return json(200, await store.search(q, { limit: 30 }));
+        // 和 CLI 走同一个函数：面板搜到的跟 `mem search` 搜到的必须是一回事，
+        // 而且命中要记进 memory.hit，那是「这条记忆还活着」的唯一真实信号。
+        return json(200, await searchEntries({ q, limit: 30 }));
       }
       if (req.method === "POST" && url.pathname === "/api/run") {
+        if (!fromThisPage(req)) {
+          // 跨站请求：浏览器会带着别家的 Origin 打过来，响应它读不到，但副作用已经发生了。
+          // 服务只绑 127.0.0.1，挡不住"你正在浏览的网页顺手 POST 一下 localhost"。
+          return json(403, { error: "只接受面板自己发起的请求" });
+        }
         if (!runRound) return json(409, { error: "这个面板没接运行器，用 mem serve 起来的那份" });
         return json(200, await runRound(() => {}));
       }
       return json(404, { error: "没有这个接口" });
     } catch (e) {
-      // 抢不到锁不是服务器内部错误，是"服务正在跑"，给 409 让前端能说人话。
-      return json(/锁|lock/i.test(e.message) ? 409 : 500, { error: e.message });
+      // 抢不到锁、或者有一轮正在跑：都不是服务器内部错误，是"现在不能跑"，
+      // 给 409 让前端能说人话，而不是显示一个"失败"让人以为坏了。
+      return json(/锁|lock|有一轮正在跑/i.test(e.message) ? 409 : 500, { error: e.message });
     }
   });
 
+  // 端口被占是 EADDRINUSE 的**异步事件**，同步 try/catch 捕不到，
+  // 不监听的话进程会直接退出——在 launchd 下表现成"服务反复重启，日志里什么都没有"。
+  server.on("error", (e) => {
+    console.error(`面板起不来：${e.code === "EADDRINUSE" ? `端口 ${port} 被占用` : e.message}`);
+  });
   server.listen(port, host);
-  const url = `http://${host}:${port}`;
+  const actualPort = () => server.address()?.port ?? port;
   return {
-    url,
+    // 用 getter：传 port=0 时由内核选空闲端口，测试要先知道真实端口才能请求。
+    get url() {
+      return `http://${host}:${actualPort()}`;
+    },
+    get port() {
+      return actualPort();
+    },
     close: () => new Promise((r) => server.close(r)),
     get listening() {
       return server.listening;

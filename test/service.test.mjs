@@ -20,10 +20,21 @@ test("定时版：换成 StartInterval，秒数换算正确", () => {
   assert.doesNotMatch(p, /KeepAlive/);
 });
 
-test("ProgramArguments 是可执行文件 + serve，且第一项是绝对路径", () => {
+test("ProgramArguments 是可执行文件 + 参数，且第一项是绝对路径", () => {
   const { program, args } = resolveRunner();
   assert.ok(program.startsWith("/"), `应该是绝对路径，实际 ${program}`);
-  assert.deepEqual(args, ["serve"]);
+  // 两种形态都合法：
+  //   单文件二进制   → [serve]
+  //   node 跑源码    → [<cli.mjs 绝对路径>, serve]
+  // 后者在源码比二进制新的时候会被选中，所以不能再钉死成一种。
+  if (args.length === 1) {
+    assert.deepEqual(args, ["serve"]);
+  } else {
+    assert.equal(args.length, 2);
+    assert.ok(args[0].startsWith("/"), `cli 路径应该是绝对路径，实际 ${args[0]}`);
+    assert.ok(args[0].endsWith("cli.mjs"));
+    assert.deepEqual(args.slice(1), ["serve"]);
+  }
   const p = plistFor({});
   assert.ok(p.includes(`<string>${program}</string>`), "plist 里应该出现同一个路径");
   assert.ok(p.includes("<string>serve</string>"));
