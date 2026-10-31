@@ -20,19 +20,36 @@ import { join } from "node:path";
 import { HOME_DIR, CONFIG_PATH, ensureDirs } from "./config.mjs";
 import { loadCatalogSync, findProvider, wireOf, envKeyOf } from "./catalog.mjs";
 
-/** 各家预设。baseUrl 写到版本号为止，具体路径由 wire 拼。 */
+/**
+ * 各家预设。baseUrl 写到版本号为止，具体路径由 wire 拼。
+ *
+ * `env` 是这家惯用的 key 环境变量。写在这里是因为原来只有"目录里的 provider"
+ * 才查环境变量，预设里的十家一律不查——于是 `OPENAI_API_KEY=... mem once` 会被
+ * 判成"没配模型"，或者在别处被静默降级成规则抽取。同一个东西两种认定，很坑。
+ */
 export const PROVIDERS = {
-  deepseek: { wire: "openai", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-v4-flash", jsonMode: true },
-  qwen: { wire: "openai", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus", jsonMode: true },
-  moonshot: { wire: "openai", baseUrl: "https://api.moonshot.cn/v1", model: "kimi-k3", jsonMode: true },
-  zhipu: { wire: "openai", baseUrl: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4.7", jsonMode: true },
-  openai: { wire: "openai", baseUrl: "https://api.openai.com/v1", model: "gpt-5-mini", jsonMode: true },
-  openrouter: { wire: "openai", baseUrl: "https://openrouter.ai/api/v1", model: "deepseek/deepseek-v4-flash", jsonMode: true },
-  anthropic: { wire: "anthropic", baseUrl: "https://api.anthropic.com/v1", model: "claude-sonnet-4-6", jsonMode: false },
-  gemini: { wire: "gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-3.5-flash", jsonMode: true },
+  deepseek: { wire: "openai", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-v4-flash", jsonMode: true, env: "DEEPSEEK_API_KEY" },
+  qwen: { wire: "openai", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus", jsonMode: true, env: ["DASHSCOPE_API_KEY", "QWEN_API_KEY"] },
+  moonshot: { wire: "openai", baseUrl: "https://api.moonshot.cn/v1", model: "kimi-k3", jsonMode: true, env: "MOONSHOT_API_KEY" },
+  zhipu: { wire: "openai", baseUrl: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4.7", jsonMode: true, env: ["ZHIPU_API_KEY", "GLM_API_KEY"] },
+  openai: { wire: "openai", baseUrl: "https://api.openai.com/v1", model: "gpt-5-mini", jsonMode: true, env: "OPENAI_API_KEY" },
+  openrouter: { wire: "openai", baseUrl: "https://openrouter.ai/api/v1", model: "deepseek/deepseek-v4-flash", jsonMode: true, env: "OPENROUTER_API_KEY" },
+  anthropic: { wire: "anthropic", baseUrl: "https://api.anthropic.com/v1", model: "claude-sonnet-4-6", jsonMode: false, env: "ANTHROPIC_API_KEY" },
+  gemini: { wire: "gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-3.5-flash", jsonMode: true, env: ["GEMINI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"] },
   ollama: { wire: "openai", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5:14b", jsonMode: false, keyless: true },
   lmstudio: { wire: "openai", baseUrl: "http://127.0.0.1:1234/v1", model: "local-model", jsonMode: false, keyless: true },
 };
+
+/** 预设 provider 的 key 环境变量。命中第一个非空的就是它。 */
+function presetEnvKey(provider) {
+  const spec = PROVIDERS[provider]?.env;
+  if (!spec) return null;
+  for (const name of Array.isArray(spec) ? spec : [spec]) {
+    const value = process.env[name];
+    if (value) return { name, value };
+  }
+  return null;
+}
 
 /** 协议名 → 模块。懒加载，谁用谁拉。 */
 const WIRES = {
@@ -50,7 +67,8 @@ export function resolveModel(cfg) {
   // 预设里没有的 provider 去 models.dev 目录里找：那边有 baseUrl、env 变量名、模型清单，
   // 比手抄可靠，也不会因为哪家换了域名就失效。
   const fromCatalog = preset ? null : findProvider(loadCatalogSync().providers, m.provider);
-  const envKey = m.apiKey ? null : fromCatalog ? envKeyOf(fromCatalog) : null;
+  // config 里写了 key 就不看环境变量；没写才去预设/目录里找变量名。
+  const envKey = m.apiKey ? null : preset ? presetEnvKey(m.provider) : envKeyOf(fromCatalog);
 
   const provider = m.provider ?? "custom";
   const keyless = preset?.keyless || (!m.apiKey && Boolean(envKey));
