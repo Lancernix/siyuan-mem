@@ -72,6 +72,29 @@ function isSynthetic(message) {
 
 /* ---------- 注入 ---------- */
 
+
+/** 笔记本名 → id。缓存在模块里：一次会话里每条消息都会走这里。 */
+let notebookCache = { name: "", id: "" };
+async function resolveNotebookId(base, headers, name) {
+  if (notebookCache.name === name && notebookCache.id) return notebookCache.id;
+  try {
+    const res = await fetch(`${base}/api/notebook/lsNotebooks`, {
+      method: "POST",
+      headers,
+      body: "{}",
+      signal: AbortSignal.timeout(QUERY_TIMEOUT_MS),
+    });
+    if (!res.ok) return "";
+    const body = await res.json();
+    const nb = (body.data?.notebooks ?? []).find((n) => n.name === name);
+    if (!nb) return "";
+    notebookCache = { name, id: nb.id };
+    return nb.id;
+  } catch {
+    return "";
+  }
+}
+
 async function queryEntries(cfg, keyword) {
   const base = cfg.siyuan.baseUrl.replace(/\/+$/, "");
   const headers = { "Content-Type": "application/json" };
@@ -79,9 +102,18 @@ async function queryEntries(cfg, keyword) {
 
   const status = `ial LIKE '%custom-mem-status="current"%'`;
   const isEntry = `ial LIKE '%custom-mem-hash="%'`;
+  // 必须按笔记本收口：SQL 是全局的，不收口会把别的笔记本里碰巧带 custom-mem-*
+  // 属性的块也注进上下文。
+  //
+  // 但**不能**从 blocks 表按名字猜 id：`type='b'` 是引用块，不是笔记本，
+  // 那个子查询永远返回空，整条注入路径会静默失效（记忆还在，只是查不到）。
+  // 唯一可靠的来源是 /api/notebook/lsNotebooks。
+  const notebookId = await resolveNotebookId(base, headers, cfg.siyuan.notebook);
+  if (!notebookId) return [];
+  const box = `box = '${notebookId}'`;
   const where = keyword
-    ? `${isEntry} AND ${status} AND content LIKE '%${keyword.replace(/'/g, "''")}%'`
-    : `${isEntry} AND ${status}`;
+    ? `${box} AND ${isEntry} AND ${status} AND content LIKE '%${keyword.replace(/'/g, "''")}%'`
+    : `${box} AND ${isEntry} AND ${status}`;
   const stmt = `SELECT content, ial FROM blocks WHERE type='p' AND ${where} ORDER BY created DESC LIMIT 6`;
 
   const res = await fetch(`${base}/api/query/sql`, {
