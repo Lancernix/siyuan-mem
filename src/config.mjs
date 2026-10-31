@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 
@@ -50,6 +50,14 @@ const DEFAULTS = {
      * 而列表项可以，往它 append 会得到同级列表项，视觉上就是「分组项 + 下面的条目」。
      */
     groupEntries: true,
+    /**
+     * 条目按什么切文档：'month' 按月，'' 或 'none' 全部塞进 01-条目 一个文档。
+     *
+     * 按月是因为实测一个月 150-250 条、4-6 万字，正好是思源最舒服的体量；
+     * 一个文档无限长下去，大纲、移动端、全文搜索都会变慢，而且每次重建视图要遍历全篇。
+     * 文档路径是 /01-条目/2026-10，父文档只当目录。
+     */
+    partition: "month",
     /**
      * 只留两个给人看的文档。
      *
@@ -123,14 +131,17 @@ const DEFAULTS = {
     minTurnChars: 25,
     /** 一次模型调用最多塞多少字符。超了拆批，不截内容。 */
     maxCharsPerCall: 16000,
-    /** 每批最多出几条。批与批之间是独立的，不会互相挤掉。 */
-    maxEntriesPerBatch: 5,
     /**
-     * 一个会话最多入库几条。
-     * 这个数字不是"能写多少"，是"应该写多少"的提示：设成 60 的时候实测
-     * 一个会话抽出 54 条技术细节，每条都缺上下文，读起来像清单。
+     * 每批最多出几条。批与批之间是独立的，不会互相挤掉。
+     * 条目本身是一条完整总结（上限 300 字），一场对话 2-6 条就够，
+     * 这里留到 8 只是兜住"一批里混了好几个话题"的情况。
      */
-    maxEntriesPerSession: 18,
+    maxEntriesPerBatch: 8,
+    /**
+     * 一个会话最多入库几条。默认不设，按批数自适应（批数 ×4，夹在 8-36 之间）：
+     * 写死数字时，长会话后半段抽出来的东西全被这一行丢掉，而且丢的是最新的结论。
+     * 想压噪音就显式写一个数，它会盖掉自适应。
+     */
     /** 抽取时带多少个已有实体进 prompt。多了会挤掉正文，少了复用率下降。 */
     entityShotList: 300,
   },
@@ -169,9 +180,12 @@ export function ensureDirs() {
 export function loadConfig() {
   ensureDirs();
   if (!existsSync(CONFIG_PATH)) {
-    writeFileSync(CONFIG_PATH, JSON.stringify(DEFAULTS, null, 2) + "\n");
+    // 里面迟早会有 API key。创建时就 0600，别等"以后再说"——`mode` 只在创建时生效，
+    // 已经写成 0644 的文件再传 mode 也不会改（实测）。
+    writeFileSync(CONFIG_PATH, JSON.stringify(DEFAULTS, null, 2) + "\n", { mode: 0o600 });
     return structuredClone(DEFAULTS);
   }
+  tightenPerms(CONFIG_PATH);
   let raw;
   try {
     raw = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
@@ -256,6 +270,16 @@ export function offsetsOf(all, machine = machineId()) {
 }
 
 /** 写配置里的某一段。只做深合并，不整份覆盖——把别人的 key 弄丢过一次就够了。 */
+/** 权限收紧到 0600。老文件是 0644 的，靠这一步补。失败不影响读配置。 */
+function tightenPerms(path) {
+  try {
+    const mode = statSync(path).mode & 0o777;
+    if (mode & 0o077) chmodSync(path, 0o600);
+  } catch {
+    /* 改不动就算了 */
+  }
+}
+
 export function saveConfig(patch) {
   ensureDirs();
   let cur = {};
@@ -264,6 +288,7 @@ export function saveConfig(patch) {
   } catch {}
   const merged = deepMerge(deepMerge(structuredClone(DEFAULTS), cur), patch);
   writeFileSync(CONFIG_PATH, JSON.stringify(merged, null, 2) + "\n", { mode: 0o600 });
+  tightenPerms(CONFIG_PATH);
   return merged;
 }
 

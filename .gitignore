@@ -1,3 +1,5 @@
 node_modules/
 .DS_Store
 *.log
+# 拆分/重跑前的导出快照，体积大且随时可再导一次
+backup/
