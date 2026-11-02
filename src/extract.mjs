@@ -206,8 +206,15 @@ export function parseEntries(raw) {
   return { ok: true, entries };
 }
 
-/** 一次调用塞多少字符。中文约 1 字 0.62 token，16000 字约一万 token，余量足够。 */
-const DEFAULT_MAX_CHARS = 16000;
+/**
+ * 一次调用塞多少字符。中文约 1 字 0.625 token，38000 字约 24k token。
+ *
+ * 定在 24k 不是拍出来的：更小则批数多、每批的固定开销（系统提示 + 实体清单约
+ * 2600 token）付得越频繁；更大则批数减少的收益递减，而条目上的原文指针会一路
+ * 变粗——一批覆盖的轮次从 60 轮涨到 150 轮是「同一段讨论」，涨到 190 轮基本
+ * 就跨话题了，那时候 [原文](#12-199) 点过去找不到东西。
+ */
+const DEFAULT_MAX_CHARS = 38000;
 /** 单次请求的硬上限，纯兜底：分批逻辑保证永远碰不到。 */
 const HARD_MAX_CHARS = 180000;
 
@@ -509,7 +516,7 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
   if (!exchanges.length) return { entries: [], mode: "empty", batches: 0, dropped: 0, usage: { prompt: 0, completion: 0 } };
 
   const budget = cfg.extract?.maxCharsPerCall ?? DEFAULT_MAX_CHARS;
-  const perBatch = cfg.extract?.maxEntriesPerBatch ?? 8;
+  const perBatch = cfg.extract?.maxEntriesPerBatch ?? 18;
   const useModel = willUseModel(cfg, opts.useModel);
   const plan = planBatches(exchanges, budget);
   /**
