@@ -57,9 +57,25 @@ const attr = (ial, key) => {
   return m ? m[1] : "";
 };
 
+/**
+ * 条目末尾挂着原文指针，同一场会话的条目共用一长串路径
+ * （`原文 assets/mem-raw/Mac/workbuddy/75af3e28-1a8c-…`）。
+ *
+ * 算相似度前必须剔掉：那串路径本身有几十个二元组，能把两条毫不相干的条目
+ * 顶到 0.6 以上。第一次跑这个脚本报了 17 对疑似重复，其中 13 对是这么来的
+ * ——条目的正文完全不同，共享的只有路径。这种假阳性比漏报更费时间。
+ */
+const stripPointer = (s) =>
+  String(s ?? "")
+    .replace(/\[原文\]\([^)]*\)/g, " ")
+    .replace(/原文\s*assets\/\S+/g, " ")
+    .replace(/assets\/mem-raw\/\S+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
 const items = rows.map((r) => ({
   id: r.id,
-  text: String(r.content ?? "").trim(),
+  text: stripPointer(r.content),
   entity: attr(r.ial, ATTR.entity),
   date: attr(r.ial, ATTR.date),
   type: attr(r.ial, ATTR.type),

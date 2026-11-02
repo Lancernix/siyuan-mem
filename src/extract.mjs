@@ -211,6 +211,58 @@ const DEFAULT_MAX_CHARS = 16000;
 /** 单次请求的硬上限，纯兜底：分批逻辑保证永远碰不到。 */
 const HARD_MAX_CHARS = 180000;
 
+/**
+ * 传给下一批的「已记条目」要带正文多少字。
+ *
+ * 只给 brief 不够：30 字会把「条目上限从 36 改成 200」和「上限按批数自适应」
+ * 都压成「条目上限调整」，后一条就被判成已覆盖、直接丢掉——丢的正好是新结论。
+ * 带 40 字够看出是不是同一件事，又不至于把正文搬进每一批。
+ */
+const DRAFTED_HEAD = 40;
+/** 已记条目的总字符预算。几十条全带上会把 system 撑到跟正文一个量级。 */
+const DRAFTED_BUDGET = 4000;
+
+/**
+ * 已记条目段的判断规则。
+ *
+ * 单独提出来是为了算进 PROMPT_VERSION：改这几个字跟改 SYSTEM_PROMPT 一样，
+ * 抽出来的东西会换一套。只按 SYSTEM_PROMPT 算版本的话，这次改动在日志里
+ * 看不出任何痕迹，两个月后看到「重复率突然降了」根本分不清是改了规则还是数据变了。
+ */
+const DRAFTED_RULES = `这一段如果又讲到同一件事：
+- 上面那条已经说全了：不要再记；
+- 这一段讲得更完整（多了条件、理由、后果）：写更完整的那一版，brief 保持一致；
+- 只是同一个话题下的另一个结论：照常记，不算重复。
+拿不准就照常记——漏记比重复更难发现。`;
+
+const oneLine = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
+
+/**
+ * 这一场会话在前面几批里已经记下的条目，写给模型当「别重复」的依据。
+ *
+ * 从新往旧取、超预算就停：离得越近越可能被重复讲，早些的还有 converge 兜底。
+ * 取完翻回正序再喂——倒序进去，模型判断「哪条更完整」时会乱。
+ */
+export function draftedSection(drafted) {
+  if (!drafted?.length) return "";
+  const lines = [];
+  let size = 0;
+  for (let i = drafted.length - 1; i >= 0; i--) {
+    const e = drafted[i];
+    const line = `- ${e.entity || "(未命名)"}｜${e.brief || ""}：${oneLine(e.text).slice(0, DRAFTED_HEAD)}`;
+    if (size + line.length > DRAFTED_BUDGET) break;
+    lines.push(line);
+    size += line.length + 1;
+  }
+  lines.reverse();
+  return [
+    `这场会话在前面几批里已经记下 ${drafted.length} 条（这里列最近 ${lines.length} 条）：`,
+    lines.join("\n"),
+    "",
+    DRAFTED_RULES,
+  ].join("\n");
+}
+
 function render(exchanges) {
   return exchanges
     .map((e, i) => {
@@ -305,9 +357,17 @@ async function callModel(cfg, batch, entityShot = [], part = null) {
   }
   // 已有实体清单放 system 里：它是规则的一部分，不是对话内容。
   // 不放会怎样：同一款裤子在五个会话里长出五个名字，检索时查一个漏四个。
-  const system = entityShot.length
-    ? `${SYSTEM_PROMPT}\n\n已有实体（能对上就复用同名；不是同一个具体对象就别硬套，用新名字）：\n${entityShot.join("、")}`
-    : SYSTEM_PROMPT;
+  const heads = [SYSTEM_PROMPT];
+  if (entityShot.length) {
+    heads.push(
+      `已有实体（能对上就复用同名；不是同一个具体对象就别硬套，用新名字）：\n${entityShot.join("、")}`,
+    );
+  }
+  // 本场会话前面几批已经抽出来的条目。只传话题名是不够的——模型知道「聊过
+  // MiniWMS」，但不知道「上次记的是路由改成按目录树加载」，于是照样记一遍。
+  const drafted = draftedSection(part?.drafted);
+  if (drafted) heads.push(drafted);
+  const system = heads.join("\n\n");
 
   const r = await chat(cfg, {
     messages: [
@@ -480,6 +540,9 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
   // 本会话已经抽出的话题名。每批都只看得到自己那一万六十字，不给它这个，
   // 同一场对话里会顺序长出「MiniWMS」「MiniWMS 技术栈」「MiniWMS 路由设计」。
   const sessionEntities = [];
+  // 本会话已经抽出的条目。串行的意义就在这儿：后一批能看着前面的结论抽，
+  // 同一件事不会在批与批的接缝处再记一遍。并发发出去就只剩 converge 事后归并了。
+  const drafted = [];
   for (const [idx, batch] of plan.entries()) {
     // 这一批覆盖哪几轮。条目继承它，指针才落得到具体段落上——
     // 否则一条结论只能指整个会话（几十万字），等于没有原文。
@@ -489,6 +552,7 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
       const r = await callModel(cfg, batch, [...sessionEntities, ...(opts.entityShot ?? [])], {
         index: idx + 1,
         total: plan.length,
+        drafted,
       });
       usage.prompt += r.usage.prompt;
       usage.completion += r.usage.completion;
@@ -498,6 +562,8 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
       for (const e of kept) {
         const name = e.entity?.trim();
         if (name && !sessionEntities.includes(name)) sessionEntities.push(name);
+        // 只记留下来的：被 perBatch 截掉的没进库，拿它们当「已记」会误导下一批。
+        drafted.push({ entity: name, brief: e.brief, text: e.text });
       }
       all.push(...kept.map((e) => ({ ...e, from, to })));
     } catch (e) {
@@ -605,5 +671,11 @@ async function convergeEntries(cfg, entries, session = "") {
 /**
  * prompt 的指纹。换一个字的 prompt，抽出来的东西就是另一套——不记版本的话，
  * 两周后看到"条目突然从 22 条变 36 条"根本分不清是模型抽风还是自己改过提示词。
+ *
+ * 要连动态段一起算：已记条目那段规则（DRAFTED_RULES）也是提示词的一部分，
+ * 只哈希 SYSTEM_PROMPT 的话，改它不会留下任何版本痕迹。
  */
-export const PROMPT_VERSION = createHash("sha1").update(SYSTEM_PROMPT).digest("hex").slice(0, 8);
+export const PROMPT_VERSION = createHash("sha1")
+  .update(`${SYSTEM_PROMPT}\n\n${DRAFTED_RULES}`)
+  .digest("hex")
+  .slice(0, 8);
