@@ -53,7 +53,9 @@ async function withFakeModel(fn) {
       timeoutMs: 5000,
       retries: 0,
     },
-    extract: { maxEntriesPerBatch: 8, maxEntriesPerSession: 200 },
+    // 预算写死：这条测试验的是「跨批传递」，不是默认预算多少。
+    // 跟着默认值走的话，哪天把批次放大到 38000 字，这里就只剩一批，测试自己失效了。
+    extract: { maxCharsPerCall: 16000, maxEntriesPerBatch: 8, maxEntriesPerSession: 200 },
   };
   try {
     return await fn({ cfg, seen });
