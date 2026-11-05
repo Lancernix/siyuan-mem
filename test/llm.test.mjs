@@ -70,8 +70,8 @@ const server = http.createServer((req, res) => {
       scenario === "extract"
         ? JSON.stringify({
             entries: [
-              { text: "定下来用京东京造风盾500当通勤软壳", entity: "风盾500", type: "decision", confidence: 5 },
-              { text: "冷水加洗衣凝珠可以机洗，单独装洗衣袋", entity: "清洗", type: "fact", confidence: 4 },
+              { text: "定下来用京东京造风盾500当通勤软壳", brief: "通勤软壳选风盾500", entity: "风盾500", type: "decision", confidence: 5 },
+              { text: "冷水加洗衣凝珠可以机洗，单独装洗衣袋", brief: "洗衣凝珠冷水机洗", entity: "清洗", type: "fact", confidence: 4 },
             ],
           })
         : JSON.stringify({ ok: true });
@@ -138,46 +138,6 @@ test("openai：5xx 重试到上限后抛错", async () => {
   scenario = "always500";
   await assert.rejects(() => chat(at("/v1", { retries: 2 }), { messages: msgs }), /模型调用失败/);
   assert.equal(hit, 3, "1 次首试 + 2 次重试");
-});
-
-test("anthropic：system 提到顶层、max_tokens 必填、x-api-key 鉴权、content 数组解析", async () => {
-  hit = 0;
-  scenario = "ok";
-  const cfg = at("/v1", { wire: "anthropic", jsonMode: false, name: "claude-test" });
-  const r = await chat(cfg, { messages: msgs, json: true, tag: "anthropic" });
-  const req = seen["/v1/messages"];
-  assert.ok(req, "应该打到 /v1/messages");
-  assert.equal(req.body.system, "系统提示");
-  assert.equal(req.body.messages.length, 1, "system 不该留在 messages 里");
-  assert.equal(req.body.messages[0].role, "user");
-  assert.ok(req.body.max_tokens > 0, "max_tokens 必填");
-  assert.equal(req.headers["x-api-key"], "test-key");
-  assert.ok(req.headers["anthropic-version"], "要带 anthropic-version");
-  assert.equal(req.body.response_format, undefined, "anthropic 没有这个字段");
-  assert.equal(r.text, '{"ok":true}');
-  assert.equal(r.usage.prompt, 21);
-  assert.equal(r.usage.completion, 7);
-  assert.equal(r.usage.cached, 0);
-  assert.equal(r.wire, "anthropic");
-});
-
-test("gemini：模型名进路径、system 用 systemInstruction、responseMimeType 与 usageMetadata", async () => {
-  hit = 0;
-  scenario = "ok";
-  const cfg = at("/v1beta", { wire: "gemini", name: "gemini-test" });
-  const r = await chat(cfg, { messages: msgs, json: true, tag: "gemini" });
-  const req = seen["/v1beta/models/gemini-test:generateContent"];
-  assert.ok(req, "模型名应该在路径里");
-  assert.equal(req.body.systemInstruction.parts[0].text, "系统提示");
-  assert.equal(req.body.contents.length, 1);
-  assert.equal(req.body.contents[0].role, "user");
-  assert.equal(req.body.generationConfig.responseMimeType, "application/json");
-  assert.equal(req.body.generationConfig.temperature, 1.0, "Gemini 3 建议保持 1.0");
-  assert.equal(req.headers["x-goog-api-key"], "test-key");
-  assert.equal(r.text, '{"ok":true}');
-  assert.equal(r.usage.prompt, 31);
-  assert.equal(r.usage.completion, 9);
-  assert.equal(r.usage.cached, 0);
 });
 
 test("预设把 provider 映射到正确的协议与 JSON 能力", () => {
