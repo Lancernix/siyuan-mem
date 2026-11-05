@@ -14,7 +14,7 @@
  * 影响不了它。这也是为什么放开编辑是安全的——格式不由它保证。
  */
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { HOME_DIR } from "./config.mjs";
 
@@ -25,10 +25,16 @@ export const PROMPT_PATH = join(PROMPT_DIR, "entries.md");
 export function userPrompt() {
   try {
     return readFileSync(PROMPT_PATH, "utf8");
-  } catch {
-    return "";
+  } catch (e) {
+    // 只有"文件不存在"才算没覆盖。权限错、被换成一个目录、编码坏了 —— 这些
+    // 都不能静默回退内置：用户以为改生效了，实际跑的是老提示词，而且没人知道。
+    if (e.code === "ENOENT") return "";
+    throw new Error(`提示词文件读不了（${PROMPT_PATH}）：${e.message}`);
   }
 }
+
+/** 时间戳到毫秒：同一秒内 set 两次，秒级命名会把前一个备份覆盖掉。 */
+const stamp = () => new Date().toISOString().replace(/[:.]/g, "-").slice(0, 23);
 
 /**
  * 体检。不是拒绝的理由，是"你可能改坏了"的提醒——提示词坏掉的表现从来不是报错，
@@ -72,16 +78,21 @@ export function savePrompt(text) {
   mkdirSync(PROMPT_DIR, { recursive: true });
   let backup = "";
   if (existsSync(PROMPT_PATH)) {
-    backup = join(PROMPT_DIR, `${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.md`);
+    backup = join(PROMPT_DIR, `${stamp()}.md`);
     copyFileSync(PROMPT_PATH, backup);
   }
-  writeFileSync(PROMPT_PATH, `${String(text).trim()}\n`);
+  // 先写 tmp 再 rename：写到一半断电，留下的是能用的旧文件，而不是半截提示词。
+  // 权限 0600：提示词会被整段发给模型，误把 config.json 塞进来时至少不会被别人读走。
+  const tmp = `${PROMPT_PATH}.tmp-${process.pid}`;
+  writeFileSync(tmp, `${String(text).trim()}\n`, { mode: 0o600 });
+  renameSync(tmp, PROMPT_PATH);
+  chmodSync(PROMPT_PATH, 0o600); // 已存在的文件 mode 参数不生效，显式改
   return { path: PROMPT_PATH, backup };
 }
 
 export function resetPrompt() {
   if (!existsSync(PROMPT_PATH)) return { removed: false };
-  const backup = join(PROMPT_DIR, `reset-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.md`);
+  const backup = join(PROMPT_DIR, `reset-${stamp()}.md`);
   copyFileSync(PROMPT_PATH, backup);
   rmSync(PROMPT_PATH);
   return { removed: true, backup };
@@ -91,10 +102,18 @@ export function resetPrompt() {
 export function history() {
   try {
     return readdirSync(PROMPT_DIR)
-      .filter((f) => f.endsWith(".md"))
+      // entries.md 是当前生效的那份，不是历史。
+      .filter((f) => f.endsWith(".md") && f !== "entries.md")
       .sort()
       .reverse();
   } catch {
     return [];
   }
+}
+
+/** 回到某个历史版本（先备份当前版本，所以反悔还能回来）。 */
+export function restore(name) {
+  const base = String(name ?? "").split("/").pop();
+  if (!base || !history().includes(base)) throw new Error(`没有这个历史版本：${name}（mem prompt history 看有哪些）`);
+  return savePrompt(readFileSync(join(PROMPT_DIR, base), "utf8"));
 }

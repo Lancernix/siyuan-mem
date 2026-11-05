@@ -100,14 +100,20 @@ export function startIngest({
   search = searchEntries,
   log = () => {},
 } = {}) {
-  const loopback = bind === "127.0.0.1" || bind === "::1" || bind === "localhost";
-  if (!loopback && !token) {
+  // 没有 token 一律不启动，包括绑回环。
+  //
+  // 原来留了一条"绑回环就免密"的口子，靠 socket 来源 + 代理头 + Host 判断
+  // 是不是本机直连。试了两轮都不成立：nginx 裸 proxy_pass 默认既不加
+  // X-Forwarded-For，也会把 Host 改成 127.0.0.1:7788，三个条件全满足——
+  // 而"反代 + 回环"正是部署文档推荐的姿势。这类判断没有可靠的信号，
+  // 所以直接砍掉：要对外服务就配 token（mem center setup 会生成）。
+  if (!token) {
     throw new Error(
-      `拒绝启动：监听 ${bind} 但没配 token。\n` +
-        "  写入通道不能裸奔。跑一次 mem ingest setup 会自动生成 token，或把 bind 改回 127.0.0.1。"
+      "拒绝启动：接收端必须有 token（绑回环也一样）。\n" +
+        "  生成一个：mem center setup --rotate，或 openssl rand -base64 24 写进 config.ingest.token"
     );
   }
-  if (token) {
+  {
     // 模板里的那句中文占位符（「自己生成一个长串…」）非空，startIngest 原来只判空，
     // 于是复制一份模板就等于"鉴权已开启"，而那个 token 全世界都知道。
     if (/[^\x20-\x7e]/.test(token)) {
@@ -124,27 +130,7 @@ export function startIngest({
   /** 两条接口共用一套鉴权：写能写就能读，反过来不成立。 */
   function auth(req) {
     const given = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "") || req.headers["x-mem-token"] || "";
-    if (!token) {
-      // 没配 token 时只认真正的本机直连。有两条都得查：
-      //
-      //   1. socket 来源是回环；
-      //   2. Host 也是回环名。
-      //
-      // 只看 bind 是不够的：反向代理转发进来的请求 socket 本来就是 127.0.0.1。
-      // 只看代理头也不够：那些头是客户端可以不给的，nginx 裸 proxy_pass 默认也不加
-      // （实测：不带任何代理头、Host 写 mem.example.com，原来能直接写进队列）。
-      // Host 是 HTTP/1.1 必带的，代理转发时一般会保留外部域名，所以它是这里最可靠的
-      // 一个信号。三者任一不对就要求 token。
-      const proxied = Boolean(
-        req.headers["x-forwarded-for"] || req.headers["x-real-ip"] || req.headers.forwarded
-      );
-      const remote = req.socket?.remoteAddress ?? "";
-      const local = remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
-      const host = String(req.headers.host ?? "").replace(/:\d+$/, "").toLowerCase();
-      const hostLocal = host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1";
-      if (local && !proxied && hostLocal) return { ok: true };
-      return { ok: false, code: 403, error: "服务端没配 token，只接受本机直连（来源、代理头、Host 任一不对就拒）" };
-    }
+    // token 是必须的（启动时已经强制），这里只比对。
     return sameToken(given, token) ? { ok: true } : { ok: false, code: 401, error: "token 不对" };
   }
 
@@ -209,14 +195,11 @@ export function startIngest({
     }
 
     if (req.method === "GET" && url.pathname === "/api/ping") {
-      // 配了 token 就要求带上：否则这个接口会白告出「auth:false + 队列长度」，
-      // 等于给扫描器一个确认"这台机器有记忆库且没设密码"的探针。
-      if (token) {
-        const gate = auth(req);
-        if (!gate.ok) return json(res, gate.code, { error: gate.error });
-        return json(res, 200, { ok: true, name: "siyuan-mem", queue: pending().length });
-      }
-      return json(res, 200, { ok: true, name: "siyuan-mem" });
+      // 也要求带 token：否则这个接口会白告出队列长度，等于给扫描器一个
+      // 确认"这台机器有记忆库"的探针。
+      const gate = auth(req);
+      if (!gate.ok) return json(res, gate.code, { error: gate.error });
+      return json(res, 200, { ok: true, name: "siyuan-mem", queue: pending().length });
     }
 
     if (url.pathname === "/api/search") return handleSearch(req, res, url);

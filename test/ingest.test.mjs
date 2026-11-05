@@ -191,24 +191,6 @@ test("检索：缺 q 是 400，检索本身出错是 500 且带原因", async (t
   assert.match(body.error, /找不到笔记本/);
 });
 
-test("检索：没配 token 时绑回环也能用，绑全网卡直接拒绝启动", async (t) => {
-  const s = startIngest({ port: 0, bind: "127.0.0.1", token: "", search: fakeSearch([]), log: () => {} });
-  t.after(() => s.close());
-  for (let i = 0; i < 100; i++) {
-    try {
-      await fetch(`${s.url}/api/ping`, { headers: { authorization: `Bearer ${TOKEN}` } });
-      break;
-    } catch {
-      await new Promise((r) => setTimeout(r, 20));
-    }
-  }
-  const r = await fetch(`${s.url}/api/search?q=x`);
-  assert.equal(r.status, 200);
-  assert.throws(() => startIngest({ port: 0, bind: "0.0.0.0", token: "" }), /拒绝启动/);
-});
-
-// ---- 安全边界：这几条是审查里真复现出来的 ----
-
 test("status 非法值被拒：它是拼进 SQL 的，转义挡不住", async (t) => {
   const calls = [];
   const s = await boot(t, { search: fakeSearch(calls) });
@@ -222,52 +204,23 @@ test("status 非法值被拒：它是拼进 SQL 的，转义挡不住", async (t
   assert.equal(calls.length, 0, "非法 status 不能到达检索层");
 });
 
-test("反代进来的请求：即使绑的是回环、没配 token，也必须拒", async (t) => {
-  const s = startIngest({ port: 0, bind: "127.0.0.1", token: "", search: fakeSearch([]), log: () => {} });
-  t.after(() => s.close());
-  for (let i = 0; i < 100; i++) {
-    try {
-      await fetch(`${s.url}/api/ping`, { headers: { authorization: `Bearer ${TOKEN}` } });
-      break;
-    } catch {
-      await new Promise((r) => setTimeout(r, 20));
-    }
-  }
-  // 直连（无代理头）放行
-  assert.equal((await fetch(`${s.url}/api/search?q=x`)).status, 200);
-  // 带代理头＝反代转发进来的外部请求，socket 也是 127.0.0.1，不能因此免密
-  const proxied = await fetch(`${s.url}/api/search?q=x`, { headers: { "x-forwarded-for": "1.2.3.4" } });
-  assert.equal(proxied.status, 403);
-});
-
 test("占位符或过短的 token 直接拒绝启动", () => {
   // 配置模板里那句中文说明文字非空，被当成真 token 就等于"全世界都知道的密码"。
   assert.throws(() => startIngest({ port: 0, bind: "0.0.0.0", token: "自己生成一个长串，边缘机器要用同一个" }), /非 ASCII/);
   assert.throws(() => startIngest({ port: 0, bind: "0.0.0.0", token: "root1234" }), /至少 16 位/);
 });
 
-test("没有 token 时，Host 不是回环名就拒——反代不带代理头也挡得住", async (t) => {
-  const s = startIngest({ port: 0, bind: "127.0.0.1", token: "", search: fakeSearch([]), log: () => {} });
-  t.after(() => s.close());
-  for (let i = 0; i < 100; i++) {
-    try {
-      await fetch(`${s.url}/api/ping`);
-      break;
-    } catch {
-      await new Promise((r) => setTimeout(r, 20));
-    }
-  }
-  // 正常本机调用：Host 就是 127.0.0.1:port
-  assert.equal((await fetch(`${s.url}/api/search?q=x`)).status, 200);
-  // 反代转发：socket 仍是回环、也没带代理头，但 Host 是外部域名。
-  // 这是原来能直接写进队列的那条路。
-  // fetch 不许改 Host（forbidden header），只能用 http.request。
-  const status = await new Promise((resolve, reject) => {
-    const u = new URL(`${s.url}/api/search?q=x`);
-    http.get({ hostname: u.hostname, port: u.port, path: `${u.pathname}${u.search}`, headers: { host: "mem.example.com" } }, (res) => {
-      res.resume();
-      resolve(res.statusCode);
-    }).on("error", reject);
-  });
-  assert.equal(status, 403);
+test("没有 token 一律拒绝启动——包括绑回环", () => {
+  // 试过两轮"靠来源/代理头/Host 判断是不是本机直连"，都不成立：
+  // nginx 裸 proxy_pass 默认不加 X-Forwarded-For，还会把 Host 改成上游地址。
+  // 所以直接砍掉这条口子，只要求配 token。
+  assert.throws(() => startIngest({ port: 0, bind: "127.0.0.1", token: "" }), /必须有 token/);
+  assert.throws(() => startIngest({ port: 0, bind: "0.0.0.0", token: "" }), /必须有 token/);
+});
+
+test("ping 也要 token，别当公开探针", async (t) => {
+  const s = await boot(t, { search: fakeSearch([]) });
+  assert.equal((await fetch(`${s.url}/api/ping`)).status, 401);
+  const ok = await fetch(`${s.url}/api/ping`, { headers: { authorization: `Bearer ${TOKEN}` } });
+  assert.equal(ok.status, 200);
 });

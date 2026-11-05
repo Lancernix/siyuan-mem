@@ -278,7 +278,10 @@ async function call(cfg, { messages, json = false, schema = null, maxTokens, tag
   if (!hasModel(cfg)) throw new Error("没有配置模型：mem model use <provider> --key ...");
 
   const { generateText, Output } = await import("ai");
-  const wantJson = Boolean(json && m.jsonMode);
+  // 带 schema 的调用也要算"想要 JSON"：一旦端点拒绝 json_schema，降级时得把
+  // json_object 补上。否则后续每批既没 schema 也没 json_object，格式完全交给
+  // 提示词——那正是我们换 SDK 想摆脱的东西。
+  const wantJson = Boolean((json || schema) && m.jsonMode);
   const key = `${m.baseUrl}|${m.model}`;
   const wantSchema = Boolean(schema) && !noSchema.has(key);
   const t0 = Date.now();
@@ -434,7 +437,7 @@ export function saveModelChoice(provider, { apiKey, model, wire, base } = {}) {
   cfg.model = {
     ...(cfg.model ?? {}),
     provider,
-    wire: wire || preset?.wire || wireOf(fromCatalog),
+    wire: wire || preset?.wire || "openai",
     baseUrl,
     name,
     ...(apiKey ? { apiKey } : {}),
