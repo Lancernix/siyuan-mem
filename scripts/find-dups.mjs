@@ -34,13 +34,8 @@ const asJson = flag("json");
 const cfg = loadConfig();
 const sy = new SiYuan(cfg.siyuan);
 
-const box = await sy
-  .sql(
-    `SELECT id FROM blocks WHERE type='d' AND content='${cfg.siyuan.notebook.replace(/'/g, "''")}' LIMIT 1`
-  )
-  .catch(() => []);
-
-// 笔记本名不是 box id，得先换过来。
+// 笔记本名不是 box id，得先换过来。（原来这里还有一条按 content 查 box 的 SQL，
+// 查完从没用过——留着只会让人以为它在起什么作用。）
 const notebooks = await sy.listNotebooks();
 const nb = notebooks.find((n) => n.name === cfg.siyuan.notebook);
 if (!nb) {
@@ -48,8 +43,11 @@ if (!nb) {
   process.exit(1);
 }
 
+// 口径要跟 store.listCurrent 一致：type='p' + hash 入口 + box 收口。
+// 少了 hash 那一条，会把别的属性视图/索引块里偶然带 status 的段落也算进来。
 const rows = await sy.sql(
-  `SELECT id, content, ial FROM blocks WHERE box='${nb.id}'
+  `SELECT id, content, ial FROM blocks WHERE box='${nb.id}' AND type='p'
+     AND ial LIKE '%${ATTR.hash}="%'
      AND ial LIKE '%${ATTR.status}="current"%' LIMIT 5000`
 );
 const attr = (ial, key) => {
