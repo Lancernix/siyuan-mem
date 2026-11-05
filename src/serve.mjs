@@ -223,7 +223,10 @@ async function runRound({ dry, useModel, log }) {
   for (const s of sessions) {
     const prev = offsets[s.file];
     // 老记录没有 mtimeMs：那就只认体积（回到原来的行为），别把"不知道"当成"变了"。
-    if (prev && prev.bytes === s.size && (prev.mtimeMs == null || prev.mtimeMs === s.mtimeMs)) continue;
+    // 注意字段名是 mtime 不是 mtimeMs——listSessions 返回的就是 mtime，
+    // 写成 s.mtimeMs 会恒为 undefined，于是每轮都把已补 mtime 的会话当成"变了"，
+    // 反复读取解压，再由 enqueueLog 发现没新轮次。日志上看不出错，只是白烧 CPU。
+    if (prev && prev.bytes === s.size && (prev.mtimeMs == null || prev.mtimeMs === s.mtime)) continue;
     // 还在写的会话先别切：等它安静，或者文件被轮转（变小）就立刻处理。
     if (now - s.mtime < quietMs && (!prev || s.size >= prev.bytes)) continue;
     candidates.push(s);
