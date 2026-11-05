@@ -111,6 +111,7 @@ export function stats({ days = 7 } = {}) {
   const sessions = new Set();
   const models = new Map();
   const prompts = new Map();
+  const fallbacks = new Map();
 
   for (const r of rows) {
     byEv.set(r.ev, (byEv.get(r.ev) ?? 0) + 1);
@@ -119,6 +120,10 @@ export function stats({ days = 7 } = {}) {
     if (r.ev === "entry.skip") skipped++;
     if (r.ev === "entry.replace") replaced++;
     if (r.ev === "memory.hit") hits++;
+    // 模型层的降级：schema 不支持 / JSON 模式被拒 / schema 校验没过。
+    // 这类事不报错，只让结果变糙，所以必须单独计数——不然"最近抽取正常"
+    // 和"最近一直在用提示词硬凑"在日志上长得一模一样。
+    if (r.ev === "llm.fallback") fallbacks.set(r.kind ?? "?", (fallbacks.get(r.kind ?? "?") ?? 0) + 1);
     if (r.session) sessions.add(String(r.session).slice(0, 8));
     if (r.ev === "extract.result") {
       // 没走模型就是降级：规则抽取写进库里全是半句话。这个数只要不是 0，
@@ -142,6 +147,7 @@ export function stats({ days = 7 } = {}) {
     degraded,
     hits,
     errors,
+    fallbacks: [...fallbacks.entries()].sort((a, b) => b[1] - a[1]),
     tokens,
     len: { p10: q(0.1), p50: q(0.5), p90: q(0.9), max: entries.at(-1) ?? 0 },
     models: [...models.entries()],

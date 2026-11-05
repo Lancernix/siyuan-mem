@@ -11,7 +11,7 @@ import { loadEntities, addEntity, mergeEntities, applyPending, shotList } from "
 import { print as printDigest } from "./digest.mjs";
 import { writeEntities } from "./entity-view.mjs";
 import { readDays, stats as logStats, dayOf } from "./log.mjs";
-import { normalizeTurns, toExchanges } from "./extract.mjs";
+import { normalizeTurns, promptState, toExchanges } from "./extract.mjs";
 import { drop, pending, readSession } from "./inbox.mjs";
 import { searchEntries, remoteSearch } from "./search.mjs";
 import { readLog, readJsonLines, auditMessages, HARNESS_NAMES } from "./readers/index.mjs";
@@ -22,6 +22,7 @@ import { startUi } from "./ui.mjs";
 import { install, uninstall, serviceStatus, systemdUnit, PLIST_PATH } from "./service.mjs";
 import { pushOnce, pushWatch, pingPush } from "./push.mjs";
 import { startMcp } from "./mcp.mjs";
+import { history as promptHistory, PROMPT_PATH, resetPrompt, savePrompt } from "./prompt.mjs";
 
 const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 
@@ -47,6 +48,9 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
   mem entity reindex           重建 02-实体（话题 → 块引用，锚文本用摘要）
   mem remember <文本> [--entity X] [--type decision|fact|preference|reference]
   mem forget <块id>            标成 superseded（不删）
+  mem prompt [show|set <文件>|reset|history]
+                               看/改抽取提示词；不传子命令是看状态
+                               set 会先备份旧版；传 - 从标准输入读
   mem model                    看当前模型配置与今天的用量
   mem model use <provider> [--key sk-...] [--name 模型名] [--wire openai|anthropic|gemini] [--base URL]
   mem model test               真发一次请求，自证 key / 地址 / JSON 模式都通
@@ -336,6 +340,48 @@ async function cmdForget(args) {
   const { store } = make();
   await store.supersede(id);
   console.log(`已标为 superseded：${id}`);
+}
+
+async function cmdPrompt(args) {
+  const sub = args[0] ?? "status";
+  const st = promptState();
+
+  if (sub === "status") {
+    console.log(`来源      ${st.source === "user" ? PROMPT_PATH : "内置（没覆盖）"}`);
+    console.log(`版本      ${st.version}    ${st.text.length} 字`);
+    // 体检不是拒绝，是提醒：提示词坏掉从不报错，只让抽出来的东西悄悄变差。
+    for (const w of st.warnings) console.log(`  ⚠ ${w}`);
+    console.log("\n看全文 mem prompt show；改：mem prompt show > /tmp/p.md，编辑完 mem prompt set /tmp/p.md");
+    return;
+  }
+  if (sub === "show") {
+    process.stdout.write(`${st.text}\n`);
+    return;
+  }
+  if (sub === "set") {
+    const file = args[1];
+    if (!file) throw new Error("用法：mem prompt set <文件>（传 - 从标准输入读）");
+    const text = file === "-" ? readFileSync(0, "utf8") : readFileSync(file, "utf8");
+    const r = savePrompt(text);
+    const after = promptState();
+    console.log(`已写入 ${r.path}`);
+    if (r.backup) console.log(`旧版备份 ${r.backup}`);
+    console.log(`版本 ${after.version}，${after.text.length} 字`);
+    for (const w of after.warnings) console.log(`  ⚠ ${w}`);
+    return;
+  }
+  if (sub === "reset") {
+    const r = resetPrompt();
+    if (!r.removed) return void console.log("本来就没有覆盖，现在用的就是内置那份。");
+    console.log(`已删除覆盖，回到内置（备份 ${r.backup}）`);
+    return;
+  }
+  if (sub === "history") {
+    const h = promptHistory();
+    console.log(h.length ? h.join("\n") : "还没有历史版本（只在你 set/reset 过之后才会有）");
+    return;
+  }
+  throw new Error(`不认识的子命令：${sub}（可用：show / set / reset / history）`);
 }
 
 async function cmdModel(args, flags) {
@@ -760,6 +806,18 @@ async function cmdLog(args, flags) {
     console.log(`最近 ${days} 天：${s.events} 条事件，${s.sessions} 个会话`);
     console.log(`  写入 ${s.written} 条 | 跳过 ${s.skipped} | 取代 ${s.replaced} | 错误 ${s.errors}`);
     if (s.degraded) console.log(`  ⚠ 降级 ${s.degraded} 次（没走模型，写进去的是规则抽取的半句话）`);
+    // 模型层的降级不报错，只是结果变糙。不单独列出来，"抽取正常"和"一直在用
+    // 提示词硬凑"在日志上长得一模一样。
+    if (s.fallbacks?.length) {
+      const why = {
+        "schema-unsupported": "端点不认 json_schema，退回 json_object",
+        "schema-validate": "模型没按 schema 返回，退回文本解析",
+        "json-unsupported": "端点连 json_object 都不认，退回纯提示词",
+      };
+      console.log(
+        `  ⚠ 模型降级: ${s.fallbacks.map(([k, v]) => `${why[k] ?? k}×${v}`).join("；")}`
+      );
+    }
     if (s.hits) console.log(`  召回 ${s.hits} 次（memory.hit，按话题去重）`);
     if (s.tokens) console.log(`  tokens ${s.tokens}`);
     if (s.written) {
@@ -914,6 +972,8 @@ async function main() {
       return cmdRemember(flags, rest);
     case "forget":
       return cmdForget(rest);
+    case "prompt":
+      return cmdPrompt(rest);
     case "model":
       return cmdModel(rest, flags);
     case "ui":

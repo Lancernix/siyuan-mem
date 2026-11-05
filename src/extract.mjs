@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 import { chat, chatObject, hasModel } from "./llm.mjs";
+import { resolvePrompt } from "./prompt.mjs";
 import { event } from "./log.mjs";
 
 const STOP = new Set([
@@ -398,7 +399,10 @@ async function callModel(cfg, batch, entityShot = [], part = null) {
   }
   // 已有实体清单放 system 里：它是规则的一部分，不是对话内容。
   // 不放会怎样：同一款裤子在五个会话里长出五个名字，检索时查一个漏四个。
-  const heads = [SYSTEM_PROMPT];
+  // 生效的那份提示词：人改过就用人的，没改过用内置（见 prompt.mjs）。
+  // 每次现读不缓存：一个两千字的文件读一次是微秒级，而缓存会让"面板上改完
+  // 却没生效"变成一个要靠重启才能解释的谜。
+  const heads = [promptState().text];
   if (entityShot.length) {
     heads.push(
       `已有实体（能对上就复用同名；不是同一个具体对象就别硬套，用新名字）：\n${entityShot.join("、")}`,
@@ -720,7 +724,18 @@ async function convergeEntries(cfg, entries, session = "") {
  * 要连动态段一起算：已记条目那段规则（DRAFTED_RULES）也是提示词的一部分，
  * 只哈希 SYSTEM_PROMPT 的话，改它不会留下任何版本痕迹。
  */
-export const PROMPT_VERSION = createHash("sha1")
-  .update(`${SYSTEM_PROMPT}\n\n${DRAFTED_RULES}`)
-  .digest("hex")
-  .slice(0, 8);
+/** 当前生效的提示词（人改过就是人的）。 */
+export function promptState() {
+  return resolvePrompt(SYSTEM_PROMPT, DRAFTED_RULES);
+}
+
+/**
+ * 指纹算的是**生效的那份**，不是内置那份。人改了提示词，版本号必须跟着变，
+ * 否则日志上完全看不出"提示词换过"，只能看到条目数莫名其妙地跳。
+ */
+export function promptVersion() {
+  return promptState().version;
+}
+
+/** 内置那份，给 mem prompt 用来看/还原。 */
+export const BUILTIN_PROMPT = SYSTEM_PROMPT;
