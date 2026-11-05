@@ -20,6 +20,7 @@
     "enabled": true,
     "bind": "0.0.0.0",
     "port": 7788,
-    "token": "自己生成一个长串，边缘机器要用同一个"
+    "_token": "必须先自己生成：mem center setup --rotate（或 openssl rand -base64 24）。留空时服务拒绝在 0.0.0.0 上启动——这是故意的，别在这里写一句说明文字，那会被当成真 token。",
+    "token": ""
   }
 }

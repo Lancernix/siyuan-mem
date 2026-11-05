@@ -846,10 +846,10 @@ async function cmdSearch(args, flags) {
     return;
   }
   if (!r.hits.length) {
-    console.log(`没找到。检索词：${r.terms.join(" / ") || "（空）"}`);
+    console.log(`没找到。检索词：${r.terms.join(" / ") || "（空）"}${r.remote ? `\n（查的是远端 ${r.remote}）` : ""}`);
     return;
   }
-  console.log(`找到 ${r.hits.length} 条（检索词：${r.terms.join(" / ")}）\n`);
+  console.log(`找到 ${r.hits.length} 条（检索词：${r.terms.join(" / ")}）${r.remote ? `\n远端 ${r.remote}` : ""}\n`);
   r.hits.forEach((h, i) => {
     console.log(`${i + 1}. [${h.entity || "-"}] ${h.date || ""} · ${h.type || ""}`);
     if (h.brief) console.log(`   ${h.brief}`);
