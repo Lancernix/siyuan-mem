@@ -511,8 +511,45 @@ mem search 判重 --json
 每次检索会记一条 `memory.hit` 事件（话题、查询词、命中数），按话题去重。
 这是我们目前唯一"这条记忆还活着"的真实信号——它被想起来过。
 
-CLI 而不是 MCP：所有 harness 都能跑 shell，CLI 零协议成本；MCP 以后要的话，
-包一层 `searchEntries()` 就行，逻辑是同一份。
+### 从别的机器查：`/api/search`
+
+边缘机器上没有思源，`mem search` 直连必然超时，而超时的表现是"每次都查不到"，
+和"确实没记过"长得一模一样。所以接收端同一个端口上还挂了一个只读接口：
+
+```bash
+mem search --to https://中心地址 静默阈值
+curl -H "authorization: Bearer $TOKEN" "https://中心地址/api/search?q=静默阈值&limit=5"
+```
+
+它和 `/api/ingest` 共用 token 和端口：一台机器对中心只有一个地址，给进出各配一套，
+装第二台机器时就多一个能配错的地方。检索失败会带着原因返回 500（比如"找不到笔记本"），
+不会退化成空结果——否则边缘那边分不清是中心坏了还是真的没记过。
+
+### MCP：`mem mcp`
+
+```bash
+mem mcp                      # 本机有思源：直连
+mem mcp --to https://… --token …   # 边缘：走中心的 /api/search
+```
+
+stdio 传输，一个工具 `memory_search`，参数 `query` / `limit` / `topic` / `days` /
+`include_superseded`。返回的是人读文本（条目正文 + 话题 + 日期 + 原文指针），不是 JSON——
+工具结果会进模型上下文，`{"entity":"…","score":3.2}` 既费 token 又不帮它判断。
+
+两条硬约束：**stdout 只能有协议消息**，任何调试输出走 stderr，否则客户端解析到一行
+非 JSON 就断开，表现是"装上了但不生效"且不报错；**检索失败走 `isError` 的工具结果**，
+不是 JSON-RPC 的 error——模型看到原因还能换个词再试。
+
+Claude Code 注册：
+
+```bash
+claude mcp add siyuan-mem -- mem mcp --to https://中心地址 --token $TOKEN
+```
+
+装上只是"能调"，不等于"会调"。CLAUDE.md 里补一句什么时候该查，比指望模型自觉靠谱：
+
+> 遇到「之前这个是怎么定的」「上次踩过什么坑」「这个项目用过哪些方案」，先调
+> `memory_search` 再回答；查不到就是真的没记过，别编。
 
 ## 日志：两份，各管一件事
 

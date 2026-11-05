@@ -270,3 +270,29 @@ export async function readRange(sy, ptr, { maxChars = 8000 } = {}) {
   }
   return { turns: out, missing: false, truncated, total, chars };
 }
+
+/**
+ * 去掉正文末尾那截原文附件地址。
+ *
+ * 条目正文挂着 `[原文](assets/mem-raw/…)`，思源的 `content` 列会把链接的 href
+ * 一起吐出来，于是每条都拖着一串 70-100 字的路径。三个后果：
+ *
+ *   1. 召回结果里路径出现两遍（正文一遍、指针一遍），吃掉显示预算；
+ *   2. 相似度把它当正文算——同一场会话的条目共用这串路径，几十个二元组足以
+ *      把两条不相干的东西顶到 0.6 以上（find-dups 正是被这个坑过一轮）；
+ *   3. 给模型看的正文里夹着一段没有意义的路径。
+ *
+ * 用属性里的 raw 精确切，不靠正则去猜路径长什么样。
+ */
+export function stripRawLink(s, raw = "") {
+  let t = String(s ?? "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .trim();
+  if (raw) {
+    const i = t.lastIndexOf(raw);
+    if (i >= 0) t = t.slice(0, i).replace(/\s*原文\s*$/, "").trim();
+  }
+  // 属性缺失时的兜底：条目链接的锚文本固定是「原文」。
+  return t.replace(/\s*原文\s+assets\/\S+\s*$/, "").trim();
+}

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { SiYuan } from "./siyuan.mjs";
 import { loadState, saveState, loadGroups, saveGroups } from "./config.mjs";
+import { stripRawLink } from "./raw.mjs";
 
 export const ATTR = {
   status: "custom-mem-status",
@@ -475,7 +476,9 @@ export class Store {
       id: r.id,
       entity: attrOf(r.ial, ATTR.entity),
       brief: attrOf(r.ial, ATTR.brief),
-      text: String(r.content ?? "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim(),
+      // 这份 text 直接喂给判重比相似度，原文路径必须先去掉：同一场会话的条目
+      // 共用那串 mem-raw/… 路径，留着会让两条不相干的东西「很像」。
+      text: stripRawLink(r.content, attrOf(r.ial, ATTR.raw)).replace(/\s+/g, " ").trim(),
     }));
   }
 
@@ -518,9 +521,13 @@ export function attrOf(ial, key) {
 }
 
 function toHit(row) {
+  const raw = attrOf(row.ial, ATTR.raw);
   return {
     id: row.id,
-    text: String(row.content ?? "").replace(/<[^>]+>/g, "").trim(),
+    // 切掉末尾的原文附件地址：它既是路径又不是正文，留着会让「最近写入」
+    // 看上去全是同一串 mem-raw/…，也让判重拿它当相似度。
+    text: stripRawLink(row.content, raw),
+    raw,
     entity: attrOf(row.ial, ATTR.entity),
     type: attrOf(row.ial, ATTR.type),
     status: attrOf(row.ial, ATTR.status) || "unknown",

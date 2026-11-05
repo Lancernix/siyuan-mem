@@ -125,3 +125,82 @@ test("按字符切块，单条超大不切开", () => {
   assert.equal(chunks[2][0].text.length, 1500);
   assert.equal(chunks.flat().length, 3, "切块不能丢轮次");
 });
+
+// ---- /api/search：边缘机器上的召回走这里 ----
+
+const fakeHits = [
+  { id: "b1", entity: "静默阈值", brief: "三条改三条", date: "2026-11-02", type: "decision", text: "静默阈值从 3 分钟改成 30 分钟。", raw: "assets/mem-raw/Mac/x.jsonl#3-9" },
+];
+
+function fakeSearch(calls) {
+  return async (opts) => {
+    calls.push(opts);
+    return { terms: ["静默"], hits: fakeHits };
+  };
+}
+
+test("检索要 token：没带或带错都 401", async (t) => {
+  const s = await boot(t, { search: fakeSearch([]) });
+  const noAuth = await fetch(`${s.url}/api/search?q=静默`);
+  assert.equal(noAuth.status, 401);
+  const wrong = await fetch(`${s.url}/api/search?q=静默`, { headers: { authorization: "Bearer nope" } });
+  assert.equal(wrong.status, 401);
+});
+
+test("检索：GET 和 POST 都能用，返回条目和检索词", async (t) => {
+  const calls = [];
+  const s = await boot(t, { search: fakeSearch(calls) });
+
+  const g = await (await fetch(`${s.url}/api/search?q=${encodeURIComponent("静默 阈值")}&limit=3`, {
+    headers: { authorization: `Bearer ${TOKEN}` },
+  })).json();
+  assert.equal(g.ok, true);
+  assert.equal(g.count, 1);
+  assert.equal(g.hits[0].entity, "静默阈值");
+  assert.deepEqual(g.terms, ["静默"]);
+
+  const p = await (await fetch(`${s.url}/api/search`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ q: "静默", topic: "silent", days: 7, all: true }),
+  })).json();
+  assert.equal(p.ok, true);
+  assert.equal(calls.length, 2);
+  // all=1 要翻成 status=""——传 undefined 的话服务端会退回 current，等于没生效。
+  assert.equal(calls[1].status, "");
+  assert.equal(calls[1].topic, "silent");
+  assert.equal(calls[1].days, 7);
+});
+
+test("检索：缺 q 是 400，检索本身出错是 500 且带原因", async (t) => {
+  const s = await boot(t, { search: fakeSearch([]) });
+  const empty = await fetch(`${s.url}/api/search?q=%20`, { headers: { authorization: `Bearer ${TOKEN}` } });
+  assert.equal(empty.status, 400);
+
+  const s2 = await boot(t, {
+    search: async () => {
+      throw new Error("找不到笔记本「记忆」");
+    },
+  });
+  const r = await fetch(`${s2.url}/api/search?q=x`, { headers: { authorization: `Bearer ${TOKEN}` } });
+  assert.equal(r.status, 500);
+  const body = await r.json();
+  // 原因要透出来：边缘那边只有「查不到」的话，跟「真的没记过」分不开。
+  assert.match(body.error, /找不到笔记本/);
+});
+
+test("检索：没配 token 时绑回环也能用，绑全网卡直接拒绝启动", async (t) => {
+  const s = startIngest({ port: 0, bind: "127.0.0.1", token: "", search: fakeSearch([]), log: () => {} });
+  t.after(() => s.close());
+  for (let i = 0; i < 100; i++) {
+    try {
+      await fetch(`${s.url}/api/ping`);
+      break;
+    } catch {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
+  const r = await fetch(`${s.url}/api/search?q=x`);
+  assert.equal(r.status, 200);
+  assert.throws(() => startIngest({ port: 0, bind: "0.0.0.0", token: "" }), /拒绝启动/);
+});

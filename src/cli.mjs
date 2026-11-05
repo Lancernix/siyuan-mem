@@ -15,7 +15,7 @@ import { writeEntities } from "./entity-view.mjs";
 import { readDays, stats as logStats, dayOf } from "./log.mjs";
 import { normalizeTurns, toExchanges } from "./extract.mjs";
 import { drop, pending, readSession } from "./inbox.mjs";
-import { searchEntries } from "./search.mjs";
+import { searchEntries, remoteSearch } from "./search.mjs";
 import { readLog, readJsonLines, auditMessages, HARNESS_NAMES } from "./readers/index.mjs";
 import { listSessions, summarize } from "./harness.mjs";
 import { open, enqueueLog, processQueue } from "./jobs.mjs";
@@ -23,6 +23,7 @@ import { serve, acquire, release, lockInfo } from "./serve.mjs";
 import { startUi } from "./ui.mjs";
 import { install, uninstall, serviceStatus, systemdUnit, PLIST_PATH } from "./service.mjs";
 import { pushOnce, pushWatch, pingPush } from "./push.mjs";
+import { startMcp } from "./mcp.mjs";
 
 const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 
@@ -65,6 +66,10 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
   mem service unit             打印 systemd 单元（Linux 用，不落盘）
   mem log [stats|tail|grep]    结构化事件日志：stats 看汇总，tail 看最近，grep 搜字段
   mem search <关键词>           召回：查记忆条目（--limit=8 / --topic= / --type= / --days= / --json）
+  mem search --to URL <关键词>  从中心查（边缘机器用；token 取 push.token 或 --token）
+  mem mcp [--to URL] [--token T]
+                               起 MCP server（stdio），给 Claude Code 等 harness 调召回
+                               --to 不填就查本机思源；填了就走中心的 /api/search
 
 配置：${CONFIG_PATH}
 队列：${INBOX_DIR}
@@ -864,15 +869,27 @@ async function cmdLog(args, flags) {
 async function cmdSearch(args, flags) {
   const q = args.join(" ").trim();
   if (!q) throw new Error("用法：mem search <关键词>");
-  const r = await searchEntries({
-    q,
-    limit: flags.limit,
-    topic: flags.topic,
-    type: flags.type,
-    days: flags.days,
-    // --all 连过时的也一起看：查"当初为什么改"时需要，默认只给在用的。
-    status: flags.all ? "" : undefined,
-  });
+  const to = flags.to ?? loadConfig().push?.to ?? "";
+  const r = to
+    ? await remoteSearch({
+        to,
+        token: flags.token,
+        q,
+        limit: flags.limit,
+        topic: flags.topic,
+        type: flags.type,
+        days: flags.days,
+        status: flags.all ? "" : undefined,
+      })
+    : await searchEntries({
+        q,
+        limit: flags.limit,
+        topic: flags.topic,
+        type: flags.type,
+        days: flags.days,
+        // --all 连过时的也一起看：查"当初为什么改"时需要，默认只给在用的。
+        status: flags.all ? "" : undefined,
+      });
   if (flags.json) {
     console.log(JSON.stringify(r, null, 2));
     return;
@@ -888,6 +905,25 @@ async function cmdSearch(args, flags) {
     if (h.text && h.text !== h.brief) console.log(`   ${h.text.slice(0, 120)}${h.text.length > 120 ? "…" : ""}`);
     if (h.raw) console.log(`   原文 ${h.raw}`);
     console.log("");
+  });
+}
+
+async function cmdMcp(flags) {
+  const cfg = loadConfig();
+  const to = flags.to ?? cfg.push?.to ?? "";
+  const token = flags.token ?? cfg.push?.token ?? "";
+
+  // 有中心地址就走中心：边缘机器上没有思源，直连必然超时，
+  // 而超时的表现是「每次都查不到」，看起来像记忆库是空的。
+  const search = to
+    ? (opts) => remoteSearch({ ...opts, to, token })
+    : (opts) => searchEntries(opts);
+
+  // stdout 留给协议，日志一律 stderr——混一行进去客户端就断开。
+  // 不在这里等：stdin 开着，readline 就撑着进程；关掉时进程自己退。
+  startMcp({
+    search,
+    log: (m) => process.stderr.write(`${m}\n`),
   });
 }
 
@@ -939,6 +975,8 @@ async function main() {
       return cmdCenter(rest, flags);
     case "push":
       return cmdPush(flags, rest);
+    case "mcp":
+      return cmdMcp(flags);
     case undefined:
     case "-h":
     case "--help":
