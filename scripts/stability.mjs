@@ -18,7 +18,14 @@ import { toExchanges, extractEntries } from "../src/extract.mjs";
 import { loadConfig } from "../src/config.mjs";
 import { parseArgs } from "../src/args.mjs";
 
-const { flags, rest } = parseArgs(process.argv.slice(2));
+const { flags, rest: raw } = parseArgs(process.argv.slice(2));
+// `--runs 3` 这种空格写法，parseArgs 会把 3 留进 rest，于是被当成一个文件名读。
+// 只删掉"和 --runs 值相同、且是纯数字"的那一个，别误伤真的文件。
+const rest = [...raw];
+if (flags.runs !== undefined) {
+  const i = rest.indexOf(String(flags.runs));
+  if (i >= 0 && /^\d+$/.test(rest[i])) rest.splice(i, 1);
+}
 const runs = Math.max(2, Number(flags.runs) || 2);
 if (!rest.length) {
   console.error("用法：node scripts/stability.mjs <会话文件> [...] [--runs=2]");

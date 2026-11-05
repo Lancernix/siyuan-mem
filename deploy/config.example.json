@@ -7,7 +7,10 @@
     "partition": "month"
   },
   "model": {
+    "_baseUrl": "必须写。provider 不写预设里的十家时，没有 baseUrl 会退回默认的 DeepSeek 地址，key 就发错门了",
     "provider": "volcengine",
+    "baseUrl": "https://ark.cn-beijing.volces.com/api/plan/v3",
+    "wire": "openai",
     "name": "deepseek-v4.1-flash-economy",
     "apiKey": "…",
     "timeoutMs": 180000

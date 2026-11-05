@@ -419,7 +419,10 @@ async function callModel(cfg, batch, entityShot = [], part = null) {
     tag: "extract",
   });
   // 有对象就用对象（字段是服务端按 schema 强制的）；退回文本模式时再自己解析。
-  const parsed = r.object ? parseEntries(JSON.stringify(r.object)) : parseEntries(r.text);
+  // 判的是"里面有没有 entries"，不是"对象真不真"：SDK 在没走 schema 的时候也可能
+  // 给一个空对象，truthy 会把好端端的文本结果丢掉，转而去解析 {}。
+  const obj = r.object && Array.isArray(r.object.entries) ? r.object : null;
+  const parsed = obj ? parseEntries(JSON.stringify(obj)) : parseEntries(r.text);
   // 解析不出来就整批算失败：宁可退回规则抽取（并让会话留在队列里重试），
   // 也不能"零条 + 成功"地归档掉。
   if (!parsed.ok) {

@@ -125,16 +125,25 @@ export function startIngest({
   function auth(req) {
     const given = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "") || req.headers["x-mem-token"] || "";
     if (!token) {
-      // 没配 token 时只认真正的本机直连。只看 bind 是不够的：反向代理转发进来的
-      // 请求，socket 来源本来就是 127.0.0.1，于是"绑了回环所以免密"在反代后面
-      // 等于完全免密——这是最容易在部署时才踩到的一条。
+      // 没配 token 时只认真正的本机直连。有两条都得查：
+      //
+      //   1. socket 来源是回环；
+      //   2. Host 也是回环名。
+      //
+      // 只看 bind 是不够的：反向代理转发进来的请求 socket 本来就是 127.0.0.1。
+      // 只看代理头也不够：那些头是客户端可以不给的，nginx 裸 proxy_pass 默认也不加
+      // （实测：不带任何代理头、Host 写 mem.example.com，原来能直接写进队列）。
+      // Host 是 HTTP/1.1 必带的，代理转发时一般会保留外部域名，所以它是这里最可靠的
+      // 一个信号。三者任一不对就要求 token。
       const proxied = Boolean(
         req.headers["x-forwarded-for"] || req.headers["x-real-ip"] || req.headers.forwarded
       );
       const remote = req.socket?.remoteAddress ?? "";
       const local = remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
-      if (local && !proxied) return { ok: true };
-      return { ok: false, code: 403, error: "服务端没配 token，只接受本机直连（检测到代理头或非本机来源）" };
+      const host = String(req.headers.host ?? "").replace(/:\d+$/, "").toLowerCase();
+      const hostLocal = host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1";
+      if (local && !proxied && hostLocal) return { ok: true };
+      return { ok: false, code: 403, error: "服务端没配 token，只接受本机直连（来源、代理头、Host 任一不对就拒）" };
     }
     return sameToken(given, token) ? { ok: true } : { ok: false, code: 401, error: "token 不对" };
   }
@@ -200,8 +209,14 @@ export function startIngest({
     }
 
     if (req.method === "GET" && url.pathname === "/api/ping") {
-      // 不带敏感信息：只用来确认"连得到、地址对不对"。
-      return json(res, 200, { ok: true, name: "siyuan-mem", queue: pending().length, auth: Boolean(token) });
+      // 配了 token 就要求带上：否则这个接口会白告出「auth:false + 队列长度」，
+      // 等于给扫描器一个确认"这台机器有记忆库且没设密码"的探针。
+      if (token) {
+        const gate = auth(req);
+        if (!gate.ok) return json(res, gate.code, { error: gate.error });
+        return json(res, 200, { ok: true, name: "siyuan-mem", queue: pending().length });
+      }
+      return json(res, 200, { ok: true, name: "siyuan-mem" });
     }
 
     if (url.pathname === "/api/search") return handleSearch(req, res, url);

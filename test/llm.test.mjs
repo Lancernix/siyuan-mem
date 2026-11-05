@@ -65,9 +65,13 @@ const server = http.createServer((req, res) => {
       return send(400, { error: { message: "response_format is not supported by this model" } });
     }
     if (scenario === "always500") return send(503, { error: { message: "upstream down" } });
+    // 不认 json_schema 的服务端（DeepSeek 官方 API、GLM 都这样）
+    if (scenario === "noschema" && parsed.response_format?.type === "json_schema") {
+      return send(400, { error: { message: "response_format type json_schema is not supported" } });
+    }
 
     const content =
-      scenario === "extract"
+      scenario === "extract" || scenario === "noschema"
         ? JSON.stringify({
             entries: [
               { text: "定下来用京东京造风盾500当通勤软壳", brief: "通勤软壳选风盾500", entity: "风盾500", type: "decision", confidence: 5 },
@@ -165,4 +169,12 @@ test("用量按天记账，能从文件读回来", () => {
   const u = usageToday();
   assert.ok(u.calls >= 3, `记账应该有记录，实际 ${JSON.stringify(u)}`);
   assert.ok(u.prompt > 0);
+});
+
+test("服务端不认 json_schema 时自动降级成 json_object，不整批失败", async () => {
+  hit = 0;
+  scenario = "noschema";
+  const out = await extractEntries(openaiCfg, [{ q: "通勤十公里穿什么裤子", a: "选风盾500。" }], { useModel: true });
+  assert.equal(out.mode, "model", `不该降级成规则抽取：${out.error ?? ""}`);
+  assert.equal(hit, 2, "先 json_schema 被 400，再 json_object 成功");
 });

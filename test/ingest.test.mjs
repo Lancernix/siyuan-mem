@@ -6,6 +6,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -25,7 +26,7 @@ async function boot(t, extra = {}) {
   t.after(() => s.close());
   for (let i = 0; i < 100; i++) {
     try {
-      await fetch(`${s.url}/api/ping`);
+      await fetch(`${s.url}/api/ping`, { headers: { authorization: `Bearer ${TOKEN}` } });
       return s;
     } catch {
       await new Promise((r) => setTimeout(r, 20));
@@ -195,7 +196,7 @@ test("检索：没配 token 时绑回环也能用，绑全网卡直接拒绝启�
   t.after(() => s.close());
   for (let i = 0; i < 100; i++) {
     try {
-      await fetch(`${s.url}/api/ping`);
+      await fetch(`${s.url}/api/ping`, { headers: { authorization: `Bearer ${TOKEN}` } });
       break;
     } catch {
       await new Promise((r) => setTimeout(r, 20));
@@ -226,7 +227,7 @@ test("反代进来的请求：即使绑的是回环、没配 token，也必须�
   t.after(() => s.close());
   for (let i = 0; i < 100; i++) {
     try {
-      await fetch(`${s.url}/api/ping`);
+      await fetch(`${s.url}/api/ping`, { headers: { authorization: `Bearer ${TOKEN}` } });
       break;
     } catch {
       await new Promise((r) => setTimeout(r, 20));
@@ -243,4 +244,30 @@ test("占位符或过短的 token 直接拒绝启动", () => {
   // 配置模板里那句中文说明文字非空，被当成真 token 就等于"全世界都知道的密码"。
   assert.throws(() => startIngest({ port: 0, bind: "0.0.0.0", token: "自己生成一个长串，边缘机器要用同一个" }), /非 ASCII/);
   assert.throws(() => startIngest({ port: 0, bind: "0.0.0.0", token: "root1234" }), /至少 16 位/);
+});
+
+test("没有 token 时，Host 不是回环名就拒——反代不带代理头也挡得住", async (t) => {
+  const s = startIngest({ port: 0, bind: "127.0.0.1", token: "", search: fakeSearch([]), log: () => {} });
+  t.after(() => s.close());
+  for (let i = 0; i < 100; i++) {
+    try {
+      await fetch(`${s.url}/api/ping`);
+      break;
+    } catch {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
+  // 正常本机调用：Host 就是 127.0.0.1:port
+  assert.equal((await fetch(`${s.url}/api/search?q=x`)).status, 200);
+  // 反代转发：socket 仍是回环、也没带代理头，但 Host 是外部域名。
+  // 这是原来能直接写进队列的那条路。
+  // fetch 不许改 Host（forbidden header），只能用 http.request。
+  const status = await new Promise((resolve, reject) => {
+    const u = new URL(`${s.url}/api/search?q=x`);
+    http.get({ hostname: u.hostname, port: u.port, path: `${u.pathname}${u.search}`, headers: { host: "mem.example.com" } }, (res) => {
+      res.resume();
+      resolve(res.statusCode);
+    }).on("error", reject);
+  });
+  assert.equal(status, 403);
 });

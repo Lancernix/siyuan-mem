@@ -42,8 +42,17 @@ chmod 600 data/.siyuan-mem/config.json
 $EDITOR data/.siyuan-mem/config.json
 ```
 
-要改的四处：思源地址（`http://<思源容器名>:6806`）、思源 token、模型 key、
-`ingest.token`（自己编一个长串，边缘机器要用同一个）。
+要改的四处：思源地址（`http://<思源容器名>:6806`）、思源 token、模型 key
+（连同 `baseUrl` 一起写——不写会退回默认的 DeepSeek 地址）、`ingest.token`。
+
+token 别手打，生成一个：
+
+```bash
+openssl rand -base64 24
+```
+
+留空也行，但那样服务会拒绝在 `0.0.0.0` 上启动——这是故意的。短于 16 位、
+或者带中文的（复制模板说明文字的结果）都会被拒绝启动。
 
 ## 3. 起容器，建库
 
@@ -73,10 +82,10 @@ docker compose exec mem center status
 
 ```bash
 # 先验地址和 token，不传数据
-mem push --to http://<服务器>:7788 --token <ingest.token> --test
+mem push --to https://<域名>:7788 --token <ingest.token> --test
 
 # 全量推。--all 是不限这一轮的会话数，--quiet=0 是连刚写完的也推
-mem push --to http://<服务器>:7788 --token <ingest.token> --all --quiet=0 --save
+mem push --to https://<域名>:7788 --token <ingest.token> --all --quiet=0 --save
 ```
 
 推的是原始语料（去掉思考、工具输出之后的那部分），不是抽好的条目。中心那边排队，
@@ -103,7 +112,7 @@ docker compose exec mem review 20    # 最近 20 条，人眼扫一遍
 删掉本地那份记忆笔记本（或整个副本），装 MCP：
 
 ```bash
-claude mcp add siyuan-mem -- mem mcp --to http://<服务器>:7788 --token <ingest.token>
+claude mcp add siyuan-mem -- mem mcp --to https://<域名>:7788 --token <ingest.token>
 ```
 
 再在 CLAUDE.md 里补一句什么时候该查——装上只是"能调"，不等于"会调"。

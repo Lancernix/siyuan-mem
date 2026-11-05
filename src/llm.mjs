@@ -68,6 +68,15 @@ function presetEnvKey(provider) {
  *
  * 所以这里必开。不开等于把"字段由谁保证"从服务端退回到提示词。
  */
+/**
+ * 哪些「地址 + 模型」不吃 json_schema。踩一次就记住，后面直接走 json_object。
+ *
+ * 这不是假设：DeepSeek 官方 API、智谱 GLM、MiniMax 都只支持 json_object，
+ * 不支持 schema 约束（2026-10 的实测清单里 DeepSeek 是 0/2）。现在用的火山方舟
+ * 走的是自己的端点，支持；但哪天换回 DeepSeek 官方 API，第一次会 400。
+ */
+const noSchema = new Set();
+
 async function modelFor(m, { json = false } = {}) {
   const base = {
     apiKey: m.apiKey || "not-needed",
@@ -267,9 +276,11 @@ async function call(cfg, { messages, json = false, schema = null, maxTokens, tag
 
   const { generateText, Output } = await import("ai");
   const wantJson = Boolean(json && m.jsonMode);
+  const key = `${m.baseUrl}|${m.model}`;
+  const wantSchema = Boolean(schema) && !noSchema.has(key);
   const t0 = Date.now();
 
-  const send = async ({ json: useJson = wantJson, withSchema = Boolean(schema) } = {}) => {
+  const send = async ({ json: useJson = wantJson, withSchema = wantSchema } = {}) => {
     const model = await modelFor(m, { json: useJson && !withSchema });
     const { system, messages: rest } = splitMessages(messages);
     try {
@@ -301,6 +312,17 @@ async function call(cfg, { messages, json = false, schema = null, maxTokens, tag
       fallback = true;
       try {
         res = await withRetry(m, () => send({ withSchema: false }));
+      } catch (e2) {
+        record({ at: new Date().toISOString(), model: m.model, wire: m.wire, tag, error: describe(e2) });
+        throw new Error(`模型调用失败：${describe(e2)}`);
+      }
+    } else if (schema && e.status === 400 && JSON_MODE_REJECTED.test(e.message)) {
+      // 这家不认 json_schema（DeepSeek 官方 API、GLM 都是）。记住，退回 json_object，
+      // 让调用方自己解析文本——比整批降级成规则抽取好得多。
+      noSchema.add(key);
+      fallback = true;
+      try {
+        res = await withRetry(m, () => send({ withSchema: false, json: true }));
       } catch (e2) {
         record({ at: new Date().toISOString(), model: m.model, wire: m.wire, tag, error: describe(e2) });
         throw new Error(`模型调用失败：${describe(e2)}`);
