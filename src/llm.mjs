@@ -16,6 +16,7 @@
 import { appendFileSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { HOME_DIR, CONFIG_PATH, ensureDirs } from "./config.mjs";
+import { event } from "./log.mjs";
 
 /**
  * 各家预设。baseUrl 写到版本号为止，具体路径由 wire 拼。
@@ -312,6 +313,7 @@ async function call(cfg, { messages, json = false, schema = null, maxTokens, tag
       // schema 没过但模型确实回了内容：退回文本模式再要一次，让调用方自己解析。
       // 直接判失败会把一整批降级成规则抽取，代价远大于多花一次调用。
       fallback = true;
+      event("llm.fallback", { kind: "schema-validate", model: m.model, wire: m.wire });
       try {
         res = await withRetry(m, () => send({ withSchema: false }));
       } catch (e2) {
@@ -323,6 +325,7 @@ async function call(cfg, { messages, json = false, schema = null, maxTokens, tag
       // 让调用方自己解析文本——比整批降级成规则抽取好得多。
       noSchema.add(key);
       fallback = true;
+      event("llm.fallback", { kind: "schema-unsupported", model: m.model, wire: m.wire });
       try {
         res = await withRetry(m, () => send({ withSchema: false, json: true }));
       } catch (e2) {
@@ -331,6 +334,7 @@ async function call(cfg, { messages, json = false, schema = null, maxTokens, tag
       }
     } else if (wantJson && e.status === 400 && JSON_MODE_REJECTED.test(e.message)) {
       fallback = true;
+      event("llm.fallback", { kind: "json-unsupported", model: m.model, wire: m.wire });
       try {
         res = await withRetry(m, () => send({ json: false }));
       } catch (e2) {

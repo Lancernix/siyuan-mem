@@ -11,7 +11,7 @@ import { loadConfig, loadOffsets, saveOffsets, offsetsOf, machineId } from "./co
 import { hasModel } from "./llm.mjs";
 import { SiYuan } from "./siyuan.mjs";
 import { Store } from "./store.mjs";
-import { normalizeTurns, toExchanges, extractEntries, PROMPT_VERSION } from "./extract.mjs";
+import { normalizeTurns, toExchanges, extractEntries, promptVersion } from "./extract.mjs";
 import { pending, readSession, archive, drop } from "./inbox.mjs";
 import { readLog } from "./readers/index.mjs";
 import { event } from "./log.mjs";
@@ -292,7 +292,7 @@ export async function processQueue({ dry = false, useModel = true, onLine = () =
       ms: Date.now() - tExtract,
       tokens: usage ?? { prompt: 0, completion: 0 },
       model: cfg.model?.name ?? "",
-      prompt: PROMPT_VERSION,
+      prompt: promptVersion(),
       error: error ?? undefined,
     });
 
