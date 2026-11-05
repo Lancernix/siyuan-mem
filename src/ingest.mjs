@@ -6,10 +6,16 @@
  *
  * 这是写入通道，不是只读面板。没有 token 就绑 0.0.0.0 等于把记忆库的写权限
  * 摆在公网上，所以 startIngest 会直接拒绝这种组合。
+ *
+ * 除了写，这里还挂了 `/api/search`：边缘机器的 harness 够不着思源，检索也得
+ * 从中心走。它复用同一个端口和同一个 token——一台机器对中心只有一个地址，
+ * 配两套只会多一个配错的地方。检索失败不回 5xx 的默认页面，必须带原因，
+ * 否则边缘那边只看到「查不到」，和「真的没有这条记忆」分不开。
  */
 import http from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { drop, ingestKey, pending } from "./inbox.mjs";
+import { searchEntries } from "./search.mjs";
 
 function json(res, code, body) {
   const s = JSON.stringify(body);
@@ -85,13 +91,71 @@ function normalize(body, fallbackMachine = "") {
  * @param {number} opts.maxBytes
  * @param {(line:string)=>void} opts.log
  */
-export function startIngest({ port, bind = "127.0.0.1", token = "", maxBytes = 24 * 1024 * 1024, log = () => {} } = {}) {
+export function startIngest({
+  port,
+  bind = "127.0.0.1",
+  token = "",
+  maxBytes = 24 * 1024 * 1024,
+  // 检索实现可替换：测试里不该为了验鉴权去连一个真的思源。
+  search = searchEntries,
+  log = () => {},
+} = {}) {
   const loopback = bind === "127.0.0.1" || bind === "::1" || bind === "localhost";
   if (!loopback && !token) {
     throw new Error(
       `拒绝启动：监听 ${bind} 但没配 token。\n` +
         "  写入通道不能裸奔。跑一次 mem ingest setup 会自动生成 token，或把 bind 改回 127.0.0.1。"
     );
+  }
+
+  /** 两条接口共用一套鉴权：写能写就能读，反过来不成立。 */
+  function auth(req) {
+    const given = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "") || req.headers["x-mem-token"] || "";
+    if (!token) return loopback ? { ok: true } : { ok: false, code: 403, error: "服务端没配 token，只接受本机请求" };
+    return sameToken(given, token) ? { ok: true } : { ok: false, code: 401, error: "token 不对" };
+  }
+
+  /** @returns {Promise<boolean>} 处理完返回 true */
+  async function handleSearch(req, res, url) {
+    const a = auth(req);
+    if (!a.ok) return json(res, a.code, { error: a.error });
+
+    let p = {};
+    if (req.method === "GET") {
+      p = Object.fromEntries(url.searchParams);
+    } else if (req.method === "POST") {
+      try {
+        p = JSON.parse(await readBody(req, 64 * 1024)) ?? {};
+      } catch (e) {
+        if (e.close) res.setHeader("connection", "close");
+        return json(res, e.status ?? 400, { error: e.status ? e.message : `JSON 读不出来：${e.message}` });
+      }
+    } else {
+      return json(res, 405, { error: "检索用 GET 或 POST" });
+    }
+
+    const q = String(p.q ?? p.query ?? "").trim();
+    if (!q) return json(res, 400, { error: "缺 q：要查什么" });
+    const days = Number(p.days);
+    // all=1 / status="" 表示连过时的一起看；其它情况交给 searchEntries 默认。
+    const all = p.all === 1 || p.all === true || p.all === "1" || p.all === "true" || p.status === "";
+
+    try {
+      const r = await search({
+        q,
+        limit: p.limit,
+        topic: p.topic || undefined,
+        type: p.type || undefined,
+        days: Number.isFinite(days) && days > 0 ? days : undefined,
+        status: all ? "" : p.status || undefined,
+      });
+      log(`  检索 ${JSON.stringify(q).slice(0, 40)} → ${r.hits.length} 条`);
+      return json(res, 200, { ok: true, q, terms: r.terms, count: r.hits.length, hits: r.hits });
+    } catch (e) {
+      // 500 但带原因：边缘那边要能分清「中心坏了」和「确实没有这条」。
+      log(`  检索失败：${e.message}`);
+      return json(res, 500, { error: `检索失败：${e.message}` });
+    }
   }
 
   const server = http.createServer(async (req, res) => {
@@ -110,12 +174,13 @@ export function startIngest({ port, bind = "127.0.0.1", token = "", maxBytes = 2
       return json(res, 200, { ok: true, name: "siyuan-mem", queue: pending().length, auth: Boolean(token) });
     }
 
+    if (url.pathname === "/api/search") return handleSearch(req, res, url);
+
     if (url.pathname !== "/api/ingest") return json(res, 404, { error: "没有这个接口" });
     if (req.method !== "POST") return json(res, 405, { error: "只接 POST" });
 
-    const given = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "") || req.headers["x-mem-token"] || "";
-    if (token && !sameToken(given, token)) return json(res, 401, { error: "token 不对" });
-    if (!token && !loopback) return json(res, 403, { error: "服务端没配 token，只接受本机推送" });
+    const gate = auth(req);
+    if (!gate.ok) return json(res, gate.code, { error: gate.error });
 
     // 探针：只验地址和 token，不需要构造一个假会话。`mem push --test` 用它。
     if (url.searchParams.get("probe")) {

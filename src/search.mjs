@@ -18,6 +18,7 @@
 import { loadConfig } from "./config.mjs";
 import { SiYuan } from "./siyuan.mjs";
 import { event } from "./log.mjs";
+import { stripRawLink } from "./raw.mjs";
 
 const ATTR = {
   hash: "custom-mem-hash",
@@ -33,7 +34,7 @@ const ATTR = {
 };
 
 const attr = (ial, k) => new RegExp(k + '="([^"]*)"').exec(ial ?? "")?.[1] ?? "";
-const plain = (s) => String(s ?? "").replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").trim();
+const plain = (s, raw = "") => stripRawLink(s, raw);
 
 /** 把一句话拆成检索词。中文不分词，按空格和标点切，去掉太短的。 */
 export function termsOf(q) {
@@ -45,7 +46,7 @@ export function termsOf(q) {
 }
 
 function scoreOf(row, terms, entity) {
-  const text = plain(row.content);
+  const text = row.text ?? "";
   let score = 0;
   for (const t of terms) {
     const lower = t.toLowerCase();
@@ -102,6 +103,10 @@ export async function searchEntries(opts = {}) {
       const entity = attr(r.ial, ATTR.entity);
       const brief = attr(r.ial, ATTR.brief);
       const date = attr(r.ial, ATTR.date);
+      const raw = attr(r.ial, ATTR.raw);
+      // 先切掉原文路径再算分：不切的话，同一场会话的条目会因为共用同一串
+      // 路径而互相「像」，排序就变成了「同一场会话的条目聚在一起」。
+      const text = plain(r.content, raw);
       return {
         id: r.id,
         entity,
@@ -109,11 +114,11 @@ export async function searchEntries(opts = {}) {
         date,
         type: attr(r.ial, ATTR.type),
         confidence: attr(r.ial, ATTR.confidence),
-        text: plain(r.content),
-        raw: attr(r.ial, ATTR.raw),
+        text,
+        raw,
         session: attr(r.ial, ATTR.session),
         source: attr(r.ial, ATTR.source),
-        score: scoreOf({ content: r.content, brief, date }, terms, entity),
+        score: scoreOf({ text, brief, date }, terms, entity),
       };
     })
     .filter((h) => !since || (h.date && h.date >= since))
@@ -130,6 +135,63 @@ export async function searchEntries(opts = {}) {
   }
 
   return { terms, hits, notebook };
+}
+
+/**
+ * 远端检索：边缘机器够不着思源，只能问中心。
+ *
+ * 地址和 token 跟 push 共用一份。两台机器之间只有「一进一出」两条通道，
+ * 给它们各配一套地址和 token，装第二台机器时就多一个能配错的地方，
+ * 而且错的时候两边都只报「连不上」，分不清是哪一边。
+ *
+ * @param {{to?:string, token?:string, q:string, limit?:number, topic?:string,
+ *          type?:string, days?:number, status?:string}} opts
+ */
+export async function remoteSearch(opts = {}) {
+  const cfg = loadConfig();
+  const base = String(opts.to || cfg.push?.to || "")
+    .trim()
+    .replace(/\/+$/, "")
+    // 有人会把 push 的完整地址（…/api/ingest）粘进来，顺手认了。
+    .replace(/\/api\/ingest$/, "");
+  if (!base) {
+    throw new Error("没配中心地址：mem search --to https://中心地址，或先 mem push --to … --save");
+  }
+  const token = opts.token ?? cfg.push?.token ?? "";
+  const body = {
+    q: opts.q,
+    limit: opts.limit,
+    topic: opts.topic,
+    type: opts.type,
+    days: opts.days,
+    // 空串 = 连过时的一起看；undefined 交给服务端按默认（current）处理。
+    status: opts.status,
+  };
+
+  let res;
+  try {
+    res = await fetch(`${base}/api/search`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch (e) {
+    throw new Error(`连不上中心 ${base}：${e.name === "TimeoutError" ? "超时" : e.message}`);
+  }
+
+  const text = await res.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(`中心返回的不是 JSON（HTTP ${res.status}）：${text.slice(0, 200)}`);
+  }
+  if (!res.ok) throw new Error(`中心拒绝了检索（HTTP ${res.status}）：${data?.error ?? text.slice(0, 200)}`);
+  return { ...data, remote: base };
 }
 
 /** 笔记本名 → id。配置里写的是名字，API 要 id。 */
