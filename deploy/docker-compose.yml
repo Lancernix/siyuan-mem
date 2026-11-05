@@ -1,0 +1,30 @@
+# 中心节点：一个 mem 容器，接在思源自己的网络上。
+#
+# 思源不用改。mem 只是它的一个客户端，走 6806 那套 HTTP API。
+services:
+  mem:
+    # 构建上下文是仓库根（要拷 src 和 package.json），Dockerfile 在 deploy/ 下。
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: siyuan-mem:0.1.0
+    container_name: siyuan-mem
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      # 配置、队列、原文索引、日志都在这里。备份这一个目录就够。
+      - ./data:/data
+    ports:
+      # 边缘机器（Mac / 公司电脑）往这里推会话、从这里查记忆。
+      # 直接暴露公网时务必配 token，并走 HTTPS 反代。
+      - "7788:7788"
+    networks:
+      - siyuan
+
+networks:
+  siyuan:
+    external: true
+    # 思源 compose 默认建的网叫 <项目名>_default。查一下再填：
+    #   docker network ls | grep -i siyuan
+    name: ${SIYUAN_NET:-siyuan_default}

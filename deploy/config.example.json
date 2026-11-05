@@ -1,0 +1,25 @@
+{
+  "_说明": "只需写要改的字段，其余取默认值。放到挂载卷里的 .siyuan-mem/config.json，路径是 <compose 目录>/data/.siyuan-mem/config.json",
+  "siyuan": {
+    "baseUrl": "http://siyuan:6806",
+    "token": "思源的 API token（设置 → 关于 → API token）",
+    "notebook": "90-记忆",
+    "partition": "month"
+  },
+  "model": {
+    "provider": "volcengine",
+    "name": "deepseek-v4.1-flash-economy",
+    "apiKey": "…",
+    "timeoutMs": 180000
+  },
+  "extract": {
+    "maxCharsPerCall": 38000,
+    "maxEntriesPerBatch": 18
+  },
+  "ingest": {
+    "enabled": true,
+    "bind": "0.0.0.0",
+    "port": 7788,
+    "token": "自己生成一个长串，边缘机器要用同一个"
+  }
+}
