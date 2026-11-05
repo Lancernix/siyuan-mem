@@ -211,21 +211,29 @@ Gemini 那 1.0 是官方的建议：Gemini 3 调低温度反而会退化、循�
 
 为什么 OpenAI 那家走官方 SDK、另两家手写：SDK 只对同一种形状有收益，而且它零传递依赖、纯 JS，编进单文件只多 1MB。Anthropic / Gemini 的差异太大（system 顶层、模型名在路径里、角色叫 `model`、token 字段名不同），各自五六十行写完更好审，也不用为两家每年会 breaking 的 SDK 付维护费。三者都懒加载。
 
-预设十家：`deepseek / qwen / moonshot / zhipu / openai / openrouter / anthropic / gemini / ollama / lmstudio`（本地两家不要 key）。自定义端点用 `model.wire` 指定协议。
+预设十家：`deepseek / qwen / moonshot / zhipu / openai / openrouter / anthropic / gemini / ollama / lmstudio`（本地两家不要 key）。别家的端点自己给：`mem model use <名字> --base <url> --wire <协议>`。
 
-### 模型目录（抄 OpenCode 的做法）
+### 模型目录：删掉了
 
-预设里的模型名会过期，这不是假设：写这份文档时 `deepseek-chat` 已经下架，目录里现在是 `deepseek-v4-flash / v4-pro`；`moonshot-v1-32k` 换成了 `kimi-k3`。所以 provider 和模型元数据不自己维护，直接读 [models.dev](https://models.dev)（OpenCode 用的同一份）：233 家、8909 个模型，带价格、上下文长度、环境变量名。
+2026-11-05 把 models.dev 那份目录整个删了（`src/catalog.mjs`、`mem model refresh`、
+`models.json`）。当初加它是为了「provider 不在预设里时自动找 baseUrl、模型名过期时提示旧名」，
+实际用了几个月，一次都没真正需要过——provider 永远是「内置十家之一」或者「自定义端点」，
+后者本来就要自己写 baseUrl。
+
+代价却很实在：5.6MB 的 JSON、233 家、8909 个模型，解析成对象要 50MB 内存。而且因为
+`volcengine` 不在预设里，等于**每一条命令**都在解析这份目录。实测 `mem status` 的
+峰值内存从 139MB 掉到 87MB。
+
+现在规则简单了：认协议不认厂商。三家协议的形状只有三种，端点是配置的事。
 
 ```bash
-mem model refresh            # 拉一份到 ~/.siyuan-mem/models.json（7 天自动过期）
-mem model list qwen          # 列 provider；给的是某一家就列它下面的模型（带价格）
-mem model                    # 当前模型的单价、上下文、目录日期
+mem model list                      # 只列内置十家（协议、默认模型、端点）
+mem model use volcengine --base https://ark.cn-beijing.volces.com/api/plan/v3 --wire openai
 ```
 
-只抄它的**数据**，不抄它的**技术栈**。OpenCode 用 `npm` 字段去挑 SDK；我们是按同一个字段反推协议（`@ai-sdk/anthropic*` → anthropic，`@ai-sdk/google*` → gemini，其余 openai 兼容），请求还是自己那三个 wire 发。pi-ai（`@mariozechner/pi-ai`）走的是另一条路——每个协议装一个官方 SDK，连 Bedrock、Mistral 的 SDK 一起打包，实测 104 个包、132MB `node_modules`，编译时还会因为少一个 `@opentelemetry/api` 直接失败。我们只有一种调用形状，为一张表背这些重量不划算。
-
-目录还带来两个附带好处：配置里没写 key 时会去读 provider 对应的环境变量（`DEEPSEEK_API_KEY` 之类）；模型名不在目录里时 `mem model` 会提示"可能是旧名"。
+代价说清楚：`mem model list` 不再能列出 233 家，也不能查某个模型多少钱、上下文多长。
+要加一家，往 `PROVIDERS` 里补一行——比联网拉一张每天都在变的表可靠，也不用担心哪天
+那份表格的 schema 变了。
 
 **"有没有模型"只有一处判断**：`hasModel(cfg)` —— 它认三种情况：config 里写了 key、key 来自环境变量、provider 本身 keyless（ollama / LM Studio）。启动检查、抽取、实体归一都用它。
 
