@@ -139,10 +139,12 @@ function shapeError(e) {
     err.noObject = true;
     err.text = e.text ?? "";
   }
-  // 空回包最常见的原因是 max_tokens 被思考吃光，不是配置错。要说清楚，
-  // 否则下一个人会去查 key 和地址。
+  // 空回包两个原因：max_tokens 被思考吃光，或者服务端偶发返回空 content
+  // （DeepSeek 官方文档自己写着「有概率返回空的 content」）。两种都值得重试一次，
+  // 所以标成 retryable——按不可重试处理会把一整批降级成规则抽取。
   if (e?.name === "AI_NoOutputGeneratedError") {
-    err.message = `${err.message}（模型没吐正文：多半是 max_tokens 太小，被思考吃光了）`;
+    err.retryable = true;
+    err.message = `${err.message}（模型没吐正文：max_tokens 太小被思考吃光，或服务端偶发空回包）`;
   }
   return err;
 }
