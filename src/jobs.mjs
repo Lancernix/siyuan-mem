@@ -385,8 +385,6 @@ export async function processQueue({ dry = false, useModel = true, onLine = () =
             machine: payload.machine ?? machineId(),
             project: projectOf(payload.cwd, payload.harness),
             raw: rawPtr,
-            // 挂在会话分组项上的原文链接。一个会话通常只有一个 part。
-            rawPath: parts.find((p) => p.path)?.path ?? "",
           }
         );
         if (r.duplicate) {
@@ -449,7 +447,10 @@ export async function processQueue({ dry = false, useModel = true, onLine = () =
             project: projectOf(payload.cwd, payload.harness),
           },
           payload.date ?? "",
-          parts.find((p) => p.path)?.path ?? ""
+          // 每个 part 都要被引用：超长会话按字节切成多段，只挂第一段等于让后面几段
+          // 变成"未引用附件"，下次清理就被扫走。传 ptr（带 #轮次范围），标题上
+          // 才能写出「第 675–712 轮」，几个 part 堆在一起也分得清。
+          parts.filter((p) => p.ptr).map((p) => p.ptr)
         )
         .catch((e) => {
           onLine(`    ! 给原文建锚点失败：${e.message}`);

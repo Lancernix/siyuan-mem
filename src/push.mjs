@@ -101,7 +101,7 @@ export async function pushOnce({
     const prev = offsets[s.file];
     // 只比体积会漏掉"同尺寸重写"（日志被改写、同一段长度刚好一样）。
     // 老记录没有 mtimeMs：退回只比体积，别把"不知道"当成"变了"。
-    if (prev && prev.bytes === s.size && (prev.mtimeMs == null || prev.mtimeMs === s.mtimeMs)) continue;
+    if (prev && prev.bytes === s.size && (prev.mtimeMs == null || prev.mtimeMs === s.mtime)) continue;
     // 还在写的会话先别推：切出来全是半句话，而且下一轮还得再推一遍。
     if (now - s.mtime < quietMs && (!prev || s.size >= prev.bytes)) continue;
     candidates.push(s);
@@ -117,12 +117,12 @@ export async function pushOnce({
       continue;
     }
     if (!log_.turns.length) {
-      offsets[s.file] = { bytes: s.size, turns: 0, at: Date.now(), empty: true };
+      offsets[s.file] = { bytes: s.size, mtimeMs: s.mtime, turns: 0, at: Date.now(), empty: true };
       sum.skipped++;
       continue;
     }
     if (log_.skipped === "subagent") {
-      offsets[s.file] = { bytes: s.size, turns: 0, at: Date.now(), skipped: "subagent" };
+      offsets[s.file] = { bytes: s.size, mtimeMs: s.mtime, turns: 0, at: Date.now(), skipped: "subagent" };
       sum.skipped++;
       continue;
     }
@@ -131,7 +131,7 @@ export async function pushOnce({
     const fresh = prev && s.size >= prev.bytes && log_.turns.length >= (prev.turns ?? 0);
     const turns = fresh ? log_.turns.slice(prev.turns ?? 0) : log_.turns;
     if (!turns.length) {
-      offsets[s.file] = { bytes: s.size, turns: log_.turns.length, at: Date.now() };
+      offsets[s.file] = { bytes: s.size, mtimeMs: s.mtime, turns: log_.turns.length, at: Date.now() };
       sum.skipped++;
       continue;
     }
@@ -175,7 +175,7 @@ export async function pushOnce({
     }
 
     // 全部分片成功才推进：中途失败就留在旧位置，下次整段重推，服务端判重。
-    offsets[s.file] = { bytes: s.size, turns: log_.turns.length, at: Date.now() };
+    offsets[s.file] = { bytes: s.size, mtimeMs: s.mtime, turns: log_.turns.length, at: Date.now() };
     saveOffsets(all);
     sum.sessions++;
     sum.turns += turns.length;

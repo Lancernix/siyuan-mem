@@ -1,25 +1,13 @@
 {
+  "_说明": "只写要改的字段，其余取默认值（完整清单见 src/config.mjs 的 DEFAULTS）。本地自用基本只要 siyuan.token 和 model.apiKey；extract 那几项别抄旧值，默认已经是调过的。",
   "siyuan": {
     "baseUrl": "http://127.0.0.1:6806",
     "token": "",
-    "notebook": "90-记忆",
-    "docs": {
-      "entries": "01-条目",
-      "raw": "02-原文",
-      "changes": "03-变更"
-    },
-    "logChanges": true
+    "notebook": "90-记忆"
   },
   "model": {
-    "baseUrl": "https://api.deepseek.com",
+    "provider": "deepseek",
     "apiKey": "",
-    "name": "deepseek-chat",
-    "timeoutMs": 45000
-  },
-  "extract": {
-    "minTurnChars": 25,
-    "maxCharsPerCall": 16000,
-    "maxEntriesPerBatch": 6,
-    "maxEntriesPerSession": 60
+    "name": "deepseek-v4-flash"
   }
 }

@@ -26,9 +26,11 @@ const stub = (calls = [], out = { terms: ["静默"], hits }) => async (opts) => 
   return out;
 };
 
-test("握手回客户端的协议版本，能力里有 tools", async () => {
+test("握手回自己支持的协议版本，不回显客户端的", async () => {
   const r = await handleMessage({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } });
-  assert.equal(r.result.protocolVersion, "2025-06-18");
+  // 回显等于承诺"这个版本的语义我也懂"。只实现了 2024-11-05 就只报这个，
+  // 客户端不支持会自己断开——那是明确的失败，比连上之后不响应好查。
+  assert.equal(r.result.protocolVersion, "2024-11-05");
   assert.deepEqual(r.result.capabilities.tools, {});
   assert.equal(r.result.serverInfo.name, "siyuan-mem");
 });

@@ -20,22 +20,42 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync } from "node:fs";
 import { ensureDirs, RAW_INDEX_PATH } from "./config.mjs";
 
 const FORMAT_VERSION = 1;
 
 export function loadRawIndex() {
+  let text;
   try {
-    return JSON.parse(readFileSync(RAW_INDEX_PATH, "utf8"));
+    text = readFileSync(RAW_INDEX_PATH, "utf8");
   } catch {
+    // 文件不存在＝全新安装，不是损坏。空索引是对的。
+    return {};
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    // 坏文件不能当空的：当空的等于"所有 part 都没传过"，下一轮会把整库原文重传一遍，
+    // 产生一批重复附件。重复附件又没有正文引用，随后就被"清理未引用资源"扫走——
+    // 一次 JSON 解析失败，最后表现为丢原文。改名留证，人和程序都还能看到它坏过。
+    const bad = `${RAW_INDEX_PATH}.broken-${Date.now()}`;
+    try {
+      renameSync(RAW_INDEX_PATH, bad);
+    } catch {
+      /* 改名都失败就认了，至少不覆盖 */
+    }
     return {};
   }
 }
 
 export function saveRawIndex(o) {
   ensureDirs();
-  writeFileSync(RAW_INDEX_PATH, JSON.stringify(o, null, 2) + "\n");
+  // 先写 tmp 再 rename：写到一半断电/被 kill，留下的是一个能解析的旧文件，
+  // 而不是半截 JSON。repair.mjs 的账本早就这么写了，这里之前还是直写。
+  const tmp = `${RAW_INDEX_PATH}.tmp-${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(o, null, 2) + "\n");
+  renameSync(tmp, RAW_INDEX_PATH);
 }
 
 const indexKey = (machine, harness, session) => `${machine || "local"}|${harness || "?"}|${session || "?"}`;

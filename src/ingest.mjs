@@ -107,11 +107,35 @@ export function startIngest({
         "  写入通道不能裸奔。跑一次 mem ingest setup 会自动生成 token，或把 bind 改回 127.0.0.1。"
     );
   }
+  if (token) {
+    // 模板里的那句中文占位符（「自己生成一个长串…」）非空，startIngest 原来只判空，
+    // 于是复制一份模板就等于"鉴权已开启"，而那个 token 全世界都知道。
+    if (/[^\x20-\x7e]/.test(token)) {
+      throw new Error(
+        "拒绝启动：token 里含非 ASCII 字符，看着像配置模板里的说明文字。\n" +
+          "  生成一个真的：mem center setup --rotate（或 openssl rand -base64 24）"
+      );
+    }
+    if (token.length < 16) {
+      throw new Error(`拒绝启动：token 只有 ${token.length} 个字符，公网上一分钟就能撞开。至少 16 位。`);
+    }
+  }
 
   /** 两条接口共用一套鉴权：写能写就能读，反过来不成立。 */
   function auth(req) {
     const given = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "") || req.headers["x-mem-token"] || "";
-    if (!token) return loopback ? { ok: true } : { ok: false, code: 403, error: "服务端没配 token，只接受本机请求" };
+    if (!token) {
+      // 没配 token 时只认真正的本机直连。只看 bind 是不够的：反向代理转发进来的
+      // 请求，socket 来源本来就是 127.0.0.1，于是"绑了回环所以免密"在反代后面
+      // 等于完全免密——这是最容易在部署时才踩到的一条。
+      const proxied = Boolean(
+        req.headers["x-forwarded-for"] || req.headers["x-real-ip"] || req.headers.forwarded
+      );
+      const remote = req.socket?.remoteAddress ?? "";
+      const local = remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
+      if (local && !proxied) return { ok: true };
+      return { ok: false, code: 403, error: "服务端没配 token，只接受本机直连（检测到代理头或非本机来源）" };
+    }
     return sameToken(given, token) ? { ok: true } : { ok: false, code: 401, error: "token 不对" };
   }
 
@@ -139,6 +163,11 @@ export function startIngest({
     const days = Number(p.days);
     // all=1 / status="" 表示连过时的一起看；其它情况交给 searchEntries 默认。
     const all = p.all === 1 || p.all === true || p.all === "1" || p.all === "true" || p.status === "";
+    const status = all ? "" : p.status || undefined;
+    // 先拦一道：status 会被拼进 SQL，非法值不能等到 searchEntries 里才炸。
+    if (status && status !== "current" && status !== "superseded") {
+      return json(res, 400, { error: "status 只能是 current / superseded / 空" });
+    }
 
     try {
       const r = await search({
@@ -148,7 +177,7 @@ export function startIngest({
         project: p.project || undefined,
         type: p.type || undefined,
         days: Number.isFinite(days) && days > 0 ? days : undefined,
-        status: all ? "" : p.status || undefined,
+        status,
       });
       log(`  检索 ${JSON.stringify(q).slice(0, 40)} → ${r.hits.length} 条`);
       return json(res, 200, { ok: true, q, terms: r.terms, count: r.hits.length, hits: r.hits });

@@ -330,10 +330,17 @@ export class Store {
    * 标题上的链接是会话级的（不带轮次），条目的链接才带各自的轮次范围。
    * 下一轮真写出条目时，#writeInto 会发现标题在、列表没有，补列表就接上了。
    */
-  async ensureGroupAnchor(meta = {}, date = "", rawPath = "") {
+  async ensureGroupAnchor(meta = {}, date = "", rawPaths = "") {
     const ids = await this.entriesDocFor(date);
     const session = String(meta.session ?? "");
     if (!session || this.#cfg.siyuan.groupEntries !== true) return "";
+    // 收数组也收单个字符串：一场会话可能有多个 part（超长会话按字节切），
+    // 每个 part 都要在正文里被引用一次，只挂第一个的后果是第 2..n 段附件
+    // 没有任何引用，「清理未引用资源」会把它们扫走。而且看不见——附件池里少几个
+    // 文件，直到某天点「原文」发现打不开。
+    const ptrs = (Array.isArray(rawPaths) ? rawPaths : [rawPaths])
+      .map((p) => String(p ?? "").trim())
+      .filter(Boolean);
     const groups = loadGroups();
     const g = groups[session];
 
@@ -341,19 +348,19 @@ export class Store {
       // 标题已存在**不等于**这个 part 已经有引用。老会话（早就写过条目、标题在）
       // 后来又推来一批增量、而这批一条条目都没写出来时，就是这种情况：
       // 标题复用了，新附件仍然没有任何正文引用。
-      if (!rawPath) return g.heading;
+      if (!ptrs.length) return g.heading;
       const line = String((await this.#sy.getBlockKramdown(g.heading)) ?? "").split("\n")[0].trim();
-      if (line.includes(rawPath)) return g.heading;
-      // 补一个链接，锚文本带轮次范围（`#675-712` → 「第 675–712 轮」），
-      // 不然多个 part 堆在标题上分不清谁是谁。标题没有 custom-mem 属性，改它不丢数据。
-      const range = /#(\d+)-(\d+)$/.exec(rawPath);
-      const label = range ? `[第 ${range[1]}–${range[2]} 轮](${rawPath})` : `[原文](${rawPath})`;
-      await this.#sy.updateBlock(g.heading, `${line} ${label}`, "markdown");
+      const missing = ptrs.filter((p) => !line.includes(p));
+      if (!missing.length) return g.heading;
+      // 锚文本带轮次范围（`#675-712` → 「第 675–712 轮」），多个 part 堆在标题上
+      // 才分得清谁是谁。标题没有 custom-mem 属性，改它不丢数据。
+      const labels = missing.map(ptrLabel).join(" ");
+      await this.#sy.updateBlock(g.heading, `${line} ${labels}`, "markdown");
       return g.heading;
     }
 
     const project = String(meta.project || "").trim() || meta.source || "会话";
-    const link = rawPath ? ` [原文](${rawPath})` : "";
+    const link = ptrs.map((p) => ` ${ptrLabel(p)}`).join("");
     const heading = await this.#sy.appendBlock(ids, `## ${date} · ${project}${link}`, "markdown");
     groups[session] = { heading, list: "", last: heading, doc: ids };
     saveGroups(groups);
@@ -530,6 +537,15 @@ export function entryAttrs({ entry, meta, date, hash }) {
     ...(meta.raw ? { [ATTR.raw]: String(meta.raw) } : {}),
     ...(meta.rawpart ? { [ATTR.rawpart]: String(meta.rawpart) } : {}),
   };
+}
+
+/**
+ * 原文链接挂到标题上的锚文本。指针是 `assets/…jsonl#675-712` 这种带轮次范围的，
+ * 所以这里能写出「第 675–712 轮」；不带范围的退成「原文」。
+ */
+function ptrLabel(ptr) {
+  const m = /#(\d+)-(\d+)$/.exec(String(ptr));
+  return m ? `[第 ${m[1]}–${m[2]} 轮](${ptr})` : `[原文](${ptr})`;
 }
 
 /** ial 是 `{: id="..." custom-mem-status="current"}` 这种形式，不是 JSON。 */

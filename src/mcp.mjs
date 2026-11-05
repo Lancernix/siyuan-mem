@@ -90,8 +90,11 @@ export async function handleMessage(msg, { search } = {}) {
 
   if (method === "initialize") {
     return ok(id, {
-      // 回客户端的版本号：它认得这个版本才继续，回一个它不认识的就断在这。
-      protocolVersion: typeof params?.protocolVersion === "string" ? params.protocolVersion : PROTOCOL,
+      // 回**我们支持的**版本，不是客户端说的那个。原来无脑回显客户端给的字符串，
+      // 等于承诺"你这个版本的语义我也懂"——而实际只实现了 2024-11-05。客户端
+      // 会据此用新版本的字段发消息，然后我们解析不了，表现是"连上了但不响应"。
+      // 规范允许服务端回一个较低版本，客户端不支持就自己断开，那是明确失败。
+      protocolVersion: PROTOCOL,
       capabilities: { tools: {} },
       serverInfo: SERVER,
     });

@@ -17,7 +17,7 @@ const { ingestKey, pending } = await import("../src/inbox.mjs");
 const { splitTurns } = await import("../src/push.mjs");
 const { INBOX_DIR } = await import("../src/config.mjs");
 
-const TOKEN = "test-token-123";
+const TOKEN = "test-token-0123456789abcdef";
 
 /** 每个用例一个随机端口；t.after 保证关掉——不关的话 node 进程会一直挂着。 */
 async function boot(t, extra = {}) {
@@ -204,4 +204,43 @@ test("检索：没配 token 时绑回环也能用，绑全网卡直接拒绝启�
   const r = await fetch(`${s.url}/api/search?q=x`);
   assert.equal(r.status, 200);
   assert.throws(() => startIngest({ port: 0, bind: "0.0.0.0", token: "" }), /拒绝启动/);
+});
+
+// ---- 安全边界：这几条是审查里真复现出来的 ----
+
+test("status 非法值被拒：它是拼进 SQL 的，转义挡不住", async (t) => {
+  const calls = [];
+  const s = await boot(t, { search: fakeSearch(calls) });
+  const r = await fetch(`${s.url}/api/search`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+    // 原样拼进去的话，`--` 会注释掉后面所有条件，绕过 box/type/hash 收口读全库。
+    body: JSON.stringify({ q: "x", status: "x' OR 1=1 -- " }),
+  });
+  assert.equal(r.status, 400);
+  assert.equal(calls.length, 0, "非法 status 不能到达检索层");
+});
+
+test("反代进来的请求：即使绑的是回环、没配 token，也必须拒", async (t) => {
+  const s = startIngest({ port: 0, bind: "127.0.0.1", token: "", search: fakeSearch([]), log: () => {} });
+  t.after(() => s.close());
+  for (let i = 0; i < 100; i++) {
+    try {
+      await fetch(`${s.url}/api/ping`);
+      break;
+    } catch {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
+  // 直连（无代理头）放行
+  assert.equal((await fetch(`${s.url}/api/search?q=x`)).status, 200);
+  // 带代理头＝反代转发进来的外部请求，socket 也是 127.0.0.1，不能因此免密
+  const proxied = await fetch(`${s.url}/api/search?q=x`, { headers: { "x-forwarded-for": "1.2.3.4" } });
+  assert.equal(proxied.status, 403);
+});
+
+test("占位符或过短的 token 直接拒绝启动", () => {
+  // 配置模板里那句中文说明文字非空，被当成真 token 就等于"全世界都知道的密码"。
+  assert.throws(() => startIngest({ port: 0, bind: "0.0.0.0", token: "自己生成一个长串，边缘机器要用同一个" }), /非 ASCII/);
+  assert.throws(() => startIngest({ port: 0, bind: "0.0.0.0", token: "root1234" }), /至少 16 位/);
 });

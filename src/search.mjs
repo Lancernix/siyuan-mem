@@ -42,7 +42,11 @@ export function termsOf(q) {
   return String(q ?? "")
     .split(/[\s，。、；：？！,.;:?!()（）\[\]【】"'“”‘’/|]+/)
     .map((t) => t.trim())
-    .filter((t) => t.length >= 2 && !/^(the|and|for|with|that|this)$/i.test(t))
+    // 英文虚词和单字母没意义，但**单个汉字是有意义的**（"车""书""钱"）。
+    // 原来一律要求 ≥2 字，于是 `mem search 车` 拆出空数组，SQL 里没有任何检索条件，
+    // 退化成"按更新时间返回最新几十条"——召回全错，还看不出来。
+    .filter((t) => (/^[a-z]+$/i.test(t) ? t.length >= 2 : t.length >= 1))
+    .filter((t) => !/^(the|and|for|with|that|this)$/i.test(t))
     .slice(0, 6);
 }
 
@@ -73,10 +77,19 @@ export async function searchEntries(opts = {}) {
   const notebook = await resolveNotebook(sy, cfg.siyuan.notebook);
   const terms = termsOf(opts.q);
   const limit = Math.min(Math.max(Number(opts.limit) || 8, 1), 50);
+  // 全是标点/空白时没有检索词。这时候不能往下走：SQL 里没有任何 LIKE 条件，
+  // 结果会变成"按更新时间排序的最新 N 条"，看着有结果，其实一条都不相关。
+  if (!terms.length) return { terms: [], hits: [], reason: "no-terms" };
 
   const conds = [`box='${notebook}'`, "type='p'", `ial LIKE '%${ATTR.hash}="%'`];
   // status 传空串表示"过时的也要"（`mem search --all`）。
+  // **必须白名单**：这个字段原来直接拼进 SQL，而 /api/search 会把外部请求的
+  // status 原样透传进来。`status = "x' OR 1=1 -- "` 就能注释掉后面所有条件，
+  // 绕过 box / type / hash 收口去读全库。转义不够——非法值本来就该拒绝。
   const status = opts.status === "" ? "" : opts.status || "current";
+  if (status && status !== "current" && status !== "superseded") {
+    throw new Error(`status 只能是 current / superseded / 空，收到「${String(status).slice(0, 30)}」`);
+  }
   if (status) conds.push(`ial LIKE '%${ATTR.status}="${status}"%'`);
   if (opts.topic) conds.push(`ial LIKE '%${ATTR.entity}="${String(opts.topic).replace(/'/g, "''")}"%'`);
   if (opts.project) conds.push(`ial LIKE '%${ATTR.project}="${String(opts.project).replace(/'/g, "''")}"%'`);
