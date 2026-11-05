@@ -162,13 +162,14 @@ test("检索：GET 和 POST 都能用，返回条目和检索词", async (t) => 
   const p = await (await fetch(`${s.url}/api/search`, {
     method: "POST",
     headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
-    body: JSON.stringify({ q: "静默", topic: "silent", days: 7, all: true }),
+    body: JSON.stringify({ q: "静默", topic: "silent", project: "siyuan-mem", days: 7, all: true }),
   })).json();
   assert.equal(p.ok, true);
   assert.equal(calls.length, 2);
   // all=1 要翻成 status=""——传 undefined 的话服务端会退回 current，等于没生效。
   assert.equal(calls[1].status, "");
   assert.equal(calls[1].topic, "silent");
+  assert.equal(calls[1].project, "siyuan-mem");
   assert.equal(calls[1].days, 7);
 });
 

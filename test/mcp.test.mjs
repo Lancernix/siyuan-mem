@@ -52,13 +52,14 @@ test("调用：参数翻译对了，结果是人读文本带原文指针", async
       jsonrpc: "2.0",
       id: 3,
       method: "tools/call",
-      params: { name: "memory_search", arguments: { query: "静默 阈值", limit: 3, topic: "阈值", include_superseded: true } },
+      params: { name: "memory_search", arguments: { query: "静默 阈值", limit: 3, topic: "阈值", project: "siyuan-mem", include_superseded: true } },
     },
     { search: stub(calls) }
   );
   assert.equal(calls[0].q, "静默 阈值");
   assert.equal(calls[0].limit, 3);
   assert.equal(calls[0].topic, "阈值");
+  assert.equal(calls[0].project, "siyuan-mem");
   // include_superseded 要翻成 status=""；传 undefined 服务端会退回 current，等于没生效。
   assert.equal(calls[0].status, "");
 

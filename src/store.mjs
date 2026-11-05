@@ -17,6 +17,13 @@ export const ATTR = {
   /** 哪台机器上产生的。多机汇聚之后，没有这一栏就分不清来源。 */
   machine: "custom-mem-machine",
   /**
+   * 项目。从会话的 cwd 推出来（见 jobs.projectOf），跟分组标题上那个「项目」是同一个值。
+   *
+   * 为什么要单独存一份：分组标题只在文档里给人看，SQL 查不到；而「这个项目之前
+   * 怎么定的」是召回里最常见的一类问题，靠关键词碰运气命中率很低。
+   */
+  project: "custom-mem-project",
+  /**
    * 原文指针：`assets/mem-raw/Mac/workbuddy/xxx.p1-….jsonl#120-180`。
    * 前半段是附件真实路径（上传时内核会改名，所以必须存下来），后半段是轮次范围。
    * 物理路径指向一个写进去就不再变的文件，所以重写日志、重新切分都不会让指针错位。
@@ -395,20 +402,7 @@ export class Store {
       blockId = (await this.#writeInto(entries, meta, date, text)).blockId;
     }
     try {
-      await this.#sy.setBlockAttrs(blockId, {
-        [ATTR.status]: "current",
-        [ATTR.entity]: entry.entity || "",
-        [ATTR.type]: entry.type || "fact",
-        [ATTR.hash]: h,
-        [ATTR.source]: meta.source || "",
-        [ATTR.session]: meta.session || "",
-        [ATTR.date]: date,
-        [ATTR.confidence]: String(entry.confidence ?? 3),
-        ...(entry.brief ? { [ATTR.brief]: String(entry.brief) } : {}),
-        ...(meta.machine ? { [ATTR.machine]: String(meta.machine) } : {}),
-        ...(meta.raw ? { [ATTR.raw]: String(meta.raw) } : {}),
-        ...(meta.rawpart ? { [ATTR.rawpart]: String(meta.rawpart) } : {}),
-      });
+      await this.#sy.setBlockAttrs(blockId, entryAttrs({ entry, meta, date, hash: h }));
     } catch (e) {
       // 建块和设属性不是一次事务。属性没写成，这个块就是没有身份的孤儿：
       // 查不到、审不到、也不会被去重挡住。宁可删掉让上层重试。
@@ -514,6 +508,30 @@ export class Store {
   }
 }
 
+/**
+ * 一条记忆的全部属性。抽出来是为了能测：写块要连思源，属性怎么拼不该也得连。
+ *
+ * 可选项用展开写，不写空串：思源会把 `custom-mem-project=""` 当一个真属性存下来，
+ * 于是「没有项目」和「项目是空字符串」变成两种状态，SQL 里查起来就得两个条件。
+ */
+export function entryAttrs({ entry, meta, date, hash }) {
+  return {
+    [ATTR.status]: "current",
+    [ATTR.entity]: entry.entity || "",
+    [ATTR.type]: entry.type || "fact",
+    [ATTR.hash]: hash,
+    [ATTR.source]: meta.source || "",
+    [ATTR.session]: meta.session || "",
+    [ATTR.date]: date,
+    [ATTR.confidence]: String(entry.confidence ?? 3),
+    ...(entry.brief ? { [ATTR.brief]: String(entry.brief) } : {}),
+    ...(meta.machine ? { [ATTR.machine]: String(meta.machine) } : {}),
+    ...(meta.project ? { [ATTR.project]: String(meta.project) } : {}),
+    ...(meta.raw ? { [ATTR.raw]: String(meta.raw) } : {}),
+    ...(meta.rawpart ? { [ATTR.rawpart]: String(meta.rawpart) } : {}),
+  };
+}
+
 /** ial 是 `{: id="..." custom-mem-status="current"}` 这种形式，不是 JSON。 */
 export function attrOf(ial, key) {
   const m = String(ial ?? "").match(new RegExp(`${key}="([^"]*)"`));
@@ -532,6 +550,7 @@ function toHit(row) {
     type: attrOf(row.ial, ATTR.type),
     status: attrOf(row.ial, ATTR.status) || "unknown",
     source: attrOf(row.ial, ATTR.source),
+    project: attrOf(row.ial, ATTR.project),
     date: attrOf(row.ial, ATTR.date),
     confidence: Number(attrOf(row.ial, ATTR.confidence)) || 0,
     created: row.created,
