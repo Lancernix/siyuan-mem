@@ -207,9 +207,26 @@ mem push --once --all             # 首次回灌：一次推完，不等安静 1
 
 Gemini 那 1.0 是官方的建议：Gemini 3 调低温度反而会退化、循环。三家各按各的规矩来，不强行统一。
 
-分工是三层，别混：`src/wire/*.mjs` 只负责"这种协议怎么拼请求、怎么读回复"；`src/llm.mjs` 管策略（重试、JSON 回退、记账、预设）；调用方只关心文本和 token。
+分工是两层：`src/llm.mjs` 管策略（重试、JSON 回退、记账、预设、thinking 开关），
+传输交给 AI SDK。调用方只给 messages，要文本用 `chat()`，要对象用 `chatObject()`。
 
-为什么 OpenAI 那家走官方 SDK、另两家手写：SDK 只对同一种形状有收益，而且它零传递依赖、纯 JS，编进单文件只多 1MB。Anthropic / Gemini 的差异太大（system 顶层、模型名在路径里、角色叫 `model`、token 字段名不同），各自五六十行写完更好审，也不用为两家每年会 breaking 的 SDK 付维护费。三者都懒加载。
+**为什么从手写换取 AI SDK。** 原来三份手写 wire（openai / anthropic / gemini）能跑，
+但它们解决的是"协议变了我不怕"——这个项目一年也碰不到一次协议变更；真正的痛点是
+换厂商要改代码（火山额度到期换 DeepSeek），以及三家 JSON 方式不统一。
+
+关键开关是 `supportsStructuredOutputs`。2026-11-05 在火山 plan 端点上实测：
+
+| 模式 | 实际发出的 response_format | 结果 |
+|---|---|---|
+| 不开 | `{"type":"json_object"}` | 模型自己发明键名（`{"条目":[{"主题":…}]}`），schema 校验失败 |
+| 开 | `{"type":"json_schema",…}` | 字段、枚举全部按 schema 返回，服务端强制 |
+
+所以这个开关是必开的。不开等于把"字段由谁保证"从服务端退回给提示词。
+另外火山还有个怪要求：json_object 模式下 prompt 里必须出现 "json" 字样，否则直接 400。
+
+代价说清楚：依赖从 1 个变成 5 个（`ai` + 三个 provider 包 + `zod`），镜像大一圈；
+SDK 自带重试，必须在 `generateText` 里显式 `maxRetries: 0` 关掉——它默认重试两次，
+且不认我们的 Retry-After，结果是"日志上 attempts=1，实际打了三次"（实测踩过）。
 
 预设十家：`deepseek / qwen / moonshot / zhipu / openai / openrouter / anthropic / gemini / ollama / lmstudio`（本地两家不要 key）。别家的端点自己给：`mem model use <名字> --base <url> --wire <协议>`。
 

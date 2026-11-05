@@ -6,8 +6,9 @@
  */
 
 import { createHash } from "node:crypto";
+import { z } from "zod";
 
-import { chat, hasModel } from "./llm.mjs";
+import { chat, chatObject, hasModel } from "./llm.mjs";
 import { event } from "./log.mjs";
 
 const STOP = new Set([
@@ -366,6 +367,26 @@ export function planBatches(exchanges, budget = DEFAULT_MAX_CHARS) {
   return out;
 }
 
+/**
+ * 抽取结果的 schema。交给 AI SDK 之后由服务端强制（火山走 json_schema 模式），
+ * 不再靠"prompt 里写死了字段名，模型大概会照做"。
+ *
+ * 字段全部 required：少一个字段就等于这条记忆不完整，宁可让这一批失败重来。
+ * confidence 这里放宽成 1-5 的整数校验由后面 clamp 兜，不在这里卡死——
+ * 模型偶尔给 0.95，卡死会把整批丢掉，为一个小数不值得。
+ */
+const ENTRIES_SCHEMA = z.object({
+  entries: z.array(
+    z.object({
+      brief: z.string().describe("30 字以内的结论摘要"),
+      text: z.string().describe("一条记忆，2-4 句，自带主语，上限 300 字"),
+      entity: z.string().describe("话题，名词短语，2-6 字"),
+      type: z.enum(["decision", "fact", "preference", "reference"]),
+      confidence: z.number().describe("1-5，5 表示明确结论"),
+    })
+  ),
+});
+
 async function callModel(cfg, batch, entityShot = [], part = null) {
   // 告诉它这是第几段：不说的话，模型会以为整场对话就这一段，
   // 于是一段里能写七八条，后面的段落又写七八条，同一件事被总结三遍。
@@ -389,15 +410,16 @@ async function callModel(cfg, batch, entityShot = [], part = null) {
   if (drafted) heads.push(drafted);
   const system = heads.join("\n\n");
 
-  const r = await chat(cfg, {
+  const r = await chatObject(cfg, {
     messages: [
       { role: "system", content: system },
       { role: "user", content: dialog },
     ],
-    json: true,
+    schema: ENTRIES_SCHEMA,
     tag: "extract",
   });
-  const parsed = parseEntries(r.text);
+  // 有对象就用对象（字段是服务端按 schema 强制的）；退回文本模式时再自己解析。
+  const parsed = r.object ? parseEntries(JSON.stringify(r.object)) : parseEntries(r.text);
   // 解析不出来就整批算失败：宁可退回规则抽取（并让会话留在队列里重试），
   // 也不能"零条 + 成功"地归档掉。
   if (!parsed.ok) {
