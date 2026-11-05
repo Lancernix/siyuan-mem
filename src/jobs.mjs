@@ -7,7 +7,7 @@
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename } from "node:path";
-import { loadConfig, loadOffsets, saveOffsets, offsetsOf, machineId } from "./config.mjs";
+import { loadConfig, loadOffsets, saveOffsets, offsetsOf, machineId, slicePlan } from "./config.mjs";
 import { hasModel } from "./llm.mjs";
 import { SiYuan } from "./siyuan.mjs";
 import { Store } from "./store.mjs";
@@ -105,8 +105,10 @@ export function enqueueLog(file, { format = "", quietSeconds = 180 } = {}) {
   const offsets = offsetsOf(all, machineId());
   const st = statSync(file);
   const prev = offsets[file];
-  const fresh = prev && st.size >= prev.bytes && log.turns.length >= prev.turns;
-  const turns = fresh ? log.turns.slice(prev.turns) : log.turns;
+  // 和 push 用同一套判断：重写（mtime 变了、轮数没涨）就整份重读。
+  // 这里原来只看体积和轮数，同尺寸改写会每轮空转却不投递。
+  const plan = slicePlan(prev, { size: st.size, mtime: st.mtimeMs }, log.turns.length);
+  const turns = log.turns.slice(plan.from);
   const before = log.turns.length - turns.length;
   if (!turns.length) return { harness: log.harness, added: 0, before, upToDate: true };
 

@@ -293,3 +293,23 @@ export function saveConfig(patch) {
   return merged;
 }
 
+
+/**
+ * 该从第几轮开始切，以及这个文件是不是被重写过。
+ *
+ * 两个调用方（push、enqueueLog）原来各写一遍 `size >= prev.bytes && turns >= prev.turns`，
+ * 于是"内容改长但轮数没变"会被判成 append：切出来是空的，接着新偏移被写回去，
+ * 新内容永久丢失，而且全程不报错。
+ *
+ * 判据改成"mtime 变了 且 轮数没涨"——不管体积变大变小，都是重写。整份重读，
+ * 重复的部分交给中心按内容哈希挡掉。
+ */
+export function slicePlan(prev, { size = 0, mtime = 0 } = {}, turnsLen = 0) {
+  const seen = prev?.turns ?? 0;
+  if (!prev) return { from: 0, rewritten: false };
+  if (prev.mtimeMs != null && prev.mtimeMs !== mtime && turnsLen <= seen) {
+    return { from: 0, rewritten: true };
+  }
+  if (size >= (prev.bytes ?? 0) && turnsLen >= seen) return { from: seen, rewritten: false };
+  return { from: 0, rewritten: false };
+}

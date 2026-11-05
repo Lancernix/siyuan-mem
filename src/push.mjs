@@ -10,7 +10,7 @@
  * 这里不碰模型、不碰思源，所以边缘机器只需要一个可执行文件和一个地址。
  */
 import { statSync } from "node:fs";
-import { loadConfig, loadOffsets, saveOffsets, offsetsOf, machineId } from "./config.mjs";
+import { loadConfig, loadOffsets, saveOffsets, offsetsOf, machineId, slicePlan } from "./config.mjs";
 import { listSessions } from "./harness.mjs";
 import { readLog } from "./readers/index.mjs";
 
@@ -18,18 +18,6 @@ import { readLog } from "./readers/index.mjs";
  * 按字符数切块。一个会话可能有几千轮，单次请求太大会顶到服务端上限，
  * 切开还能让中心更早开始抽第一批。
  */
-/**
- * 文件被重写了吗？体积没长（或变小）+ mtime 变了＝是。
- *
- * 单独抽出来是为了能测：这个判断错了不会报错，只会安静地少推一段内容，
- * 或者每轮把同一个文件重读一遍。
- */
-export function isRewrite(prev, s) {
-  if (!prev || prev.mtimeMs == null) return false;
-  if (prev.mtimeMs === s.mtime) return false;
-  return s.size <= (prev.bytes ?? 0);
-}
-
 export function splitTurns(turns, maxChars = 800_000) {
   const out = [];
   let cur = [];
@@ -77,7 +65,9 @@ async function request(url, { method = "GET", token = "", body, timeoutMs = 120_
 /** 只验地址和 token，不发会话。 */
 export async function pingPush({ to, token }) {
   const base = String(to).replace(/\/+$/, "");
-  const info = await request(`${base}/api/ping`);
+  // ping 现在也要求 token（它原来会白告 auth 状态和队列长度）。不带的话
+  // `mem push --test` 会在第一步就被自己的鉴权打回，看着像地址配错了。
+  const info = await request(`${base}/api/ping`, { token });
   const probe = await request(`${base}/api/ingest?probe=1`, { method: "POST", token });
   return { ...info, ...probe };
 }
@@ -140,13 +130,8 @@ export async function pushOnce({
     }
 
     const prev = offsets[s.file];
-    // 体积没长、甚至变小，但 mtime 变了：文件被重写过（轮转、同名覆盖、手工改）。
-    // 这时候不能走 slice(prev.turns) —— 切出来是空的，然后就走到下面把新 mtime
-    // 写进 offsets，下一轮直接跳过，新内容永久丢失。整份重读，重复的部分交给
-    // 中心按 ingestKey 的内容 hash 挡掉。
-    const rewritten = isRewrite(prev, s);
-    const fresh = !rewritten && prev && s.size >= prev.bytes && log_.turns.length >= (prev.turns ?? 0);
-    const turns = fresh ? log_.turns.slice(prev.turns ?? 0) : log_.turns;
+    const plan = slicePlan(prev, { size: s.size, mtime: s.mtime }, log_.turns.length);
+    const turns = log_.turns.slice(plan.from);
     if (!turns.length) {
       offsets[s.file] = { bytes: s.size, mtimeMs: s.mtime, turns: log_.turns.length, at: Date.now() };
       sum.skipped++;

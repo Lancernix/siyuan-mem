@@ -22,7 +22,7 @@ import { startUi } from "./ui.mjs";
 import { install, uninstall, serviceStatus, systemdUnit, PLIST_PATH } from "./service.mjs";
 import { pushOnce, pushWatch, pingPush } from "./push.mjs";
 import { startMcp } from "./mcp.mjs";
-import { history as promptHistory, PROMPT_PATH, resetPrompt, savePrompt } from "./prompt.mjs";
+import { checkPrompt, history as promptHistory, PROMPT_PATH, resetPrompt, restore, savePrompt } from "./prompt.mjs";
 
 const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 
@@ -342,7 +342,7 @@ async function cmdForget(args) {
   console.log(`已标为 superseded：${id}`);
 }
 
-async function cmdPrompt(args) {
+async function cmdPrompt(args, flags = {}) {
   const sub = args[0] ?? "status";
   const st = promptState();
 
@@ -362,6 +362,12 @@ async function cmdPrompt(args) {
     const file = args[1];
     if (!file) throw new Error("用法：mem prompt set <文件>（传 - 从标准输入读）");
     const text = file === "-" ? readFileSync(0, "utf8") : readFileSync(file, "utf8");
+    // 缺 json 字样是硬伤：火山等端点在 json_object 模式下直接 400，整批失败。
+    // 其余体检项只提醒——有人就是要写短一点，不该拦。
+    const warns = checkPrompt(text);
+    if (warns.some((w) => /json/.test(w)) && !flags.force) {
+      throw new Error(`${warns.join("\n")}\n\n确认要这样存，加 --force。`);
+    }
     const r = savePrompt(text);
     const after = promptState();
     console.log(`已写入 ${r.path}`);
@@ -376,12 +382,19 @@ async function cmdPrompt(args) {
     console.log(`已删除覆盖，回到内置（备份 ${r.backup}）`);
     return;
   }
+  if (sub === "restore") {
+    const name = args[1];
+    if (!name) throw new Error("用法：mem prompt restore <版本文件名>（mem prompt history 看有哪些）");
+    const r = restore(name);
+    console.log(`已还原到 ${name}\n当前版本备份在 ${r.backup || "（无）"}`);
+    return;
+  }
   if (sub === "history") {
     const h = promptHistory();
     console.log(h.length ? h.join("\n") : "还没有历史版本（只在你 set/reset 过之后才会有）");
     return;
   }
-  throw new Error(`不认识的子命令：${sub}（可用：show / set / reset / history）`);
+  throw new Error(`不认识的子命令：${sub}（可用：show / set / restore / reset / history）`);
 }
 
 async function cmdModel(args, flags) {
@@ -973,7 +986,7 @@ async function main() {
     case "forget":
       return cmdForget(rest);
     case "prompt":
-      return cmdPrompt(rest);
+      return cmdPrompt(rest, flags);
     case "model":
       return cmdModel(rest, flags);
     case "ui":
