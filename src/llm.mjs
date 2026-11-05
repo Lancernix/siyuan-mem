@@ -18,7 +18,6 @@
 import { appendFileSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { HOME_DIR, CONFIG_PATH, ensureDirs } from "./config.mjs";
-import { loadCatalogSync, findProvider, wireOf, envKeyOf } from "./catalog.mjs";
 
 /**
  * 各家预设。baseUrl 写到版本号为止，具体路径由 wire 拼。
@@ -64,18 +63,24 @@ export const USAGE_PATH = join(HOME_DIR, "usage.jsonl");
 export function resolveModel(cfg) {
   const m = cfg?.model ?? {};
   const preset = PROVIDERS[m.provider] ?? null;
-  // 预设里没有的 provider 去 models.dev 目录里找：那边有 baseUrl、env 变量名、模型清单，
-  // 比手抄可靠，也不会因为哪家换了域名就失效。
-  const fromCatalog = preset ? null : findProvider(loadCatalogSync().providers, m.provider);
-  // config 里写了 key 就不看环境变量；没写才去预设/目录里找变量名。
-  const envKey = m.apiKey ? null : preset ? presetEnvKey(m.provider) : envKeyOf(fromCatalog);
+  // 不在预设里也能用，但必须自己写 baseUrl。我们认协议不认厂商——三家协议的形状
+  // 只有三种，端点属于配置。（原来这里会去 models.dev 那份 233 家的目录里捞 baseUrl：
+  // 5.6MB 的 JSON，解析进内存要 50MB，就为兜这一行，不值。）
+  const unknown = !preset && !m.baseUrl;
+  // config 里写了 key 就不看环境变量；没写才去预设里找变量名。
+  const envKey = m.apiKey ? null : preset ? presetEnvKey(m.provider) : null;
 
   const provider = m.provider ?? "custom";
   const keyless = preset?.keyless || (!m.apiKey && Boolean(envKey));
   return {
     provider,
-    wire: m.wire || preset?.wire || (fromCatalog ? wireOf(fromCatalog) : null) || "openai",
-    baseUrl: (m.baseUrl || preset?.baseUrl || fromCatalog?.api || "").replace(/\/+$/, ""),
+    wire: m.wire || preset?.wire || "openai",
+    baseUrl: (m.baseUrl || preset?.baseUrl || "").replace(/\/+$/, ""),
+    // 配置有问题时不在这里抛：status / mem model 还得能跑，让人看到是哪一行错了。
+    // 真发请求时由 chat() 抛。
+    problem: unknown
+      ? `不认识的 provider「${m.provider}」，也没有配 baseUrl。内置这几家：${Object.keys(PROVIDERS).join(" / ")}；别家写 model.baseUrl（mem model use <名字> --base <url> --wire <协议>）`
+      : "",
     model: m.name || preset?.model || "",
     apiKey: m.apiKey || envKey?.value || "",
     apiKeyFrom: envKey?.name ?? (m.apiKey ? "config" : ""),
@@ -161,6 +166,8 @@ async function withRetry(m, adapter, opts) {
  */
 export async function chat(cfg, { messages, json = false, maxTokens, tag = "" } = {}) {
   const m = resolveModel(cfg);
+  // problem 优先：不认识的 provider 也要说清楚是「哪一家不认识」，不能笼统报「没配模型」。
+  if (m.problem) throw new Error(m.problem);
   if (!hasModel(cfg)) throw new Error("没有配置模型：mem model use <provider> --key ...");
   const loader = WIRES[m.wire];
   if (!loader) throw new Error(`不认识的协议：${m.wire}（可用：${Object.keys(WIRES).join(", ")}）`);
@@ -245,17 +252,16 @@ export async function probe(cfg) {
 /** 把预设写进配置。key 只写进 home 下的 config.json（0600），不进项目目录。 */
 export function saveModelChoice(provider, { apiKey, model, wire, base } = {}) {
   const preset = PROVIDERS[provider];
-  // 预设之外还有目录里的七十来家：有 api 地址和 env 变量名就够用了。
-  const fromCatalog = preset ? null : findProvider(loadCatalogSync().providers, provider);
-  if (!preset && !fromCatalog) {
+  // 预设之外也能用，但必须给端点：我们认协议不认厂商，端点写不出来就没得接。
+  if (!preset && !base) {
     throw new Error(
-      `不认识的 provider：${provider}。\n  预设：${Object.keys(PROVIDERS).join(", ")}\n  或先 mem model refresh 拉目录（models.dev，七十多家）`
+      `不认识的 provider：${provider}。\n  内置：${Object.keys(PROVIDERS).join(", ")}\n  别家请带上端点：mem model use ${provider} --base https://… --wire openai|anthropic|gemini`
     );
   }
-  // --base 用来接目录里没有的端点（比如同一家的另一个 API 面：/api/v3 与 /api/plan/v3）。
-  const baseUrl = String(base || preset?.baseUrl || fromCatalog?.api || "").replace(/\/+$/, "");
+  // --base 用来接预设之外的端点（比如同一家的另一个 API 面：/api/v3 与 /api/plan/v3）。
+  const baseUrl = String(base || preset?.baseUrl || "").replace(/\/+$/, "");
   const name = model || preset?.model || "";
-  if (!name) throw new Error(`目录里的 ${provider} 没有默认模型，加 --name 指定一个：mem model list ${provider}`);
+  if (!name) throw new Error(`没有默认模型，加 --name 指定一个：mem model use ${provider} --name <模型>`);
   ensureDirs();
   let cfg = {};
   if (existsSync(CONFIG_PATH)) cfg = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
