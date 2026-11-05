@@ -36,6 +36,7 @@ export const TOOL = {
       },
       limit: { type: "integer", minimum: 1, maximum: 20, description: "最多返回几条，默认 6。" },
       topic: { type: "string", description: "只查某个话题（实体名）下的条目。" },
+      project: { type: "string", description: "只查某个项目下的条目（按会话的工作目录归的）。" },
       days: { type: "integer", description: "只看最近 N 天。" },
       include_superseded: {
         type: "boolean",
@@ -53,7 +54,10 @@ export function formatHits(hits, terms = []) {
   }
   const lines = [`找到 ${hits.length} 条` + (terms.length ? `（检索词：${terms.join(" / ")}）` : "") + "："];
   hits.forEach((h, i) => {
-    const head = [h.entity || "未归类", h.date || "", h.type || ""].filter(Boolean).join(" · ");
+    // 话题和项目经常是同一个词（「MiniWMS」既当话题又当目录），重复写两遍很吵。
+    const head = [h.entity || "未归类", h.project && h.project !== h.entity ? `@${h.project}` : "", h.date || "", h.type || ""]
+      .filter(Boolean)
+      .join(" · ");
     lines.push("");
     lines.push(`${i + 1}. ${head}`);
     if (h.brief) lines.push(`   摘要：${h.brief}`);
@@ -113,6 +117,7 @@ export async function handleMessage(msg, { search } = {}) {
         q,
         limit: a.limit,
         topic: a.topic || undefined,
+        project: a.project || undefined,
         days: a.days,
         // include_superseded → status=""（过时的也要）；否则交给默认的 current。
         status: a.include_superseded ? "" : undefined,

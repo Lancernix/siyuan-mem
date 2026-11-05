@@ -31,6 +31,7 @@ const ATTR = {
   raw: "custom-mem-raw",
   session: "custom-mem-session",
   source: "custom-mem-source",
+  project: "custom-mem-project",
 };
 
 const attr = (ial, k) => new RegExp(k + '="([^"]*)"').exec(ial ?? "")?.[1] ?? "";
@@ -78,6 +79,7 @@ export async function searchEntries(opts = {}) {
   const status = opts.status === "" ? "" : opts.status || "current";
   if (status) conds.push(`ial LIKE '%${ATTR.status}="${status}"%'`);
   if (opts.topic) conds.push(`ial LIKE '%${ATTR.entity}="${String(opts.topic).replace(/'/g, "''")}"%'`);
+  if (opts.project) conds.push(`ial LIKE '%${ATTR.project}="${String(opts.project).replace(/'/g, "''")}"%'`);
   if (opts.type) conds.push(`ial LIKE '%${ATTR.type}="${String(opts.type).replace(/'/g, "''")}"%'`);
   // 日期不在 SQL 里比：ial 里是字符串，SQL 比大小要额外解析；
   // 拿回来在内存里筛更直接（候选最多 300 条）。
@@ -118,6 +120,7 @@ export async function searchEntries(opts = {}) {
         raw,
         session: attr(r.ial, ATTR.session),
         source: attr(r.ial, ATTR.source),
+        project: attr(r.ial, ATTR.project),
         score: scoreOf({ text, brief, date }, terms, entity),
       };
     })
@@ -162,6 +165,7 @@ export async function remoteSearch(opts = {}) {
     q: opts.q,
     limit: opts.limit,
     topic: opts.topic,
+    project: opts.project,
     type: opts.type,
     days: opts.days,
     // 空串 = 连过时的一起看；undefined 交给服务端按默认（current）处理。

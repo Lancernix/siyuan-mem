@@ -145,6 +145,7 @@ export function startIngest({
         q,
         limit: p.limit,
         topic: p.topic || undefined,
+        project: p.project || undefined,
         type: p.type || undefined,
         days: Number.isFinite(days) && days > 0 ? days : undefined,
         status: all ? "" : p.status || undefined,

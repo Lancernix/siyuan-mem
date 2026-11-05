@@ -65,7 +65,7 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
   mem service uninstall        卸载
   mem service unit             打印 systemd 单元（Linux 用，不落盘）
   mem log [stats|tail|grep]    结构化事件日志：stats 看汇总，tail 看最近，grep 搜字段
-  mem search <关键词>           召回：查记忆条目（--limit=8 / --topic= / --type= / --days= / --json）
+  mem search <关键词>           召回：查记忆条目（--limit=8 / --topic= / --project= / --type= / --days= / --json）
   mem search --to URL <关键词>  从中心查（边缘机器用；token 取 push.token 或 --token）
   mem mcp [--to URL] [--token T]
                                起 MCP server（stdio），给 Claude Code 等 harness 调召回
@@ -327,7 +327,7 @@ async function cmdRemember(flags, words) {
       type: flags.type ?? "fact",
       confidence: Number(flags.confidence) || 5,
     },
-    { source: "manual", session: "", date: "" }
+    { source: "manual", session: "", date: "", project: flags.project ?? "" }
   );
   console.log(r.duplicate ? `已存在：${r.id}` : `已写入：${r.id}`);
 }
@@ -877,6 +877,7 @@ async function cmdSearch(args, flags) {
         q,
         limit: flags.limit,
         topic: flags.topic,
+        project: flags.project,
         type: flags.type,
         days: flags.days,
         status: flags.all ? "" : undefined,
@@ -885,6 +886,7 @@ async function cmdSearch(args, flags) {
         q,
         limit: flags.limit,
         topic: flags.topic,
+        project: flags.project,
         type: flags.type,
         days: flags.days,
         // --all 连过时的也一起看：查"当初为什么改"时需要，默认只给在用的。
