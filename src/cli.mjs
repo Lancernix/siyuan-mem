@@ -59,7 +59,7 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
   mem center [status]          看接收端（给别的机器推会话用）
   mem center setup [--port 7788] [--bind 0.0.0.0] [--rotate]
                                把本机设成中心：开接收端、生成 token、打印边缘命令
-  mem push [--to URL] [--token T] [--once|--watch] [--dry] [--all] [--test]
+  mem push [--to URL] [--token T] [--once|--watch] [--dry] [--all] [--from-scratch] [--test]
                                边缘机器：把本机会话推给中心（默认只推安静 3 分钟的）
   mem ui [--port 7787]         起本地面板（只读；点"跑一轮"会自己抢锁）
   mem service [status]         看系统服务状态
@@ -87,7 +87,15 @@ async function cmdInit(flags) {
   const { store } = make();
   const ids = await store.init({ force: Boolean(flags.force) });
   console.log("笔记本与文档就绪：");
-  for (const [k, v] of Object.entries(ids)) console.log(`  ${k.padEnd(8)} ${v}`);
+  for (const [k, v] of Object.entries(ids)) {
+    // months 是一组按月分的文档（{ "2026-11": id }），直接打印会变成 [object Object]。
+    if (v && typeof v === "object") {
+      const keys = Object.keys(v);
+      console.log(`  ${k.padEnd(8)} ${keys.length} 个：${keys.slice(0, 3).join(" ")}${keys.length > 3 ? " …" : ""}`);
+    } else {
+      console.log(`  ${k.padEnd(8)} ${v}`);
+    }
+  }
 }
 
 async function cmdStatus() {
@@ -598,7 +606,8 @@ async function cmdPush(flags, args) {
 
   if (flags.test) {
     const r = await pingPush({ to, token });
-    console.log(`通了：${to}  队列 ${r.queue} 个  ${r.auth ? "需要 token（已带）" : "服务端没设 token"}`);
+    // 走到这里说明 ping 和 probe 都过了——两个接口都要 token，所以不用再猜「服务端设没设」。
+    console.log(`通了：${to}  队列 ${r.queue} 个  token 有效`);
     return;
   }
 
@@ -611,6 +620,8 @@ async function cmdPush(flags, args) {
     // 0 是合法值（用完就推），所以不能用 || 兜底
     quietSeconds: flags.quiet !== undefined ? Number(flags.quiet) : cfg.push?.quietSeconds ?? 180,
     maxChars: cfg.push?.maxCharsPerRequest ?? 800_000,
+    // 本机的推送进度对"另一个中心"没有意义：换中心时要全量重推，重复的由中心挡。
+    fromScratch: Boolean(flags["from-scratch"]),
     log: console.log,
   };
 

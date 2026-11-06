@@ -88,6 +88,7 @@ export async function pushOnce({
   quietSeconds = 180,
   maxChars = 800_000,
   limit = 8,
+  fromScratch = false,
 } = {}) {
   if (!to) throw new Error("没有中心地址：mem push --to http://中心:7788，或者写进 config 的 push.to");
 
@@ -103,7 +104,9 @@ export async function pushOnce({
     const prev = offsets[s.file];
     // 只比体积会漏掉"同尺寸重写"（日志被改写、同一段长度刚好一样）。
     // 老记录没有 mtimeMs：退回只比体积，别把"不知道"当成"变了"。
-    if (prev && prev.bytes === s.size && (prev.mtimeMs == null || prev.mtimeMs === s.mtime)) continue;
+    // fromScratch：换了个中心（本机 → 服务器）时，本机的进度对那边毫无意义，
+    // 全部当成没推过。重复的部分由中心按内容哈希挡掉。
+    if (!fromScratch && prev && prev.bytes === s.size && (prev.mtimeMs == null || prev.mtimeMs === s.mtime)) continue;
     // 还在写的会话先别推：切出来全是半句话，而且下一轮还得再推一遍。
     if (now - s.mtime < quietMs && (!prev || s.size >= prev.bytes)) continue;
     candidates.push(s);
@@ -130,7 +133,9 @@ export async function pushOnce({
     }
 
     const prev = offsets[s.file];
-    const plan = slicePlan(prev, { size: s.size, mtime: s.mtime }, log_.turns.length);
+    const plan = fromScratch
+      ? { from: 0, rewritten: false }
+      : slicePlan(prev, { size: s.size, mtime: s.mtime }, log_.turns.length);
     const turns = log_.turns.slice(plan.from);
     if (!turns.length) {
       offsets[s.file] = { bytes: s.size, mtimeMs: s.mtime, turns: log_.turns.length, at: Date.now() };

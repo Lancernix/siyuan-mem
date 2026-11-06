@@ -1,7 +1,7 @@
 # 中心：跑在服务器上，和思源同一个 Docker 网络
 #
-# 只装了一个运行时依赖（openai），镜像是十几行的 node:alpine，
-# 不需要编译、没有原生模块，所以 arm64 / amd64 都能直接 build。
+# 依赖只有 AI SDK 那几个包（ai / @ai-sdk/* / zod），全是纯 JS、没有原生模块，
+# 所以 arm64 / amd64 都能直接 build，不需要编译工具链。
 FROM node:22-alpine
 
 # 日志按本地日期分文件，容器默认 UTC 会让「今天」错 8 小时。
