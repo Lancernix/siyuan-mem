@@ -1,6 +1,8 @@
 # 中心节点：一个 mem 容器，接在思源自己的网络上。
 #
 # 思源不用改。mem 只是它的一个客户端，走 6806 那套 HTTP API。
+name: siyuan-mem
+
 services:
   mem:
     # 构建上下文是仓库根（要拷 src 和 package.json），Dockerfile 在 deploy/ 下。
@@ -26,6 +28,6 @@ services:
 networks:
   siyuan:
     external: true
-    # 思源 compose 默认建的网叫 <项目名>_default。查一下再填：
-    #   docker network ls | grep -i siyuan
-    name: ${SIYUAN_NET:-siyuan_default}
+    # 这台机器上思源和 nginx 共用一个自建网络 web_common（不是 compose 默认的
+    # <项目名>_default）。换机器时先查：docker network ls | grep -i -E "siyuan|web"
+    name: ${SIYUAN_NET:-web_common}
