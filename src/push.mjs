@@ -156,7 +156,9 @@ export async function pushOnce({
     let sent = 0;
     let dups = 0;
     try {
-      let start = fresh ? (prev.turns ?? 0) : 0;
+      // 起始轮次必须和切片用的同一个 from，否则原文指针会错位：
+      // 中心那边用它算「第几轮」，错一次整套指针都指偏。
+      let start = plan.from;
       for (const chunk of chunks) {
         const r = await request(`${String(to).replace(/\/+$/, "")}/api/ingest`, {
           method: "POST",
