@@ -5,7 +5,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { plistFor, resolveRunner, systemdUnit, PLIST_PATH } from "../src/service.mjs";
+import { install, plistFor, resolveRunner, systemdUnit, PLIST_PATH } from "../src/service.mjs";
 
 test("常驻版：KeepAlive 只对失败重启，带 ThrottleInterval", () => {
   const p = plistFor({});
@@ -52,4 +52,24 @@ test("systemd 单元是打印而不是安装", () => {
   assert.match(unit, /ExecStart=\//);
   // 定时版只是 cron 的一行注释，不该伪装成 systemd service
   assert.match(systemdUnit({ intervalMinutes: 30 }), /\*\/30 \* \* \* \*/);
+});
+
+test("边缘那套：独立的 label，跑 push --watch，日志也是单独一份", () => {
+  const p = plistFor({ mode: "push" });
+  assert.match(p, /<key>Label<\/key><string>com\.siyuan\.mem\.push<\/string>/);
+  assert.match(p, /<string>push<\/string>\s*<string>--watch<\/string>/);
+  assert.match(p, /launchd\.push\.out/);
+  // 不能和中心混用一个 label：停中心不该把边缘的推送一起停掉。
+  assert.doesNotMatch(p, /<key>Label<\/key><string>com\.siyuan\.mem<\/string>/);
+  assert.doesNotMatch(p, /<string>serve<\/string>/);
+});
+
+test("边缘版和中心版用不同的 plist 路径", () => {
+  // 路径不在 plist 正文里，是 install() 返回的那个。两个文件必须分开，
+  // 否则装边缘会覆盖掉中心。
+  const serve = install({ print: true });
+  const push = install({ mode: "push", print: true });
+  assert.ok(serve.path.endsWith("com.siyuan.mem.plist"));
+  assert.ok(push.path.endsWith("com.siyuan.mem.push.plist"));
+  assert.notEqual(serve.path, push.path);
 });

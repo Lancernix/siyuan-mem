@@ -19,7 +19,7 @@ import { listSessions, summarize } from "./harness.mjs";
 import { open, enqueueLog, processQueue } from "./jobs.mjs";
 import { serve, acquire, release, lockInfo } from "./serve.mjs";
 import { startUi } from "./ui.mjs";
-import { install, uninstall, serviceStatus, systemdUnit, PLIST_PATH } from "./service.mjs";
+import { install, uninstall, serviceStatus, systemdUnit, PLIST_PATH, PLIST_PUSH_PATH } from "./service.mjs";
 import { pushOnce, pushWatch, pingPush } from "./push.mjs";
 import { startMcp } from "./mcp.mjs";
 import { checkPrompt, history as promptHistory, PROMPT_PATH, resetPrompt, restore, savePrompt } from "./prompt.mjs";
@@ -475,7 +475,22 @@ async function cmdModel(args, flags) {
 
 async function cmdService(args, flags) {
   const sub = args[0] ?? "status";
+  // 边缘机器上只有 push，没有 serve。所以两个服务共用一套命令，靠 --push 区分。
+  const mode = flags.push ? "push" : "serve";
+  const what = mode === "push" ? "推送（edge）" : "中心（serve）";
   if (sub === "status") {
+    if (flags.push) {
+      const s = serviceStatus("push");
+      console.log(`服务         ${what}`);
+      console.log(`plist        ${PLIST_PUSH_PATH}${s.installed ? "" : "（不存在）"}`);
+      console.log(`状态         ${s.running ? `运行中 pid ${s.pid}` : s.state ?? "未运行"}`);
+      if (s.note) console.log(`备注         ${s.note}`);
+      const cfg = loadConfig();
+      const to = cfg.push?.to ?? "";
+      console.log(`中心地址     ${to || "（没配：mem push --to … --save）"}`);
+      console.log(`token        ${cfg.push?.token ? "已配" : "（没配）"}`);
+      return;
+    }
     const s = serviceStatus();
     console.log(`plist        ${PLIST_PATH}${s.installed ? "" : "（不存在）"}`);
     console.log(`服务         ${s.running ? `运行中 pid ${s.pid}` : s.state ?? "未运行"}`);
@@ -496,6 +511,19 @@ async function cmdService(args, flags) {
   }
   if (sub === "install") {
     const minutes = Number(flags.interval) || 0;
+    if (mode === "push") {
+      const cfg = loadConfig();
+      const r = install({ mode: "push", print: Boolean(flags.print) });
+      if (!flags.print && !cfg.push?.to) {
+        throw new Error("先记住中心地址：mem push --to https://… --token … --save");
+      }
+      if (flags.print) return void console.log(r.plist);
+      console.log(`已写入 ${r.path}`);
+      console.log(`  常驻推送 → ${cfg.push.to}（每 2 分钟一轮，崩溃后 30 秒重试）`);
+      console.log(r.loaded ? "  已装载。看状态：mem service status --push" : `  但装载失败：${r.error}\n  ${r.hint}`);
+      if (!r.loaded) process.exitCode = 1;
+      return;
+    }
     const r = install({ intervalMinutes: minutes, print: Boolean(flags.print) });
     if (flags.print) return void console.log(r.plist);
     console.log(`已写入 ${r.path}`);
@@ -510,12 +538,12 @@ async function cmdService(args, flags) {
     return;
   }
   if (sub === "uninstall") {
-    const r = uninstall();
-    console.log(`已卸载，plist ${r.path} 已删除`);
+    const r = uninstall(mode);
+    console.log(`已卸载${what}，plist ${r.path} 已删除`);
     return;
   }
   if (sub === "unit") {
-    return void console.log(systemdUnit({ intervalMinutes: Number(flags.interval) || 0 }));
+    return void console.log(systemdUnit({ intervalMinutes: Number(flags.interval) || 0, mode }));
   }
   throw new Error(`不认识的子命令：${sub}（可用：status / install / uninstall / unit）`);
 }

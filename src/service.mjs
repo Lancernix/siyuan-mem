@@ -15,6 +15,14 @@ import { HOME_DIR } from "./config.mjs";
 
 export const LABEL = "com.siyuan.mem";
 export const PLIST_PATH = join(homedir(), "Library/LaunchAgents", `${LABEL}.plist`);
+
+/**
+ * 边缘机器上那个常驻的推送进程。跟中心是两个独立服务：中心跑 serve，
+ * 边缘只跑 push --watch。用两个 label 而不是一个带参数的，是因为它们的
+ * 生命周期完全不同——停中心不该把推送也停了。
+ */
+export const LABEL_PUSH = "com.siyuan.mem.push";
+export const PLIST_PUSH_PATH = join(homedir(), "Library/LaunchAgents", `${LABEL_PUSH}.plist`);
 const CLI = fileURLToPath(new URL("./cli.mjs", import.meta.url));
 
 /**
@@ -48,10 +56,16 @@ function srcNewerThan(binPath) {
   }
 }
 
-/** 首选单文件二进制（且不比源码旧）；否则退回 node 跑源码。 */
-export function resolveRunner() {
+/**
+ * 首选单文件二进制（且不比源码旧）；否则退回 node 跑源码。
+ *
+ * mode 决定这个进程干什么：中心是 serve，边缘是 push --watch。两种都从同一条
+ * 路里挑运行时，所以"换了 node 版本服务就跑不起来"这个坑只修一次。
+ */
+export function resolveRunner(mode = "serve") {
+  const argv = mode === "push" ? ["push", "--watch"] : ["serve"];
   const bin = join(HOME_DIR, "mem");
-  if (existsSync(bin) && !srcNewerThan(bin)) return { program: bin, args: ["serve"], kind: "binary" };
+  if (existsSync(bin) && !srcNewerThan(bin)) return { program: bin, args: argv, kind: "binary" };
   // 不用 mise 的 shim（脚本，launchd 里没有 mise 环境会找不到版本），
   // 也不用 process.execPath（可能是宿主 App 自带的那份，升级就换路径）。
   // 按稳定性排：mise 装的真身 > homebrew > 当前进程。
@@ -65,7 +79,7 @@ export function resolveRunner() {
   const node = cands.find((c) => existsSync(c)) ?? process.execPath;
   return {
     program: node,
-    args: [CLI, "serve"],
+    args: [CLI, ...argv],
     kind: existsSync(bin) ? "source-over-stale-binary" : "source",
   };
 }
@@ -74,8 +88,9 @@ function esc(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-export function plistFor({ intervalMinutes = 0 } = {}) {
-  const { program, args } = resolveRunner();
+export function plistFor({ intervalMinutes = 0, mode = "serve" } = {}) {
+  const { program, args } = resolveRunner(mode);
+  const label = mode === "push" ? LABEL_PUSH : LABEL;
   const sched = intervalMinutes
     ? `  <key>StartInterval</key><integer>${intervalMinutes * 60}</integer>\n`
     : `  <key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key><false/>\n  </dict>\n  <key>ThrottleInterval</key><integer>30</integer>\n`;
@@ -83,15 +98,15 @@ export function plistFor({ intervalMinutes = 0 } = {}) {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>${LABEL}</string>
+  <key>Label</key><string>${label}</string>
   <key>ProgramArguments</key>
   <array>
 ${[program, ...args].map((a) => `    <string>${esc(a)}</string>`).join("\n")}
   </array>
   <key>RunAtLoad</key><true/>
 ${sched}  <key>WorkingDirectory</key><string>${esc(homedir())}</string>
-  <key>StandardOutPath</key><string>${esc(join(HOME_DIR, "launchd.out"))}</string>
-  <key>StandardErrorPath</key><string>${esc(join(HOME_DIR, "launchd.err"))}</string>
+  <key>StandardOutPath</key><string>${esc(join(HOME_DIR, mode === "push" ? "launchd.push.out" : "launchd.out"))}</string>
+  <key>StandardErrorPath</key><string>${esc(join(HOME_DIR, mode === "push" ? "launchd.push.err" : "launchd.err"))}</string>
 </dict>
 </plist>
 `;
@@ -102,12 +117,13 @@ function launchctl(args) {
 }
 
 /** 服务当前状态：装了没、跑没跑、pid 多少。 */
-export function serviceStatus() {
-  const installed = existsSync(PLIST_PATH);
+export function serviceStatus(mode = "serve") {
+  const label = mode === "push" ? LABEL_PUSH : LABEL;
+  const installed = existsSync(mode === "push" ? PLIST_PUSH_PATH : PLIST_PATH);
   if (process.platform !== "darwin") return { installed, running: false, note: "非 macOS，看 systemd 那节" };
   let out = "";
   try {
-    out = launchctl(["print", `gui/${process.getuid()}/${LABEL}`]);
+    out = launchctl(["print", `gui/${process.getuid()}/${label}`]);
   } catch {
     // 区分"没装"和"装了但没装载"：前者要 install，后者只要 bootstrap 一次。
     return {
@@ -122,23 +138,25 @@ export function serviceStatus() {
   return { installed, loaded: true, running: state === "running", state, pid: pid ? Number(pid) : null };
 }
 
-export function install({ intervalMinutes = 0, print = false } = {}) {
-  const text = plistFor({ intervalMinutes });
-  if (print) return { plist: text, path: PLIST_PATH };
+export function install({ intervalMinutes = 0, print = false, mode = "serve" } = {}) {
+  const label = mode === "push" ? LABEL_PUSH : LABEL;
+  const path = mode === "push" ? PLIST_PUSH_PATH : PLIST_PATH;
+  const text = plistFor({ intervalMinutes, mode });
+  if (print) return { plist: text, path };
 
-  mkdirSync(dirname(PLIST_PATH), { recursive: true });
-  writeFileSync(PLIST_PATH, text);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, text);
 
-  if (process.platform !== "darwin") return { path: PLIST_PATH, note: "已写 plist，但这不是 macOS，跳过 launchctl" };
+  if (process.platform !== "darwin") return { path, note: "已写 plist，但这不是 macOS，跳过 launchctl" };
 
   // 先卸载同名的旧服务，否则会提示 already loaded。
   try {
-    launchctl(["bootout", `gui/${process.getuid()}/${LABEL}`]);
+    launchctl(["bootout", `gui/${process.getuid()}/${label}`]);
   } catch {}
   const errors = [];
   for (const args of [
-    ["bootstrap", `gui/${process.getuid()}`, PLIST_PATH],
-    ["load", "-w", PLIST_PATH], // 老系统只认这个
+    ["bootstrap", `gui/${process.getuid()}`, path],
+    ["load", "-w", path], // 老系统只认这个
   ]) {
     try {
       launchctl(args);
@@ -150,32 +168,34 @@ export function install({ intervalMinutes = 0, print = false } = {}) {
     }
     // 关键：launchctl 的退出码不可信。`load` 装失败也回 0（只往 stderr 打一句
     // "Load failed: 5"），所以必须回查一次 print 才算数。
-    if (serviceStatus().loaded) return { path: PLIST_PATH, loaded: true };
+    if (serviceStatus(mode).loaded) return { path, loaded: true };
     errors.push(`${args[0]}: 退出码 0 但服务没出现在 launchctl 里`);
   }
   // 两种都失败：最常见于在沙箱/无 GUI 会话里跑（报 Input/output error, code 5）。
   // 这时 plist 是好的，只是没装上，别谎报成功。
   return {
-    path: PLIST_PATH,
+    path,
     loaded: false,
     error: errors.join("；"),
-    hint: `在普通终端里执行：launchctl bootstrap gui/$(id -u) ${PLIST_PATH}`,
+    hint: `在普通终端里执行：launchctl bootstrap gui/$(id -u) ${path}`,
   };
 }
 
-export function uninstall() {
+export function uninstall(mode = "serve") {
+  const label = mode === "push" ? LABEL_PUSH : LABEL;
+  const path = mode === "push" ? PLIST_PUSH_PATH : PLIST_PATH;
   if (process.platform === "darwin") {
     try {
-      launchctl(["bootout", `gui/${process.getuid()}/${LABEL}`]);
+      launchctl(["bootout", `gui/${process.getuid()}/${label}`]);
     } catch {}
   }
-  if (existsSync(PLIST_PATH)) unlinkSync(PLIST_PATH);
-  return { path: PLIST_PATH };
+  if (existsSync(path)) unlinkSync(path);
+  return { path };
 }
 
 /** Linux 用：把等价单元打印出来，不落盘。 */
-export function systemdUnit({ intervalMinutes = 0 } = {}) {
-  const { program, args } = resolveRunner();
+export function systemdUnit({ intervalMinutes = 0, mode = "serve" } = {}) {
+  const { program, args } = resolveRunner(mode);
   const exec = [program, ...args].join(" ");
   if (intervalMinutes) {
     return `# ~/.config/systemd/user/siyuan-mem.{service,timer}，或直接 cron：
