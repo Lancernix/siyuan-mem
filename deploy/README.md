@@ -18,8 +18,9 @@ Mac (Claude Code / DSH / WorkBuddy)
 ## 0. 先看清服务器上的两件事
 
 ```bash
-# 思源在哪个网络里（compose 默认建 <项目名>_default）
-docker network ls | grep -i siyuan
+# 思源在哪个网络里。别只看 siyuan：很多机器上是所有容器共用一个自建网络
+# （这台就是 web_common），compose 默认建的 <项目名>_default 只是其中一种。
+docker network ls | grep -i -E "siyuan|web"
 
 # 容器的名字，配置里 baseUrl 要用它当主机名
 docker ps --format '{{.Names}}\t{{.Ports}}' | grep -i siyuan
@@ -62,16 +63,25 @@ openssl rand -base64 24
 SIYUAN_NET=<上一步查到的网络名> docker compose up -d --build
 
 # 能看到思源版本和条目数，说明连通了
-docker compose exec mem status
+docker compose exec mem node /app/src/cli.mjs status
 
 # 建笔记本「90-记忆」和条目/实体那几个文档（幂等，重复跑没关系）
-docker compose exec mem init
+docker compose exec mem node /app/src/cli.mjs init
 ```
+
+**`node /app/src/cli.mjs` 不能省。** `docker compose exec mem init` 里的 `init`
+会被当成一个独立的可执行文件（alpine 的 busybox init），报的错是
+`init: must be run as PID 1`——跟本程序没有任何关系。exec 不走 ENTRYPOINT，
+所以每条命令都要自己带上 node 和脚本路径。后面所有 `docker compose exec mem …`
+都是这个写法。
+
+init 第一次有可能报 `document metadata is not ready`：笔记本刚建，思源的后台
+索引还没跟上。等几秒重跑一次就好。
 
 ## 4. 确认接收端开着
 
 ```bash
-docker compose exec mem center status
+docker compose exec mem node /app/src/cli.mjs center status
 ```
 
 应该看到 `0.0.0.0:7788` 和 token。没开就去配置里把 `ingest.enabled` 设成 true 再
@@ -86,9 +96,14 @@ docker compose exec mem center status
 # 先验地址和 token，不传数据
 mem push --to https://<域名>:7788 --token <ingest.token> --test
 
-# 全量推。--all 是不限这一轮的会话数，--quiet=0 是连刚写完的也推
-mem push --to https://<域名>:7788 --token <ingest.token> --all --quiet=0 --save
+# 全量推。--all 是不限这一轮的会话数，--quiet=0 是连刚写完的也推，
+# --from-scratch 是忽略本机已有的推送进度
+mem push --to https://<域名>:7788 --token <ingest.token> --all --from-scratch --quiet=0 --save
 ```
+
+`--from-scratch` 这一步很容易漏，但漏了就一个新会话都推不上去：本机 offsets 记着
+110 个会话"已推"，那是推给**本机**的（本地入队和 push 共用进度）。换一个中心时
+这份进度没有意义，按它走的结果是「扫描 111 个会话，推送 0 个」，而且不报错。
 
 推的是原始语料（去掉思考、工具输出之后的那部分），不是抽好的条目。中心那边排队，
 一轮一轮抽。第一次大约 100 个会话、7000 轮、两百万 token 上下，跑一小时。
@@ -98,9 +113,9 @@ mem push --to https://<域名>:7788 --token <ingest.token> --all --quiet=0 --sav
 ## 6. 看它跑
 
 ```bash
-docker compose exec mem status
-docker compose exec mem log stats
-docker compose exec mem review 20    # 最近 20 条，人眼扫一遍
+docker compose exec mem node /app/src/cli.mjs status
+docker compose exec mem node /app/src/cli.mjs log stats
+docker compose exec mem node /app/src/cli.mjs review 20    # 最近 20 条，人眼扫一遍
 ```
 
 三个指标值得盯：
@@ -114,8 +129,16 @@ docker compose exec mem review 20    # 最近 20 条，人眼扫一遍
 删掉本地那份记忆笔记本（或整个副本），装 MCP：
 
 ```bash
-claude mcp add siyuan-mem -- mem mcp --to https://<域名>:7788 --token <ingest.token>
+# 记住地址，之后 watch 和 mcp 都读它
+mem push --to https://<域名>:7788 --token <ingest.token> --save
+
+# 装成常驻：和中心的 serve 是两个独立 label，停一个不影响另一个
+mem service install --push
+mem service status --push
 ```
+
+边缘不需要 `serve`——那台机器不抽取也不写库。之前缺的就是这条安装命令，
+只能自己写 plist 或者 `nohup`，重启就没了。
 
 再在 CLAUDE.md 里补一句什么时候该查——装上只是"能调"，不等于"会调"。
 
