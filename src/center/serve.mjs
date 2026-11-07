@@ -23,11 +23,11 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { hostname } from "node:os";
-import { HOME_DIR, ensureDirs, loadConfig, loadOffsets, offsetsOf, machineId, LOCK_PATH, LOG_PATH } from "./config.mjs";
-import { listSessions } from "./harness.mjs";
+import { HOME_DIR, ensureDirs, loadConfig, loadOffsets, offsetsOf, machineId, LOCK_PATH, LOG_PATH } from "../shared/config.mjs";
+import { listSessions } from "../shared/harness.mjs";
 import { enqueueLog, processQueue, assertModel } from "./jobs.mjs";
-import { event } from "./log.mjs";
-import { SiYuan } from "./siyuan.mjs";
+import { event } from "../shared/log.mjs";
+import { SiYuan } from "../shared/siyuan.mjs";
 import { startUi } from "./ui.mjs";
 import { startIngest } from "./ingest.mjs";
 

@@ -7,15 +7,15 @@
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename } from "node:path";
-import { loadConfig, loadOffsets, saveOffsets, offsetsOf, machineId, slicePlan } from "./config.mjs";
-import { hasModel } from "./llm.mjs";
-import { SiYuan } from "./siyuan.mjs";
+import { loadConfig, loadOffsets, saveOffsets, offsetsOf, machineId, slicePlan } from "../shared/config.mjs";
+import { hasModel } from "../shared/llm.mjs";
+import { SiYuan } from "../shared/siyuan.mjs";
 import { Store } from "./store.mjs";
 import { normalizeTurns, toExchanges, extractEntries, promptVersion } from "./extract.mjs";
 import { pending, readSession, archive, drop } from "./inbox.mjs";
-import { readLog } from "./readers/index.mjs";
-import { event } from "./log.mjs";
-import { archive as archiveRaw } from "./raw.mjs";
+import { readLog } from "../shared/readers/index.mjs";
+import { event } from "../shared/log.mjs";
+import { archive as archiveRaw } from "../shared/raw.mjs";
 import { loadEntities, shotList, resolveEntities, convergeTopics, mergeEntities } from "./entities.mjs";
 import { judgeDuplicates } from "./dedupe.mjs";
 import { dropPending, flushPending, notePending } from "./repair.mjs";
@@ -81,7 +81,7 @@ export function projectOf(cwd, harness = "") {
     if (NOISE_SEGMENT.some((re) => re.test(seg))) continue;
     // 一两个字符的段（用户名、盘符）也不是项目名；点开头的是配置目录（~/.dsh）。
     if (seg.length < 3 || seg.startsWith(".")) continue;
-    // 家目录名本身也不是项目（/Users/lancernix_1/Downloads → 退到 harness）。
+    // 家目录名本身也不是项目（~/Downloads → 退到 harness）。
     if (seg === home) continue;
     return seg;
   }

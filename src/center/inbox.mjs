@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, renameSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { INBOX_DIR, DONE_DIR, ensureDirs } from "./config.mjs";
+import { INBOX_DIR, DONE_DIR, ensureDirs } from "../shared/config.mjs";
 
 /**
  * 队列就是目录。

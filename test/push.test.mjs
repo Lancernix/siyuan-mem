@@ -29,8 +29,8 @@ writeFileSync(
   ].join("\n") + "\n"
 );
 
-const { pushOnce } = await import("../src/push.mjs");
-const { listSessions } = await import("../src/harness.mjs");
+const { pushOnce } = await import("../src/worker/push.mjs");
+const { listSessions } = await import("../src/shared/harness.mjs");
 
 function fakeCenter() {
   const got = [];

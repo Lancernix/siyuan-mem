@@ -8,7 +8,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { stripRawLink } = await import("../src/raw.mjs");
+const { stripRawLink } = await import("../src/shared/raw.mjs");
 
 const RAW = "assets/mem-raw/Mac/dsh/s.p1-20261102104610-j672vve.jsonl#716-740";
 const body = "events 少不能直接判定为抽取失败，因为这条链路产出本来就少。";

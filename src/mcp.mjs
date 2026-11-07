@@ -54,7 +54,7 @@ export function formatHits(hits, terms = []) {
   }
   const lines = [`找到 ${hits.length} 条` + (terms.length ? `（检索词：${terms.join(" / ")}）` : "") + "："];
   hits.forEach((h, i) => {
-    // 话题和项目经常是同一个词（「MiniWMS」既当话题又当目录），重复写两遍很吵。
+    // 话题和项目经常是同一个词（「订货系统」既当话题又当目录），重复写两遍很吵。
     const head = [h.entity || "未归类", h.project && h.project !== h.entity ? `@${h.project}` : "", h.date || "", h.type || ""]
       .filter(Boolean)
       .join(" · ");

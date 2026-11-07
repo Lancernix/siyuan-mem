@@ -10,9 +10,9 @@
  * 这里不碰模型、不碰思源，所以边缘机器只需要一个可执行文件和一个地址。
  */
 import { statSync } from "node:fs";
-import { loadConfig, loadOffsets, saveOffsets, offsetsOf, machineId, slicePlan } from "./config.mjs";
-import { listSessions } from "./harness.mjs";
-import { readLog } from "./readers/index.mjs";
+import { loadConfig, loadOffsets, saveOffsets, offsetsOf, machineId, slicePlan } from "../shared/config.mjs";
+import { listSessions } from "../shared/harness.mjs";
+import { readLog } from "../shared/readers/index.mjs";
 
 /**
  * 按字符数切块。一个会话可能有几千轮，单次请求太大会顶到服务端上限，

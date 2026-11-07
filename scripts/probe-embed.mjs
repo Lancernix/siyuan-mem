@@ -5,7 +5,7 @@
  * 它是**动态执行 SQL 并渲染**的。如果可用，就不用再"重建文档"了——
  * 之前踩的那些坑（createDocWithMd 不覆盖、块索引异步删不干净）全绕开。
  */
-import { SiYuan } from "../src/siyuan.mjs";
+import { SiYuan } from "../src/shared/siyuan.mjs";
 
 const BASE = "http://127.0.0.1:6806";
 const sy = new SiYuan({ baseUrl: BASE, timeoutMs: 20000 });
@@ -37,7 +37,7 @@ async function main() {
   });
   await sleep(3500);
   const ps = (await post("/api/query/sql", { stmt: `SELECT id, content FROM blocks WHERE path LIKE "%${doc}%" AND type="p"` })).data;
-  const entities = ["MiniWMS", "MiniWMS", "MiniWMS", "MiniWMS", "MiniWMS"];
+  const entities = ["订货系统", "订货系统", "订货系统", "订货系统", "订货系统"];
   const types = ["decision", "fact", "decision", "decision", "decision"];
   for (let i = 0; i < ps.length; i++) {
     await post("/api/attr/setBlockAttrs", {
@@ -63,7 +63,7 @@ async function main() {
     if (embeds.length) {
       const dom = await post("/api/block/getBlockDOM", { id: embeds[0].id });
       const d = String(dom.data?.dom ?? dom.data ?? "");
-      ok("DOM 里带查询结果", d.includes("MiniWMS") || d.includes("索引判据"), d.slice(0, 80));
+      ok("DOM 里带查询结果", d.includes("订货系统") || d.includes("索引判据"), d.slice(0, 80));
       const k = await post("/api/block/getBlockKramdown", { id: embeds[0].id });
       console.log("   kramdown:", String(k.data?.kramdown ?? "").slice(0, 120));
     }

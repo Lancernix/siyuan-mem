@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { clampText, parseEntries, draftedSection } from "../src/extract.mjs";
+import { clampText, parseEntries, draftedSection } from "../src/center/extract.mjs";
 
 test("短条目原样返回", () => {
-  assert.equal(clampText("MiniWMS 用 TS 6.0.3。"), "MiniWMS 用 TS 6.0.3。");
+  assert.equal(clampText("订货系统 用 TS 6.0.3。"), "订货系统 用 TS 6.0.3。");
 });
 
 test("超长在句末截断，不劈词", () => {
@@ -39,7 +39,7 @@ test("坏 JSON 要报 ok:false，不能和「合法空结果」混为一谈", ()
   assert.equal(empty.ok, true);
   assert.deepEqual(empty.entries, []);
 
-  const ok = parseEntries('{"entries":[{"text":"MiniWMS 的接口统一成扁平 REST","brief":"扁平 REST"}]}');
+  const ok = parseEntries('{"entries":[{"text":"订货系统 的接口统一成扁平 REST","brief":"扁平 REST"}]}');
   assert.equal(ok.ok, true);
   assert.equal(ok.entries.length, 1);
 });

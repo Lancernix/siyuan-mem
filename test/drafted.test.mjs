@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { extractEntries, planBatches } from "../src/extract.mjs";
+import { extractEntries, planBatches } from "../src/center/extract.mjs";
 
 /** 起一个假的 OpenAI 兼容接口，每批回一条不同 brief 的条目。 */
 async function withFakeModel(fn) {

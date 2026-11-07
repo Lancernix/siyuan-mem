@@ -9,10 +9,10 @@
  */
 import http from "node:http";
 import { readFileSync, existsSync } from "node:fs";
-import { LOG_PATH } from "./config.mjs";
+import { LOG_PATH } from "../shared/config.mjs";
 import { open } from "./jobs.mjs";
 import { pending } from "./inbox.mjs";
-import { usageToday, resolveModel, hasModel } from "./llm.mjs";
+import { usageToday, resolveModel, hasModel } from "../shared/llm.mjs";
 import { lockInfo, roundStatus } from "./serve.mjs";
 import { searchEntries } from "./search.mjs";
 

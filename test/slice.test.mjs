@@ -7,7 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { slicePlan } = await import("../src/config.mjs");
+const { slicePlan } = await import("../src/shared/config.mjs");
 
 test("第一次见到这个文件：从 0 开始", () => {
   assert.deepEqual(slicePlan(undefined, { size: 100, mtime: 1 }, 5), { from: 0, rewritten: false });

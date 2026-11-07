@@ -4,8 +4,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildPart, sliceByBytes, parsePtr, readRange } from "../src/raw.mjs";
-import { norm, similarity, editDistance, longestCommonSubstring, parsePending } from "../src/entities.mjs";
+import { buildPart, sliceByBytes, parsePtr, readRange } from "../src/shared/raw.mjs";
+import { norm, similarity, editDistance, longestCommonSubstring, parsePending } from "../src/center/entities.mjs";
 
 /* ---------- 归一化与相似度 ---------- */
 

@@ -8,15 +8,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { entryAttrs, ATTR } = await import("../src/store.mjs");
+const { entryAttrs, ATTR } = await import("../src/center/store.mjs");
 
-const entry = { text: "x", entity: "MiniWMS", type: "decision", brief: "缩写", confidence: 4 };
+const entry = { text: "x", entity: "订货系统", type: "decision", brief: "缩写", confidence: 4 };
 const meta = { source: "workbuddy", session: "s1", date: "2026-11-03", project: "mini-wms", machine: "Mac", raw: "assets/a.jsonl#1-2" };
 
 test("该有的都有，值都转成字符串", () => {
   const a = entryAttrs({ entry, meta, date: "2026-11-03", hash: "abc123" });
   assert.equal(a[ATTR.status], "current");
-  assert.equal(a[ATTR.entity], "MiniWMS");
+  assert.equal(a[ATTR.entity], "订货系统");
   assert.equal(a[ATTR.type], "decision");
   assert.equal(a[ATTR.hash], "abc123");
   assert.equal(a[ATTR.source], "workbuddy");

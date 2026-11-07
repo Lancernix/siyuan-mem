@@ -51,6 +51,44 @@ mem status
 
 想让它抽取质量好一点，填 `config.json` 里的 `model.apiKey`。不填也能跑，走规则抽取，只是结论糙。
 
+## 目录结构
+
+```
+src/
+  cli.mjs            命令入口，只做参数分发
+  shared/            两边都用
+    config.mjs       配置读写（默认值合并、0600）
+    siyuan.mjs       思源 API 客户端
+    llm.mjs          模型调用：schema 强制、重试、降级、记账
+    log.mjs          结构化事件日志
+    raw.mjs          原文归档与指针
+    harness.mjs      扫本机各家的会话文件
+    readers/         五家 harness 各一个读取器 + 共用层
+  center/            中心：会调模型、会写思源
+    serve.mjs        常驻循环（每轮扫描 → 入队 → 抽取 → 写库）
+    ingest.mjs       接收端 HTTP（/api/ingest、/api/search、/api/ping）
+    jobs.mjs         一轮的编排：分批、判重、收敛、写条目、原文保活
+    extract.mjs      抽取（prompt + schema）
+    dedupe.mjs       判重：候选挑选 + 模型裁决
+    entities.mjs     话题归一：别名、合并、待确认
+    store.mjs        写思源（块、属性、文档结构）
+    search.mjs       检索（SQL + 打分）
+    prompt.mjs       提示词外置、版本、备份、体检
+    inbox.mjs        本地队列
+    repair.mjs       补偿账本（写新条成功、标旧条失败）
+    digest.mjs / entity-view.mjs / ui.mjs   给人看的几层
+  worker/            边缘：只搬运，不碰模型也不碰思源
+    push.mjs         读本机日志 → 推给中心（含增量切片）
+    remote.mjs       远端检索客户端（问中心的 /api/search）
+  mcp.mjs            MCP server（stdio），一个工具 memory_search
+  ops/service.mjs    装成 launchd / systemd 服务（中心 serve、边缘 push 各一个 label）
+```
+
+三条边界：**center** 调模型、写思源；**worker** 只搬运；**mcp** 只读。三者共用
+`shared/`，任何一边都不许绕过它去直连思源的写接口。
+
+测试：`npm test`（117 项，全部是纯函数或假服务端，不连真思源、不真调模型）。
+
 ## 用法
 
 ```bash
@@ -124,7 +162,7 @@ mem push --once --all             # 首次回灌：一次推完，不等安静 1
 
 - 按字符预算（默认 38000 字/次，约 24k token）把会话切成若干批，逐批**串行**调用；
   后一批会带上前面几批已经抽出来的条目（brief + 正文前 40 字），同一件事不会在
-  批与批的接缝处再记一遍。只传话题名不够——模型知道「聊过 MiniWMS」，但不知道
+  批与批的接缝处再记一遍。只传话题名不够——模型知道「聊过 订货系统」，但不知道
   「上次记的是路由改成按目录树加载」，于是照样写第二遍；
 - 一条问答本身就超预算时，按段落把它切开分别送，所有段拼起来等于原文；
 - 各批结果按内容去重后合并，超出单会话上限的条数会打印出来，不静默丢弃；
@@ -369,7 +407,7 @@ custom-mem-raw = "assets/mem-raw/Mac/workbuddy/xxx.p1-20261029234242-8shd81c.jso
 | 别写成 | 为什么不行 | 写成 |
 |---|---|---|
 | 自采暖暖气片异响 | 「异响」是内容，不是话题 | 自采暖暖气片 |
-| MiniWMS 路由设计 | 子话题：加了限定词 | MiniWMS |
+| 订货系统 路由设计 | 子话题：加了限定词 | 订货系统 |
 | 怎么配置 MCP | 疑问句 | MCP |
 | 条目上限改成按批数自适应 | 这是结论，不是东西 | siyuan-mem |
 
@@ -550,7 +588,7 @@ npm run dist      # 打包 → 对账 → 装到 ~/.siyuan-mem/mem
 ```bash
 mem search 车架
 mem search "mcp adapter 元工具" --limit=5
-mem search 索引 --topic=精简WMS设计 --days=30
+mem search 索引 --topic=精简设计 --days=30
 mem search 判重 --json
 ```
 

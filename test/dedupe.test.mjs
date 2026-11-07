@@ -6,7 +6,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pickCandidates } from "../src/dedupe.mjs";
+import { pickCandidates } from "../src/center/dedupe.mjs";
 
 const ENT = "思源笔记每日复盘";
 

@@ -5,7 +5,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { install, plistFor, resolveRunner, systemdUnit, PLIST_PATH } from "../src/service.mjs";
+import { install, plistFor, resolveRunner, systemdUnit, PLIST_PATH } from "../src/ops/service.mjs";
 
 test("常驻版：KeepAlive 只对失败重启，带 ThrottleInterval", () => {
   const p = plistFor({});

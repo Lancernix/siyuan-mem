@@ -9,7 +9,7 @@
  * 删掉它不影响任何东西，随时可以再生成。
  */
 import { ATTR } from "./store.mjs";
-import { parsePtr } from "./raw.mjs";
+import { parsePtr } from "../shared/raw.mjs";
 
 const TYPE_LABEL = {
   decision: "定下来的",
