@@ -121,7 +121,10 @@ const DEFAULTS = {
     /** 机器名。默认取短 hostname；同一台机器换名会导致 offsets 重来一遍。 */
     machine: "",
     /** 常态间隔。会话还在写的时候推过去全是半句话，所以另有 quietSeconds。 */
-    intervalSeconds: 120,
+    // 边缘推送的节奏。2 分钟太密：每轮要起一个 node（常驻 50MB 左右），
+    // 而端到端延迟根本不由它决定——中心的抽取轮是 10 分钟一次。5 分钟够用，
+    // 也不会和中心那 10 分钟同频（同频最坏要等满两轮）。
+    intervalSeconds: 300,
     quietSeconds: 180,
     /** 单次请求的最大字符数，超了拆成多次。 */
     maxCharsPerRequest: 800_000,

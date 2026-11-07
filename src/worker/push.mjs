@@ -203,7 +203,7 @@ const chars = (turns) => turns.reduce((n, t) => n + t.text.length, 0);
 /** 常驻推送。间隔比中心宽松：边缘这一侧要做的只有读文件和发请求。 */
 export async function pushWatch(opts = {}) {
   const cfg = loadConfig();
-  const gap = (opts.intervalSeconds ?? cfg.push?.intervalSeconds ?? 120) * 1000;
+  const gap = (opts.intervalSeconds ?? cfg.push?.intervalSeconds ?? 300) * 1000;
   let stop = false;
   const onSignal = () => {
     if (stop) process.exit(1);
