@@ -3,7 +3,7 @@
   "siyuan": {
     "baseUrl": "http://127.0.0.1:6806",
     "token": "",
-    "notebook": "90-记忆"
+    "notebook": "Harness-Mem"
   },
   "model": {
     "provider": "deepseek",

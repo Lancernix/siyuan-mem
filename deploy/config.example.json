@@ -3,7 +3,7 @@
   "siyuan": {
     "baseUrl": "http://siyuan:6806",
     "token": "思源的 API token（设置 → 关于 → API token）",
-    "notebook": "90-记忆",
+    "notebook": "Harness-Mem",
     "partition": "month"
   },
   "model": {

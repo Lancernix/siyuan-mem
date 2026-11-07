@@ -35,7 +35,7 @@ const DEFAULTS = {
   siyuan: {
     baseUrl: "http://127.0.0.1:6806",
     token: "",
-    notebook: "90-记忆",
+    notebook: "Harness-Mem",
     // 笔记本的真身。第一次 init 会自动写进来；配了它之后改名不用改配置。
     notebookId: "",
     /**

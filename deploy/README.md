@@ -65,7 +65,7 @@ SIYUAN_NET=<上一步查到的网络名> docker compose up -d --build
 # 能看到思源版本和条目数，说明连通了
 docker compose exec mem node /app/src/cli.mjs status
 
-# 建笔记本「90-记忆」和条目/实体那几个文档（幂等，重复跑没关系）
+# 建笔记本「Harness-Mem」和条目/实体那几个文档（幂等，重复跑没关系）
 docker compose exec mem node /app/src/cli.mjs init
 ```
 

@@ -475,7 +475,7 @@ export class Store {
   async listCurrent(limit = 3000) {
     await this.#ensure();
     // 必须按笔记本收口：SQL 是全局的，不收口会把别的笔记本里的条目也读进来，
-    // 判重就会去比对不相干的库（实测把 90-记忆 的 864 条读进了试验笔记本）。
+    // 判重就会去比对不相干的库（实测把 Harness-Mem 的 864 条读进了试验笔记本）。
     const box = this.#ids?.notebook;
     const rows = await this.#sy.sql(
       `SELECT id, content, ial FROM blocks

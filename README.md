@@ -9,7 +9,7 @@
 
 ```
 各 harness 会话日志 ┐
-                    ├─▶ inbox ──mem serve──▶ 思源（90-记忆）
+                    ├─▶ inbox ──mem serve──▶ 思源（Harness-Mem）
 其他机器的 mem push ─┘   ▲                      │
                         └── agent/pre-step 注入 ◀┘
 ```
@@ -35,7 +35,7 @@ cp config.example.json ~/.siyuan-mem/config.json   # 首次运行也会自动生
 node src/cli.mjs init
 ```
 
-`init` 会建一个 `90-记忆` 笔记本和三个文档（`01-条目` 当目录用，下面按月份分 `/2026-10`；`02-实体`；`03-实体待确认`）。
+`init` 会建一个 `Harness-Mem` 笔记本和三个文档（`01-条目` 当目录用，下面按月份分 `/2026-10`；`02-实体`；`03-实体待确认`）。
 
 想直接敲 `mem`：编一个自带运行时的单文件，再软链进 PATH。
 
@@ -716,7 +716,7 @@ mem log grep <关键词>         # 在字段里搜（会话 id、话题、错误
 只能查 `blocks` 表，缓存和文件都不作数。
 
 **从 blocks 表按名字猜笔记本 id，是错的。** `type='b'` 是引用块，不是笔记本；写了一句
-`box = (select id from blocks where type='b' and content='90-记忆')` 之后，插件召回永远返回空——
+`box = (select id from blocks where type='b' and content='Harness-Mem')` 之后，插件召回永远返回空——
 记忆还在，只是注入路径静默失效。笔记本 id 只有一个可靠来源：`/api/notebook/lsNotebooks`。
 
 **offsets 只存 bytes，会让"文件变没变"的判断每次都成立。** serve 和 push 用
