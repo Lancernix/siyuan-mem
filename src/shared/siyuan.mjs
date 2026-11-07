@@ -225,3 +225,31 @@ export class SiYuan {
     return rows?.[0]?.id ?? null;
   }
 }
+
+/**
+ * 配置里的笔记本 → 真正的 id。
+ *
+ * 为什么两种都认：id 是身份，名字是给人看的。只认名字的话，改一次名就得把每台
+ * 机器的配置全改一遍（中心和边缘各一份）；只认 id 的话，第一次上手得先去库里
+ * 抄一个 20 位的串，没人愿意。所以：配了 id 就用 id，没配就按名字找。
+ *
+ * id 失效（笔记本被删了重建）时退回按名字找，而不是直接报错——库里只有一个叫
+ * 这名字的笔记本时，"按名字找到的那个"显然是用户想要的那个。
+ */
+export async function resolveNotebookId(sy, cfg) {
+  const wantId = String(cfg?.siyuan?.notebookId ?? "").trim();
+  const name = String(cfg?.siyuan?.notebook ?? "").trim();
+  const list = (await sy.listNotebooks()) ?? [];
+
+  if (wantId) {
+    if (list.some((n) => n.id === wantId)) return wantId;
+    // 配了 id 但库里没有：可能是换了库、或者笔记本被删了。退回名字，别把整条链断掉。
+  }
+  if (!name) throw new Error("配置里没写笔记本：siyuan.notebook 或 siyuan.notebookId");
+  const hit = list.find((n) => n.name === name);
+  if (!hit) {
+    const names = list.map((n) => n.name).slice(0, 8).join("、");
+    throw new Error(`找不到笔记本「${name}」（库里是：${names || "空"}）`);
+  }
+  return hit.id;
+}
