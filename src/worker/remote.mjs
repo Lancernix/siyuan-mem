@@ -60,11 +60,3 @@ export async function remoteSearch(opts = {}) {
   if (!res.ok) throw new Error(`中心拒绝了检索（HTTP ${res.status}）：${data?.error ?? text.slice(0, 200)}`);
   return { ...data, remote: base };
 }
-
-/** 笔记本名 → id。配置里写的是名字，API 要 id。 */
-async function resolveNotebook(sy, name) {
-  const list = await sy.listNotebooks();
-  const nb = (list ?? []).find((n) => n.name === name);
-  if (!nb) throw new Error(`找不到笔记本「${name}」`);
-  return nb.id;
-}

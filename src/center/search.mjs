@@ -16,7 +16,7 @@
  * 这里是判"哪几条跟这句话有关"，两回事。
  */
 import { loadConfig } from "../shared/config.mjs";
-import { SiYuan } from "../shared/siyuan.mjs";
+import { SiYuan, resolveNotebookId } from "../shared/siyuan.mjs";
 import { event } from "../shared/log.mjs";
 import { stripRawLink } from "../shared/raw.mjs";
 
@@ -74,7 +74,7 @@ function scoreOf(row, terms, entity) {
 export async function searchEntries(opts = {}) {
   const cfg = loadConfig();
   const sy = new SiYuan({ baseUrl: cfg.siyuan.baseUrl, token: cfg.siyuan.token, timeoutMs: 8000 });
-  const notebook = await resolveNotebook(sy, cfg.siyuan.notebook);
+  const notebook = await resolveNotebookId(sy, cfg);
   const terms = termsOf(opts.q);
   const limit = Math.min(Math.max(Number(opts.limit) || 8, 1), 50);
   // 全是标点/空白时没有检索词。这时候不能往下走：SQL 里没有任何 LIKE 条件，

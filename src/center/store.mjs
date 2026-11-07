@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { SiYuan } from "../shared/siyuan.mjs";
-import { loadState, saveState, loadGroups, saveGroups } from "../shared/config.mjs";
+import { SiYuan, resolveNotebookId as resolveNb } from "../shared/siyuan.mjs";
+import { loadState, saveState, loadGroups, saveGroups, saveConfig } from "../shared/config.mjs";
 import { stripRawLink } from "../shared/raw.mjs";
 
 export const ATTR = {
@@ -72,8 +72,19 @@ export class Store {
 
     let nbId = cache.notebook;
     if (!nbId || !(await this.#exists(nbId))) {
-      const nb = (await this.#sy.listNotebooks()).find((n) => n.name === name);
-      nbId = nb?.id ?? (await this.#sy.createNotebook(name));
+      // 配了 notebookId 就用它；没配（或失效）按名字找，找不到才新建。
+      nbId = await resolveNb(this.#sy, this.#cfg).catch(async () => {
+        return (await this.#sy.listNotebooks()).find((n) => n.name === name)?.id ?? (await this.#sy.createNotebook(name));
+      });
+    }
+    // 记下 id：之后再改名，这台机器不用改配置也能找得到。
+    if (nbId && this.#cfg.siyuan.notebookId !== nbId) {
+      try {
+        saveConfig({ siyuan: { notebookId: nbId } });
+        this.#cfg.siyuan.notebookId = nbId;
+      } catch {
+        /* 写配置失败不影响这一轮 */
+      }
     }
 
     // months 是"每个月的条目文档"缓存，init 不能把它冲掉——
