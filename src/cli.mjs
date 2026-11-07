@@ -524,8 +524,9 @@ async function cmdService(args, flags) {
       }
       if (flags.print) return void console.log(r.plist);
       console.log(`已写入 ${r.path}`);
-      const every = Math.round((Number(cfg.push?.intervalSeconds) || 300) / 60);
-      console.log(`  常驻推送 → ${cfg.push.to}（每 ${every} 分钟一轮，崩溃后 30 秒重试）`);
+      const every = Math.round((Number(cfg.push?.intervalSeconds) || 900) / 60);
+      const ceiling = Math.round((Number(cfg.push?.maxIntervalSeconds) || 3600) / 60);
+      console.log(`  常驻推送 → ${cfg.push.to}（活跃 ${every} 分钟一轮，空转退到 ${ceiling} 分钟，崩溃后 30 秒重试）`);
       console.log(r.loaded ? "  已装载。看状态：mem service status --push" : `  但装载失败：${r.error}\n  ${r.hint}`);
       if (!r.loaded) process.exitCode = 1;
       return;

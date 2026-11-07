@@ -253,7 +253,15 @@ async function runRound({ dry, useModel, log }) {
   const left = Math.max(0, candidates.length - limit);
   if (left) log(`  还有 ${left} 个待投，下轮继续`);
 
-  const sum = await processQueue({ dry, useModel, onLine: log });
+  // 一轮的预算：默认 20 个会话 / 20 分钟。跑不完留到下一轮，队列是持久的。
+  // 不设预算的话，一次全量迁移就能让一轮跑四小时，期间心跳不动、新数据插不进来。
+  const sum = await processQueue({
+    dry,
+    useModel,
+    onLine: log,
+    maxSessions: cfg.serve?.maxSessionsPerRound ?? 20,
+    maxMs: (cfg.serve?.maxMinutesPerRound ?? 20) * 60_000,
+  });
   return { version, scanned: sessions.length, candidates: candidates.length, enqueued, turns, left, ...sum };
 }
 

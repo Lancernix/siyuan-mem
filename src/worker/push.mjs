@@ -201,9 +201,26 @@ export async function pushOnce({
 const chars = (turns) => turns.reduce((n, t) => n + t.text.length, 0);
 
 /** 常驻推送。间隔比中心宽松：边缘这一侧要做的只有读文件和发请求。 */
+/**
+ * 下一轮隔多久。
+ *
+ * 连续空转就翻倍，推到了东西立刻回到基准。上限封顶，不然一个周末没人用，
+ * 回来要等两小时才发现有新会话。
+ *
+ * 抽成纯函数是因为这段逻辑只看几个数，没什么好测的以外——但它是"退避"这件事
+ * 唯一会算错的地方（翻倍写成累加、空闲计数忘了清零），测它比测整个 watch 便宜。
+ */
+export function nextGapMs({ base, max, idleRounds = 0 }) {
+  const b = Math.max(1000, Number(base) || 900_000);
+  const m = Math.max(b, Number(max) || b * 4);
+  return Math.min(b * 2 ** Math.min(Math.max(0, idleRounds), 2), m);
+}
+
 export async function pushWatch(opts = {}) {
   const cfg = loadConfig();
-  const gap = (opts.intervalSeconds ?? cfg.push?.intervalSeconds ?? 300) * 1000;
+  const base = (opts.intervalSeconds ?? cfg.push?.intervalSeconds ?? 900) * 1000;
+  const max = (opts.maxIntervalSeconds ?? cfg.push?.maxIntervalSeconds ?? 3600) * 1000;
+  let idle = 0;
   let stop = false;
   const onSignal = () => {
     if (stop) process.exit(1);
@@ -214,16 +231,32 @@ export async function pushWatch(opts = {}) {
   process.on("SIGTERM", onSignal);
 
   for (let round = 1; !stop; round++) {
+    let pushed = 0;
+    let failed = 0;
     try {
       const r = await pushOnce({ ...opts, log: opts.log ?? (() => {}) });
+      pushed = r.sessions ?? 0;
+      failed = r.failed ?? 0;
+      const wait = nextGapMs({
+        base,
+        max,
+        // 推到了东西 → 立刻回到基准；空转 → 退一级；有失败 → 不要退得太狠，
+        // 免得一次网络抖动把节奏压到一小时。
+        idleRounds: pushed ? 0 : failed ? Math.min(idle + 1, 1) : idle + 1,
+      });
+      idle = pushed ? 0 : failed ? Math.min(idle + 1, 1) : idle + 1;
       opts.log?.(
-        `第 ${round} 轮：扫描 ${r.scanned}，推送 ${r.sessions} 个会话 / ${r.turns} 轮，` +
-          `重复 ${r.duplicates} 包，失败 ${r.failed}${r.left ? `，还有 ${r.left} 个下轮继续` : ""}`
+        `第 ${round} 轮：扫描 ${r.scanned}，推送 ${pushed} 个会话 / ${r.turns} 轮，` +
+          `重复 ${r.duplicates} 包，失败 ${failed}` +
+          (r.left ? `，还有 ${r.left} 个下轮继续` : "") +
+          ` → 下一轮 ${Math.round(wait / 60000)} 分钟后`
       );
     } catch (e) {
+      idle += 1;
       opts.log?.(`第 ${round} 轮失败：${e.message}`);
     }
     if (stop) break;
+    const gap = nextGapMs({ base, max, idleRounds: idle });
     const t0 = Date.now();
     while (!stop && Date.now() - t0 < gap) await new Promise((r) => setTimeout(r, 1000));
   }
