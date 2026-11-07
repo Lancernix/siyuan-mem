@@ -142,7 +142,7 @@ mem service install               # 常驻；接收端跟着 serve 一起起
 
 # 边缘
 mem push --to https://mem.example.com --token <token> --save --test
-mem push --watch                  # 常态：每 5 分钟推一次（push.intervalSeconds）
+mem push --watch                  # 常态：活跃 15 分钟一轮，空转退到 30/60
 mem push --once --all             # 首次回灌：一次推完，不等安静 180 秒
 ```
 

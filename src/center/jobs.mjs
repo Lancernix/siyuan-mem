@@ -169,11 +169,27 @@ function ptrFor(parts, from, to) {
   return `${p.path}#${a}-${b >= a ? b : a}`;
 }
 
-export async function processQueue({ dry = false, useModel = true, onLine = () => {} } = {}) {
+/**
+ * 处理队列。
+ *
+ * maxSessions / maxMs 是**一轮的预算**，不是总量：跑不完留到下一轮。
+ * 没有预算的那一版把整个队列一口气抽完——第一次全量迁移时第 2 轮跑了四小时，
+ * 那四小时里心跳不动、`mem status` 看着像死了，边缘新推的东西也插不进来。
+ * 队列本身是持久的，留到下一轮没有任何损失；看不见进度才是真问题。
+ */
+export async function processQueue({
+  dry = false,
+  useModel = true,
+  onLine = () => {},
+  maxSessions = Number.POSITIVE_INFINITY,
+  maxMs = Number.POSITIVE_INFINITY,
+} = {}) {
   const { cfg, sy, store } = open();
 
   const files = pending();
-  const sum = { sessions: files.length, written: 0, skipped: 0, replaced: 0, failed: 0, degraded: 0, raw: 0, entities: 0, pending: 0, dedupeCalls: 0, dedupeMs: 0, tokens: { prompt: 0, completion: 0 } };
+  const startedAt = Date.now();
+  let done = 0;
+  const sum = { sessions: files.length, left: 0, written: 0, skipped: 0, replaced: 0, failed: 0, degraded: 0, raw: 0, entities: 0, pending: 0, dedupeCalls: 0, dedupeMs: 0, tokens: { prompt: 0, completion: 0 } };
 
   // 先补上一轮没标完的"过时"。这件事跟模型无关，也不该等队列里有活才干——
   // 偏偏最容易漏的就是"队列空了但账本还欠着"。
@@ -203,6 +219,13 @@ export async function processQueue({ dry = false, useModel = true, onLine = () =
   let entityTable = null;
 
   for (const file of files) {
+    // 预算用尽就停：跑不完的留在队列里，下一轮接着来。
+    if (done >= maxSessions || Date.now() - startedAt >= maxMs) {
+      sum.left = files.length - done;
+      onLine(`  · 这一轮到预算了（${done} 个会话 / ${Math.round((Date.now() - startedAt) / 60000)} 分钟），还剩 ${sum.left} 个下次继续`);
+      break;
+    }
+    done++;
     let payload;
     try {
       payload = readSession(file);

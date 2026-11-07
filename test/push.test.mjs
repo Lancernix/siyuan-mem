@@ -82,3 +82,25 @@ test("from-scratch：忽略已有偏移，整份重推", async (t) => {
   assert.equal(r.sessions, 1, "换中心时要重推");
   assert.deepEqual(got.at(-1).body.range, [0, 2], "起点回到 0");
 });
+
+// ---- 自适应退避：活跃 15 分钟，空转翻倍，封顶 60 ----
+
+const { nextGapMs } = await import("../src/worker/push.mjs");
+
+test("退避表：15 / 30 / 60，封顶不再涨", () => {
+  const base = 900_000;
+  const max = 3_600_000;
+  const mins = [0, 1, 2, 5, 99].map((i) => nextGapMs({ base, max, idleRounds: i }) / 60000);
+  assert.deepEqual(mins, [15, 30, 60, 60, 60]);
+});
+
+test("推到了东西就回基准：idleRounds 归零", () => {
+  const g = nextGapMs({ base: 900_000, max: 3_600_000, idleRounds: 0 });
+  assert.equal(g, 900_000);
+});
+
+test("上限比基准还小时不返祖：至少是基准", () => {
+  // 配错成 max < base 时不能算出比基准更短的间隔。
+  const g = nextGapMs({ base: 900_000, max: 60_000, idleRounds: 2 });
+  assert.equal(g, 900_000);
+});
