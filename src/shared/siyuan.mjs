@@ -65,6 +65,16 @@ export class SiYuan {
     return id;
   }
 
+  /**
+   * 改笔记本的名字。id 不变，块、属性、引用全不动。
+   *
+   * 单独给个方法而不是让人去点界面：改名之后配置里那份名字就过期了，
+   * 而 mem 现在靠 notebookId 认路，所以这件事可以完全在命令行里闭环。
+   */
+  renameNotebook(id, name) {
+    return this.#post("/api/notebook/renameNotebook", { notebook: id, name });
+  }
+
   removeNotebook(id) {
     return this.#post("/api/notebook/removeNotebook", { notebook: id });
   }
