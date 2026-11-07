@@ -524,7 +524,8 @@ async function cmdService(args, flags) {
       }
       if (flags.print) return void console.log(r.plist);
       console.log(`已写入 ${r.path}`);
-      console.log(`  常驻推送 → ${cfg.push.to}（每 2 分钟一轮，崩溃后 30 秒重试）`);
+      const every = Math.round((Number(cfg.push?.intervalSeconds) || 300) / 60);
+      console.log(`  常驻推送 → ${cfg.push.to}（每 ${every} 分钟一轮，崩溃后 30 秒重试）`);
       console.log(r.loaded ? "  已装载。看状态：mem service status --push" : `  但装载失败：${r.error}\n  ${r.hint}`);
       if (!r.loaded) process.exitCode = 1;
       return;
@@ -659,7 +660,7 @@ async function cmdPush(flags, args) {
   };
 
   if (flags.watch || flags.every) {
-    await pushWatch({ ...opts, intervalSeconds: Number(flags.every) || cfg.push?.intervalSeconds || 120 });
+    await pushWatch({ ...opts, intervalSeconds: Number(flags.every) || cfg.push?.intervalSeconds || 300 });
     return;
   }
 
