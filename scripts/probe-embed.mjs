@@ -5,7 +5,7 @@
  * 它是**动态执行 SQL 并渲染**的。如果可用，就不用再"重建文档"了——
  * 之前踩的那些坑（createDocWithMd 不覆盖、块索引异步删不干净）全绕开。
  */
-import { SiYuan } from "../src/shared/siyuan.mjs";
+import { SiYuan } from "../src/util/siyuan.mjs";
 
 const BASE = "http://127.0.0.1:6806";
 const sy = new SiYuan({ baseUrl: BASE, timeoutMs: 20000 });

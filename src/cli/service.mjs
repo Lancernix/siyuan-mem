@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { HOME_DIR } from "../shared/config.mjs";
+import { HOME_DIR } from "../util/config.mjs";
 
 export const LABEL = "com.siyuan.mem";
 export const PLIST_PATH = join(homedir(), "Library/LaunchAgents", `${LABEL}.plist`);
@@ -23,7 +23,7 @@ export const PLIST_PATH = join(homedir(), "Library/LaunchAgents", `${LABEL}.plis
  */
 export const LABEL_PUSH = "com.siyuan.mem.push";
 export const PLIST_PUSH_PATH = join(homedir(), "Library/LaunchAgents", `${LABEL_PUSH}.plist`);
-const CLI = fileURLToPath(new URL("../cli.mjs", import.meta.url));
+const CLI = fileURLToPath(new URL("./cli.mjs", import.meta.url));
 
 /**
  * 源码比二进制新的时候，别用二进制。

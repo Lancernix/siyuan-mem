@@ -13,10 +13,10 @@
  *
  * 只调模型，不写库——抽取结果是打印出来比的，思源一条都不会动。
  */
-import { readLog } from "../src/shared/readers/index.mjs";
-import { toExchanges, extractEntries } from "../src/center/extract.mjs";
-import { loadConfig } from "../src/shared/config.mjs";
-import { parseArgs } from "../src/shared/args.mjs";
+import { readLog } from "../src/util/readers/index.mjs";
+import { toExchanges, extractEntries } from "../src/core/extract.mjs";
+import { loadConfig } from "../src/util/config.mjs";
+import { parseArgs } from "../src/util/args.mjs";
 
 const { flags, rest: raw } = parseArgs(process.argv.slice(2));
 // `--runs 3` 这种空格写法，parseArgs 会把 3 留进 rest，于是被当成一个文件名读。

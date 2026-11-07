@@ -13,10 +13,10 @@ import { join } from "node:path";
 const HOME = mkdtempSync(join(tmpdir(), "mem-ingest-"));
 process.env.HOME = HOME;
 
-const { startIngest } = await import("../src/center/ingest.mjs");
-const { ingestKey, pending } = await import("../src/center/inbox.mjs");
-const { splitTurns } = await import("../src/worker/push.mjs");
-const { INBOX_DIR } = await import("../src/shared/config.mjs");
+const { startIngest } = await import("../src/core/ingest.mjs");
+const { ingestKey, pending } = await import("../src/core/inbox.mjs");
+const { splitTurns } = await import("../src/cli/push.mjs");
+const { INBOX_DIR } = await import("../src/util/config.mjs");
 
 const TOKEN = "test-token-0123456789abcdef";
 

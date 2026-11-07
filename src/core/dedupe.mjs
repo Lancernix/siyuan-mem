@@ -23,7 +23,7 @@
  * 宁可多写一条重复，也不要少记一条——所以解析失败、模型含糊、候选为空，
  * 一律当 keep 处理。
  */
-import { chat } from "../shared/llm.mjs";
+import { chat } from "../util/llm.mjs";
 
 const PROMPT = `你是记忆库的入库裁判。下面有「待写入的新条目」和每条新条目对应的「库里已有的相关条目」。
 

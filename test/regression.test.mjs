@@ -5,10 +5,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { dedupe } from "../src/shared/readers/index.mjs";
-import { ingestKey } from "../src/center/inbox.mjs";
-import { mergeEntries, planBatches } from "../src/center/extract.mjs";
-import { startUi } from "../src/center/ui.mjs";
+import { dedupe } from "../src/util/readers/index.mjs";
+import { ingestKey } from "../src/core/inbox.mjs";
+import { mergeEntries, planBatches } from "../src/core/extract.mjs";
+import { startUi } from "../src/core/ui.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

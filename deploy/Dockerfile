@@ -20,5 +20,5 @@ COPY scripts ./scripts
 ENV HOME=/data
 VOLUME ["/data"]
 
-ENTRYPOINT ["node", "/app/src/cli.mjs"]
+ENTRYPOINT ["node", "/app/src/cli/cli.mjs"]
 CMD ["serve"]

@@ -8,9 +8,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { beginRound, roundStatus } from "../src/center/serve.mjs";
-import { startUi } from "../src/center/ui.mjs";
-import { willUseModel } from "../src/center/extract.mjs";
+import { beginRound, roundStatus } from "../src/core/serve.mjs";
+import { startUi } from "../src/core/ui.mjs";
+import { willUseModel } from "../src/core/extract.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

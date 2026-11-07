@@ -4,10 +4,11 @@
   "description": "把 harness 会话变成思源笔记里的记忆条目",
   "type": "module",
   "bin": {
-    "mem": "./src/cli.mjs"
+    "mem": "./src/cli/cli.mjs",
+    "mem-mcp": "./src/mcp/main.mjs"
   },
   "scripts": {
-    "mem": "node src/cli.mjs",
+    "mem": "node src/cli/cli.mjs",
     "dist": "node scripts/dist.mjs",
     "test": "node --test"
   },

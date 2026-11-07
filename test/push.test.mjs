@@ -29,8 +29,8 @@ writeFileSync(
   ].join("\n") + "\n"
 );
 
-const { pushOnce } = await import("../src/worker/push.mjs");
-const { listSessions } = await import("../src/shared/harness.mjs");
+const { pushOnce } = await import("../src/cli/push.mjs");
+const { listSessions } = await import("../src/util/harness.mjs");
 
 function fakeCenter() {
   const got = [];
@@ -85,7 +85,7 @@ test("from-scratch：忽略已有偏移，整份重推", async (t) => {
 
 // ---- 自适应退避：活跃 15 分钟，空转翻倍，封顶 60 ----
 
-const { nextGapMs } = await import("../src/worker/push.mjs");
+const { nextGapMs } = await import("../src/cli/push.mjs");
 
 test("退避表：15 / 30 / 60，封顶不再涨", () => {
   const base = 900_000;

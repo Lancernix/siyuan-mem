@@ -7,7 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 
-const { handleMessage, startMcp, formatHits, TOOL } = await import("../src/mcp.mjs");
+const { handleMessage, startMcp, formatHits, TOOL } = await import("../src/mcp/server.mjs");
 
 const hits = [
   {

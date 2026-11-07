@@ -14,9 +14,9 @@
  * 人勾选已经在思源里做完判断，合并本身是纯机械操作，不再调模型。
  */
 
-import { chat } from "../shared/llm.mjs";
-import { hasModel } from "../shared/llm.mjs";
-import { NEGATIVES_PATH, ENTITIES_PATH, ensureDirs } from "../shared/config.mjs";
+import { chat } from "../util/llm.mjs";
+import { hasModel } from "../util/llm.mjs";
+import { NEGATIVES_PATH, ENTITIES_PATH, ensureDirs } from "../util/config.mjs";
 import { readFileSync, writeFileSync } from "node:fs";
 
 /** 强命中阈值：到这个分就直接当同一个东西，不问模型。 */

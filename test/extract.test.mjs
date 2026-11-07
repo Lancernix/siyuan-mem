@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { clampText, parseEntries, draftedSection } from "../src/center/extract.mjs";
+import { clampText, parseEntries, draftedSection } from "../src/core/extract.mjs";
 
 test("短条目原样返回", () => {
   assert.equal(clampText("订货系统 用 TS 6.0.3。"), "订货系统 用 TS 6.0.3。");
