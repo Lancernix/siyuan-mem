@@ -4,11 +4,11 @@
  * 跑在独立的测试笔记本里，不碰正式库；结束删掉整本。
  * 不调模型（没 key），所以抽取用不到，条目是手写进去的。
  */
-import { loadConfig } from "../src/shared/config.mjs";
-import { SiYuan } from "../src/shared/siyuan.mjs";
-import { Store, ATTR } from "../src/center/store.mjs";
-import { archive, readRange, listParts, knownParts, loadRawIndex, saveRawIndex } from "../src/shared/raw.mjs";
-import { resolveEntities, loadEntities, applyPending, parsePending, similarity, norm } from "../src/center/entities.mjs";
+import { loadConfig } from "../src/util/config.mjs";
+import { SiYuan } from "../src/util/siyuan.mjs";
+import { Store, ATTR } from "../src/core/store.mjs";
+import { archive, readRange, listParts, knownParts, loadRawIndex, saveRawIndex } from "../src/util/raw.mjs";
+import { resolveEntities, loadEntities, applyPending, parsePending, similarity, norm } from "../src/core/entities.mjs";
 
 const NB = "99-记忆测试";
 const base = loadConfig();
@@ -144,7 +144,7 @@ await new Promise((r) => setTimeout(r, 3000));
 const before = await sy.sql(`SELECT id FROM blocks WHERE ial LIKE '%custom-mem-entity="京造风盾500"%'`);
 const m = await store.writeEntry({ text: "京造风盾500 这条裤子洗过三次没起球", entity: "京造风盾500", type: "fact" }, { session: session + "-b", machine: "Mac" });
 await new Promise((r) => setTimeout(r, 4000));
-const merged = await (await import("../src/center/entities.mjs")).mergeEntities(sy, ids.entities, "京造风盾500", canon, { log: (l) => console.log("   " + l) });
+const merged = await (await import("../src/core/entities.mjs")).mergeEntities(sy, ids.entities, "京造风盾500", canon, { log: (l) => console.log("   " + l) });
 ok("回填了条目", merged.changed >= 1, `${merged.changed} 条`);
 const after = await sy.getBlockAttrs(w.id);
 ok("原条目不受影响", after?.[ATTR.entity] === "风盾500");

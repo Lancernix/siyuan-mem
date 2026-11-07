@@ -8,7 +8,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { resolveNotebookId } = await import("../src/shared/siyuan.mjs");
+const { resolveNotebookId } = await import("../src/util/siyuan.mjs");
 
 const fake = (list) => ({ listNotebooks: async () => list });
 

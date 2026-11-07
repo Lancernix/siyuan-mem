@@ -8,7 +8,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { entryAttrs, ATTR } = await import("../src/center/store.mjs");
+const { entryAttrs, ATTR } = await import("../src/core/store.mjs");
 
 const entry = { text: "x", entity: "订货系统", type: "decision", brief: "缩写", confidence: 4 };
 const meta = { source: "workbuddy", session: "s1", date: "2026-11-03", project: "mini-wms", machine: "Mac", raw: "assets/a.jsonl#1-2" };

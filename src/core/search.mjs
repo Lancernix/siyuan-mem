@@ -15,10 +15,10 @@
  * 判重那套（bigram + 模型）在这里没用——那是判"是不是同一件事"，
  * 这里是判"哪几条跟这句话有关"，两回事。
  */
-import { loadConfig } from "../shared/config.mjs";
-import { SiYuan, resolveNotebookId } from "../shared/siyuan.mjs";
-import { event } from "../shared/log.mjs";
-import { stripRawLink } from "../shared/raw.mjs";
+import { loadConfig } from "../util/config.mjs";
+import { SiYuan, resolveNotebookId } from "../util/siyuan.mjs";
+import { event } from "../util/log.mjs";
+import { stripRawLink } from "../util/raw.mjs";
 
 const ATTR = {
   hash: "custom-mem-hash",

@@ -14,9 +14,9 @@
  */
 import { statSync } from "node:fs";
 
-import { listSessions } from "../src/shared/harness.mjs";
-import { readLog } from "../src/shared/readers/index.mjs";
-import { open } from "../src/center/jobs.mjs";
+import { listSessions } from "../src/util/harness.mjs";
+import { readLog } from "../src/util/readers/index.mjs";
+import { open } from "../src/core/jobs.mjs";
 
 const APPLY = process.argv.includes("--apply");
 const BOX = process.env.MEM_BOX || "20261029100254-hk4qbtl";

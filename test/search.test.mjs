@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { termsOf } = await import("../src/center/search.mjs");
+const { termsOf } = await import("../src/core/search.mjs");
 
 test("单个汉字是有意义的检索词", () => {
   // 原来一律要求 ≥2 字，`mem search 车` 会拆出空数组；SQL 里没有 LIKE 条件，

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { SiYuan, resolveNotebookId as resolveNb } from "../shared/siyuan.mjs";
-import { loadState, saveState, loadGroups, saveGroups, saveConfig } from "../shared/config.mjs";
-import { stripRawLink } from "../shared/raw.mjs";
+import { SiYuan, resolveNotebookId as resolveNb } from "../util/siyuan.mjs";
+import { loadState, saveState, loadGroups, saveGroups, saveConfig } from "../util/config.mjs";
+import { stripRawLink } from "../util/raw.mjs";
 
 export const ATTR = {
   status: "custom-mem-status",

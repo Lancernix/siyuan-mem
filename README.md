@@ -32,7 +32,7 @@
 ```bash
 cd ~/Codes/siyuan-mem
 cp config.example.json ~/.siyuan-mem/config.json   # 首次运行也会自动生成
-node src/cli.mjs init
+node src/cli/cli.mjs init
 ```
 
 `init` 会建一个 `Harness-Mem` 笔记本和三个文档（`01-条目` 当目录用，下面按月份分 `/2026-10`；`02-实体`；`03-实体待确认`）。
@@ -55,66 +55,68 @@ mem status
 
 ```
 src/
-  cli.mjs            命令入口，只做参数分发
-  shared/            两边都用
-    config.mjs       配置读写（默认值合并、0600）
-    siyuan.mjs       思源 API 客户端
-    llm.mjs          模型调用：schema 强制、重试、降级、记账
-    log.mjs          结构化事件日志
-    raw.mjs          原文归档与指针
-    harness.mjs      扫本机各家的会话文件
-    readers/         五家 harness 各一个读取器 + 共用层
-  center/            中心：会调模型、会写思源
-    serve.mjs        常驻循环（每轮扫描 → 入队 → 抽取 → 写库）
-    ingest.mjs       接收端 HTTP（/api/ingest、/api/search、/api/ping）
-    jobs.mjs         一轮的编排：分批、判重、收敛、写条目、原文保活
-    extract.mjs      抽取（prompt + schema）
-    dedupe.mjs       判重：候选挑选 + 模型裁决
-    entities.mjs     话题归一：别名、合并、待确认
-    store.mjs        写思源（块、属性、文档结构）
-    search.mjs       检索（SQL + 打分）
-    prompt.mjs       提示词外置、版本、备份、体检
-    inbox.mjs        本地队列
-    repair.mjs       补偿账本（写新条成功、标旧条失败）
+  cli/                装在被采集的那台机器上
+    cli.mjs           命令入口（bin: mem）
+    push.mjs          读本机日志 → 推给中心（增量切片、自适应退避）
+    service.mjs       装成 launchd / systemd 服务
+  core/               装在思源那台机器上：调模型、写库
+    serve.mjs         常驻循环（扫描 → 入队 → 抽取 → 写库，每轮有预算）
+    ingest.mjs        接收端 HTTP（/api/ingest、/api/search、/api/ping）
+    jobs.mjs          一轮的编排：分批、判重、收敛、写条目、原文保活
+    extract.mjs       抽取（prompt + schema）
+    dedupe.mjs        判重：候选挑选 + 模型裁决
+    entities.mjs      话题归一：别名、合并、待确认
+    store.mjs         写思源（块、属性、文档结构）
+    search.mjs        本地检索（SQL + 打分）
+    prompt.mjs        提示词外置、版本、备份、体检
+    inbox.mjs         队列
+    repair.mjs        补偿账本
     digest.mjs / entity-view.mjs / ui.mjs   给人看的几层
-  worker/            边缘：只搬运，不碰模型也不碰思源
-    push.mjs         读本机日志 → 推给中心（含增量切片）
-    remote.mjs       远端检索客户端（问中心的 /api/search）
-  mcp.mjs            MCP server（stdio），一个工具 memory_search
-  ops/service.mjs    装成 launchd / systemd 服务（中心 serve、边缘 push 各一个 label）
+  mcp/                给 harness 调
+    server.mjs        协议实现（stdio、一个工具 memory_search）
+    main.mjs          独立入口（bin: mem-mcp），只走中心
+  util/               三边共用
+    config.mjs        配置读写（默认值合并、0600、notebookId）
+    siyuan.mjs        思源 API 客户端
+    llm.mjs           模型调用：schema 强制、重试、降级、记账
+    log.mjs           结构化事件日志
+    raw.mjs           原文归档与指针
+    harness.mjs       扫本机各家的会话文件
+    remote.mjs        中心的 /api/search 客户端
+    readers/          五家 harness 各一个读取器 + 共用层
 ```
 
-三条边界：**center** 调模型、写思源；**worker** 只搬运；**mcp** 只读。三者共用
-`shared/`，任何一边都不许绕过它去直连思源的写接口。
+三条边界：**core** 调模型、写思源；**cli** 只搬运；**mcp** 只读。三者共用 `util/`，
+任何一边都不许绕过它去直连思源的写接口。
 
-测试：`npm test`（117 项，全部是纯函数或假服务端，不连真思源、不真调模型）。
+测试：`npm test`（125 项，全部是纯函数或假服务端，不连真思源、不真调模型）。
 
 ## 用法
 
 ```bash
-node src/cli.mjs status              # 连通性、条目数、队列长度、服务在不在
-node src/cli.mjs once                # 处理队列（--dry 先看要写什么）
-node src/cli.mjs serve               # 常驻：每轮找新会话 → 投队列 → 写思源
-node src/cli.mjs serve --once        # 只跑一轮（给 launchd 定时用）
-node src/cli.mjs search 风盾500       # 查
-node src/cli.mjs search --all 风盾500 # 连已过时的一起查
-node src/cli.mjs scan                # 本机有哪些 harness 的会话，各多少
-node src/cli.mjs scan --all          # 全读一遍，数轮数和字数
-node src/cli.mjs audit               # 对账：收了多少字、丢了多少字、为什么丢
-node src/cli.mjs audit --all         # 全部会话的对账表
-node src/cli.mjs review 20           # 最近 20 条，人工扫一眼
-node src/cli.mjs remember "..." --entity 思源MCP --type fact
-node src/cli.mjs forget <块id>        # 标成过时，不删
-node src/cli.mjs show <块id>          # 看这条结论对应的原文（按指针回读附件）
-node src/cli.mjs raw list             # 原文归档了哪些 part
-node src/cli.mjs entity               # 实体表
-node src/cli.mjs entity review        # 执行 03-实体待确认 里勾选的项
-node src/cli.mjs model list qwen     # 目录里的 provider / 某家的模型（带价格）
-node src/cli.mjs model refresh       # 刷新 models.dev 目录
-node src/cli.mjs ui                  # 本地面板 127.0.0.1:7787
-node src/cli.mjs service install     # 装成 launchd 服务
-node src/cli.mjs center setup        # 把本机设成中心（开接收端、生成 token）
-node src/cli.mjs push --to URL --token T --save   # 边缘机器：推到中心
+node src/cli/cli.mjs status              # 连通性、条目数、队列长度、服务在不在
+node src/cli/cli.mjs once                # 处理队列（--dry 先看要写什么）
+node src/cli/cli.mjs serve               # 常驻：每轮找新会话 → 投队列 → 写思源
+node src/cli/cli.mjs serve --once        # 只跑一轮（给 launchd 定时用）
+node src/cli/cli.mjs search 风盾500       # 查
+node src/cli/cli.mjs search --all 风盾500 # 连已过时的一起查
+node src/cli/cli.mjs scan                # 本机有哪些 harness 的会话，各多少
+node src/cli/cli.mjs scan --all          # 全读一遍，数轮数和字数
+node src/cli/cli.mjs audit               # 对账：收了多少字、丢了多少字、为什么丢
+node src/cli/cli.mjs audit --all         # 全部会话的对账表
+node src/cli/cli.mjs review 20           # 最近 20 条，人工扫一眼
+node src/cli/cli.mjs remember "..." --entity 思源MCP --type fact
+node src/cli/cli.mjs forget <块id>        # 标成过时，不删
+node src/cli/cli.mjs show <块id>          # 看这条结论对应的原文（按指针回读附件）
+node src/cli/cli.mjs raw list             # 原文归档了哪些 part
+node src/cli/cli.mjs entity               # 实体表
+node src/cli/cli.mjs entity review        # 执行 03-实体待确认 里勾选的项
+node src/cli/cli.mjs model list qwen     # 目录里的 provider / 某家的模型（带价格）
+node src/cli/cli.mjs model refresh       # 刷新 models.dev 目录
+node src/cli/cli.mjs ui                  # 本地面板 127.0.0.1:7787
+node src/cli/cli.mjs service install     # 装成 launchd 服务
+node src/cli/cli.mjs center setup        # 把本机设成中心（开接收端、生成 token）
+node src/cli/cli.mjs push --to URL --token T --save   # 边缘机器：推到中心
 ```
 
 软链到 PATH 之后就是 `mem status`、`mem once`。
@@ -616,12 +618,22 @@ curl -H "authorization: Bearer $TOKEN" "https://中心地址/api/search?q=静默
 装第二台机器时就多一个能配错的地方。检索失败会带着原因返回 500（比如"找不到笔记本"），
 不会退化成空结果——否则边缘那边分不清是中心坏了还是真的没记过。
 
-### MCP：`mem mcp`
+### MCP：`mem-mcp` / `mem mcp`
+
+两个入口，同一份实现：
 
 ```bash
-mem mcp                      # 本机有思源：直连
-mem mcp --to https://… --token …   # 边缘：走中心的 /api/search
+# 独立入口，只走中心。适合 npx 直接拉起（挂在 harness 上的机器通常没有思源）
+npx -y siyuan-mem mem-mcp --to https://… --token …
+
+# 同一个包里的子命令；不填 --to 就直连本机思源
+mem mcp
+mem mcp --to https://… --token …
 ```
+
+`mem-mcp` 只认中心，是因为它装在"有 harness、没思源"的机器上：让它去试本地只会
+超时，而超时的表现是"每次都查不到"，看起来像记忆库是空的。地址和 token 不填就读
+配置里的 `push.to` / `push.token`——`mem push --save` 已经写过一次。
 
 stdio 传输，一个工具 `memory_search`，参数 `query` / `limit` / `topic` / `days` /
 `include_superseded`。返回的是人读文本（条目正文 + 话题 + 日期 + 原文指针），不是 JSON——
@@ -634,7 +646,11 @@ stdio 传输，一个工具 `memory_search`，参数 `query` / `limit` / `topic`
 Claude Code 注册：
 
 ```bash
-claude mcp add siyuan-mem -- mem mcp --to https://中心地址 --token $TOKEN
+# Claude Code
+claude mcp add siyuan-mem -- mem-mcp --to https://中心地址 --token $TOKEN
+
+# 或者不装，让 npx 每次拉（适合多台机器，版本自动跟上）
+claude mcp add siyuan-mem -- npx -y siyuan-mem mem-mcp --to https://中心地址 --token $TOKEN
 ```
 
 装上只是"能调"，不等于"会调"。CLAUDE.md 里补一句什么时候该查，比指望模型自觉靠谱：

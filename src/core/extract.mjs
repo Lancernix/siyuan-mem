@@ -8,9 +8,9 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
-import { chat, chatObject, hasModel } from "../shared/llm.mjs";
+import { chat, chatObject, hasModel } from "../util/llm.mjs";
 import { resolvePrompt } from "./prompt.mjs";
-import { event } from "../shared/log.mjs";
+import { event } from "../util/log.mjs";
 
 const STOP = new Set([
   "继续", "好的", "好", "嗯", "可以", "行", "谢谢", "ok", "OK", "是的", "不对",

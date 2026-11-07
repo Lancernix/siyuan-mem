@@ -17,7 +17,7 @@
  */
 import fs from "node:fs";
 
-import { open } from "../src/center/jobs.mjs";
+import { open } from "../src/core/jobs.mjs";
 
 const APPLY = process.argv.includes("--apply");
 const BOX = process.env.MEM_BOX || "20261029100254-hk4qbtl";

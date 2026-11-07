@@ -63,13 +63,13 @@ openssl rand -base64 24
 SIYUAN_NET=<上一步查到的网络名> docker compose up -d --build
 
 # 能看到思源版本和条目数，说明连通了
-docker compose exec mem node /app/src/cli.mjs status
+docker compose exec mem node /app/src/cli/cli.mjs status
 
 # 建笔记本「Harness-Mem」和条目/实体那几个文档（幂等，重复跑没关系）
-docker compose exec mem node /app/src/cli.mjs init
+docker compose exec mem node /app/src/cli/cli.mjs init
 ```
 
-**`node /app/src/cli.mjs` 不能省。** `docker compose exec mem init` 里的 `init`
+**`node /app/src/cli/cli.mjs` 不能省。** `docker compose exec mem init` 里的 `init`
 会被当成一个独立的可执行文件（alpine 的 busybox init），报的错是
 `init: must be run as PID 1`——跟本程序没有任何关系。exec 不走 ENTRYPOINT，
 所以每条命令都要自己带上 node 和脚本路径。后面所有 `docker compose exec mem …`
@@ -81,7 +81,7 @@ init 第一次有可能报 `document metadata is not ready`：笔记本刚建，
 ## 4. 确认接收端开着
 
 ```bash
-docker compose exec mem node /app/src/cli.mjs center status
+docker compose exec mem node /app/src/cli/cli.mjs center status
 ```
 
 应该看到 `0.0.0.0:7788` 和 token。没开就去配置里把 `ingest.enabled` 设成 true 再
@@ -113,9 +113,9 @@ mem push --to https://<域名>:7788 --token <ingest.token> --all --from-scratch 
 ## 6. 看它跑
 
 ```bash
-docker compose exec mem node /app/src/cli.mjs status
-docker compose exec mem node /app/src/cli.mjs log stats
-docker compose exec mem node /app/src/cli.mjs review 20    # 最近 20 条，人眼扫一遍
+docker compose exec mem node /app/src/cli/cli.mjs status
+docker compose exec mem node /app/src/cli/cli.mjs log stats
+docker compose exec mem node /app/src/cli/cli.mjs review 20    # 最近 20 条，人眼扫一遍
 ```
 
 三个指标值得盯：

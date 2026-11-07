@@ -1,4 +1,4 @@
-import { loadConfig } from "../shared/config.mjs";
+import { loadConfig } from "./config.mjs";
 
 /**
  * 远端检索：边缘机器够不着思源，只能问中心。
