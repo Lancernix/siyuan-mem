@@ -2,76 +2,81 @@
 import { readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
-import { CONFIG_PATH, INBOX_DIR, loadConfig, LOG_PATH, machineId, saveConfig, offsetsOf, loadOffsets } from "./config.mjs";
-import { PROVIDERS, resolveModel, hasModel, probe as probeModel, saveModelChoice, maskKey, usageToday } from "./llm.mjs";
-import { formatHits, ATTR } from "./store.mjs";
-import { parseArgs } from "./args.mjs";
-import { loadRawIndex, readRange, parsePtr } from "./raw.mjs";
-import { loadEntities, addEntity, mergeEntities, applyPending, shotList } from "./entities.mjs";
-import { print as printDigest } from "./digest.mjs";
-import { writeEntities } from "./entity-view.mjs";
-import { readDays, stats as logStats, dayOf } from "./log.mjs";
-import { normalizeTurns, promptState, toExchanges } from "./extract.mjs";
-import { drop, pending, readSession } from "./inbox.mjs";
-import { searchEntries, remoteSearch } from "./search.mjs";
-import { readLog, readJsonLines, auditMessages, HARNESS_NAMES } from "./readers/index.mjs";
-import { listSessions, summarize } from "./harness.mjs";
-import { open, enqueueLog, processQueue } from "./jobs.mjs";
-import { serve, acquire, release, lockInfo } from "./serve.mjs";
-import { startUi } from "./ui.mjs";
-import { install, uninstall, serviceStatus, systemdUnit, PLIST_PATH, PLIST_PUSH_PATH } from "./service.mjs";
-import { pushOnce, pushWatch, pingPush } from "./push.mjs";
+import { CONFIG_PATH, INBOX_DIR, loadConfig, LOG_PATH, machineId, saveConfig, offsetsOf, loadOffsets } from "./shared/config.mjs";
+import { PROVIDERS, resolveModel, hasModel, probe as probeModel, saveModelChoice, maskKey, usageToday } from "./shared/llm.mjs";
+import { formatHits, ATTR } from "./center/store.mjs";
+import { parseArgs } from "./shared/args.mjs";
+import { loadRawIndex, readRange, parsePtr } from "./shared/raw.mjs";
+import { loadEntities, addEntity, mergeEntities, applyPending, shotList } from "./center/entities.mjs";
+import { print as printDigest } from "./center/digest.mjs";
+import { writeEntities } from "./center/entity-view.mjs";
+import { readDays, stats as logStats, dayOf } from "./shared/log.mjs";
+import { normalizeTurns, promptState, toExchanges } from "./center/extract.mjs";
+import { drop, pending, readSession } from "./center/inbox.mjs";
+import { searchEntries } from "./center/search.mjs";
+import { remoteSearch } from "./worker/remote.mjs";
+import { readLog, readJsonLines, auditMessages, HARNESS_NAMES } from "./shared/readers/index.mjs";
+import { listSessions, summarize } from "./shared/harness.mjs";
+import { open, enqueueLog, processQueue } from "./center/jobs.mjs";
+import { serve, acquire, release, lockInfo } from "./center/serve.mjs";
+import { startUi } from "./center/ui.mjs";
+import { install, uninstall, serviceStatus, systemdUnit, PLIST_PATH, PLIST_PUSH_PATH } from "./ops/service.mjs";
+import { pushOnce, pushWatch, pingPush } from "./worker/push.mjs";
 import { startMcp } from "./mcp.mjs";
-import { checkPrompt, history as promptHistory, PROMPT_PATH, resetPrompt, restore, savePrompt } from "./prompt.mjs";
+import { checkPrompt, history as promptHistory, PROMPT_PATH, resetPrompt, restore, savePrompt } from "./center/prompt.mjs";
 
 const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 
-  mem init [--force]           建笔记本和五个文档（幂等；--force 丢掉 id 缓存重解析）
-  mem status                   连通性、条目数、队列长度、服务是否在跑
-  mem once [--dry] [--no-model] 处理 inbox 里的全部会话（跑的期间占锁）
-  mem serve [--once]           常驻：每轮找新会话 → 投队列 → 写思源
-      [--interval 分钟] [--dry] [--no-model] [--force]
-  mem ingest <file.json>       把一个会话文件投入队列（测试用）
-  mem ingest-log <日志> [--force] [--quiet 秒]   直接读会话日志入队（默认跳过还在写的）
-  mem scan [--n 3] [--all]     列出本机各 harness 的会话（--all 逐个读一遍数轮数）
-  mem audit [文件...]          逐块对账：收了多少字，丢了多少字，为什么丢
-  mem search <词...>           查记忆，默认只看 current
-  mem search --all <词...>     查记忆，含已过时的
-  mem review [n]               列最近 n 条，人工扫一眼
-  mem show <块id> [--chars N]   看这条结论对应的原文（按指针回读附件里那几轮）
-  mem digest                   按会话分组打印记忆（给人读的那一层；不写库）
-  mem raw list [会话id]        看原文归档了哪些 part
-  mem entity [list [词]]       看实体表
+采集与抽取
+  mem init [--force]              建笔记本和文档（幂等；--force 丢掉 id 缓存重解析）
+  mem status                      连通性、条目数、队列长度、服务是否在跑
+  mem serve [--once] [--interval 分钟] [--dry] [--no-model] [--force]
+                                  常驻：每轮找新会话 → 投队列 → 写思源
+  mem once [--dry] [--no-model]   只跑一轮（处理完 inbox 就退）
+  mem scan [--n 3] [--all]        列出本机各 harness 的会话
+  mem audit [文件...]             逐块对账：收了多少字、丢了多少、为什么丢
+  mem digest                      按会话分组打印记忆（给人读，不写库）
+  mem raw list [会话id]           看原文归档了哪些 part
+
+检索
+  mem search <词...>              默认只看 current（--limit --topic --project --type --days --json）
+  mem search --all <词...>        连已过时的也查
+  mem search --to URL <词...>     从中心查（边缘机器用，token 取 push.token 或 --token）
+  mem review [n]                  列最近 n 条，人工扫一眼
+  mem show <块id> [--chars N]     回读这条结论对应的原文
+  mem mcp [--to URL] [--token T]  起 MCP server（stdio），给 harness 调召回
+
+实体
+  mem entity [list [词]]          看实体表
   mem entity add <名> [--alias "别名1|别名2"]
-  mem entity merge <旧名> <新名>   合并并回填条目（纯机械，不调模型）
-  mem entity review [--dry]    执行 03-实体待确认 里勾选的项
-  mem entity reindex           重建 02-实体（话题 → 块引用，锚文本用摘要）
+  mem entity merge <旧名> <新名>  合并并回填条目（纯机械，不调模型）
+  mem entity review [--dry]       执行 03-实体待确认 里勾选的项
+  mem entity reindex              重建 02-实体
+
+手工
   mem remember <文本> [--entity X] [--type decision|fact|preference|reference]
-  mem forget <块id>            标成 superseded（不删）
-  mem prompt [show|set <文件>|reset|history]
-                               看/改抽取提示词；不传子命令是看状态
-                               set 会先备份旧版；传 - 从标准输入读
-  mem model                    看当前模型配置与今天的用量
-  mem model use <provider> [--key sk-...] [--name 模型名] [--wire openai|anthropic|gemini] [--base URL]
-  mem model test               真发一次请求，自证 key / 地址 / JSON 模式都通
-  mem model list               列内置的十家（协议、默认模型、端点）
-                               别家不内置，写 --base URL 直接接
-  mem center [status]          看接收端（给别的机器推会话用）
+  mem forget <块id>               标成 superseded（不删）
+
+模型与提示词
+  mem model                       当前配置与今日用量
+  mem model use <provider> [--key …] [--name …] [--wire openai|anthropic|gemini] [--base URL]
+  mem model test                  真发一次请求，自证 key / 地址 / JSON 模式都通
+  mem model list                  列内置的十家
+  mem prompt [show|set <文件>|reset|history|restore <版本>]
+                                  看/改抽取提示词；set 会先备份旧版，传 - 读标准输入
+
+中心与边缘
+  mem center [status]             看接收端
   mem center setup [--port 7788] [--bind 0.0.0.0] [--rotate]
-                               把本机设成中心：开接收端、生成 token、打印边缘命令
+                                  把本机设成中心，生成 token，打印边缘命令
   mem push [--to URL] [--token T] [--once|--watch] [--dry] [--all] [--from-scratch] [--test]
-                               边缘机器：把本机会话推给中心（默认只推安静 3 分钟的）
-  mem ui [--port 7787]         起本地面板（只读；点"跑一轮"会自己抢锁）
-  mem service [status]         看系统服务状态
-  mem service install [--interval 分钟] [--print]   装成 launchd 服务
-  mem service uninstall        卸载
-  mem service unit             打印 systemd 单元（Linux 用，不落盘）
-  mem log [stats|tail|grep]    结构化事件日志：stats 看汇总，tail 看最近，grep 搜字段
-  mem search <关键词>           召回：查记忆条目（--limit=8 / --topic= / --project= / --type= / --days= / --json）
-  mem search --to URL <关键词>  从中心查（边缘机器用；token 取 push.token 或 --token）
-  mem mcp [--to URL] [--token T]
-                               起 MCP server（stdio），给 Claude Code 等 harness 调召回
-                               --to 不填就查本机思源；填了就走中心的 /api/search
+                                  把本机会话推给中心（默认只推安静 3 分钟的）
+
+运维
+  mem service [status|install|uninstall|unit] [--push]
+                                  装/卸常驻服务：默认中心 serve，--push 是边缘推送
+  mem log [stats|tail|grep]       结构化事件日志
+  mem ui [--port 7787]            起本地只读面板
 
 配置：${CONFIG_PATH}
 队列：${INBOX_DIR}

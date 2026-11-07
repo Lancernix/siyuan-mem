@@ -8,9 +8,9 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
-import { chat, chatObject, hasModel } from "./llm.mjs";
+import { chat, chatObject, hasModel } from "../shared/llm.mjs";
 import { resolvePrompt } from "./prompt.mjs";
-import { event } from "./log.mjs";
+import { event } from "../shared/log.mjs";
 
 const STOP = new Set([
   "继续", "好的", "好", "嗯", "可以", "行", "谢谢", "ok", "OK", "是的", "不对",
@@ -89,10 +89,10 @@ const SYSTEM_PROMPT = `你是记忆整理器。输入是一段人机对话，按
 |---|---|---|
 | 自采暖暖气片异响 | 「异响」是这条记忆的内容，不是话题 | 自采暖暖气片 |
 | 壁挂炉压力异常 | 同上，症状不是主体 | 壁挂炉 |
-| MiniWMS 路由设计 | 子话题：加了限定词就是拆 | MiniWMS |
+| 订货系统 路由设计 | 子话题：加了限定词就是拆 | 订货系统 |
 | 怎么配置 MCP | 疑问句 | MCP |
 | 条目上限改成按批数自适应 | 这是一条结论，不是东西 | siyuan-mem |
-| 列表校验 / 扁平端点 / idx_sku_code | 动作、细节、字段名 | MiniWMS |
+| 列表校验 / 扁平端点 / idx_sku_code | 动作、细节、字段名 | 订货系统 |
 
 **同一个东西只有一个名字。** 同一场对话里两次提到它用同一个词。换着叫
 （自采暖暖气片 / 自采暖暖气片异响 / 租房采暖）等于把它拆成三个话题，
@@ -100,7 +100,7 @@ const SYSTEM_PROMPT = `你是记忆整理器。输入是一段人机对话，按
 
 两条判据，都过才是话题：
 
-1. 这个词以后会不会在别的对话里再出现？（"MiniWMS 上次怎么说的"——会）
+1. 这个词以后会不会在别的对话里再出现？（"订货系统 上次怎么说的"——会）
 2. 它能不能当主语？「__ 是什么」说得通，才是名词。
 
 已经给过的「已有实体」清单里有对得上的词，**直接用那个**，不要另造近义名；
@@ -115,9 +115,9 @@ const SYSTEM_PROMPT = `你是记忆整理器。输入是一段人机对话，按
 一条记忆 = 这个话题下**一个点**的完整总结，**自带主语**，别人不看原文也能懂。
 
 - 坏：SKU 与库位端点统一为扁平 REST 形态（谁说？哪个项目的？）
-- 好：MiniWMS 的接口统一成扁平 REST，都用 :id 定位，不再用 /sku/list 这种动词式路径。
+- 好：订货系统 的接口统一成扁平 REST，都用 :id 定位，不再用 /sku/list 这种动词式路径。
 - 坏：索引判据：查询会真实发生且当前无索引可用
-- 好：MiniWMS 加索引的判据是「查询真的会发生 + 现在没索引可用」，两条都成立才加。
+- 好：订货系统 加索引的判据是「查询真的会发生 + 现在没索引可用」，两条都成立才加。
 
 上限 300 字，2-4 句，陈述句，不要"用户询问""助手建议"这类元叙述。
 先给结论，再补条件、理由、做法。**把一个点讲完整**比写得短重要：
@@ -141,8 +141,8 @@ const SYSTEM_PROMPT = `你是记忆整理器。输入是一段人机对话，按
 - 把结论本身压短，保留主语和结论，丢掉条件和细节
 
 例：
-  text   MiniWMS 的索引改动要三处同步：init.sql、实体 @Index、云端库 ALTER，再用 EXPLAIN 验证。
-  brief  MiniWMS 改索引要三处同步 + EXPLAIN 验证
+  text   订货系统 的索引改动要三处同步：init.sql、实体 @Index、云端库 ALTER，再用 EXPLAIN 验证。
+  brief  订货系统 改索引要三处同步 + EXPLAIN 验证
 
 只输出 JSON 对象，不要解释，不要代码块标记：
 {"entries":[{"brief":"...","text":"...","entity":"名词短语，2-6字","type":"decision|fact|preference|reference","confidence":1}]}
@@ -409,7 +409,7 @@ async function callModel(cfg, batch, entityShot = [], part = null) {
     );
   }
   // 本场会话前面几批已经抽出来的条目。只传话题名是不够的——模型知道「聊过
-  // MiniWMS」，但不知道「上次记的是路由改成按目录树加载」，于是照样记一遍。
+  // 订货系统」，但不知道「上次记的是路由改成按目录树加载」，于是照样记一遍。
   const drafted = draftedSection(part?.drafted);
   if (drafted) heads.push(drafted);
   const system = heads.join("\n\n");
@@ -587,7 +587,7 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
   let overflow = 0;
   let lastError = "";
   // 本会话已经抽出的话题名。每批都只看得到自己那一万六十字，不给它这个，
-  // 同一场对话里会顺序长出「MiniWMS」「MiniWMS 技术栈」「MiniWMS 路由设计」。
+  // 同一场对话里会顺序长出「订货系统」「订货系统 技术栈」「订货系统 路由设计」。
   const sessionEntities = [];
   // 本会话已经抽出的条目。串行的意义就在这儿：后一批能看着前面的结论抽，
   // 同一件事不会在批与批的接缝处再记一遍。并发发出去就只剩 converge 事后归并了。

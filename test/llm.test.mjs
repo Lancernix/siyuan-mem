@@ -17,8 +17,8 @@ import { join } from "node:path";
 // 先把 HOME 挪走：usage.jsonl 会写到 ~/.siyuan-mem 下，别污染真实用量。
 process.env.HOME = mkdtempSync(join(tmpdir(), "siyuan-mem-test-"));
 
-const { chat, usageToday, resolveModel } = await import("../src/llm.mjs");
-const { extractEntries } = await import("../src/extract.mjs");
+const { chat, usageToday, resolveModel } = await import("../src/shared/llm.mjs");
+const { extractEntries } = await import("../src/center/extract.mjs");
 
 let hit = 0;
 let scenario = "ok";

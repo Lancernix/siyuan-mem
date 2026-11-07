@@ -14,9 +14,9 @@
  * 人勾选已经在思源里做完判断，合并本身是纯机械操作，不再调模型。
  */
 
-import { chat } from "./llm.mjs";
-import { hasModel } from "./llm.mjs";
-import { NEGATIVES_PATH, ENTITIES_PATH, ensureDirs } from "./config.mjs";
+import { chat } from "../shared/llm.mjs";
+import { hasModel } from "../shared/llm.mjs";
+import { NEGATIVES_PATH, ENTITIES_PATH, ensureDirs } from "../shared/config.mjs";
 import { readFileSync, writeFileSync } from "node:fs";
 
 /** 强命中阈值：到这个分就直接当同一个东西，不问模型。 */
@@ -421,7 +421,7 @@ export async function resolveEntities({ sy, cfg, ids, names, useModel = true, ta
 /* ---------- 话题收敛 ---------- */
 
 const CONVERGE_PROMPT = `你是记忆系统的话题管理员。系统里有一个人，他把自己的对话沉淀成笔记，
-每条笔记挂在一个「话题」下。话题是「一个项目、一个东西、一件事」，比如「MiniWMS」「风盾500」。
+每条笔记挂在一个「话题」下。话题是「一个项目、一个东西、一件事」，比如「订货系统」「风盾500」。
 
 给你现存的全部话题，以及这次新出现的话题（标了「同一段对话」的那几个来自同一次聊天）。
 找出应该合并的。
@@ -433,7 +433,7 @@ const CONVERGE_PROMPT = `你是记忆系统的话题管理员。系统里有一�
 
 - 「上次买的那台新加坡机器线路太绕」——他把「海外服务器选型」「新加坡VPS线路」
   「香港VPS选型」「跨境代理方案」当成一件事在讲，这四个应该合成一个话题。
-- 「MiniWMS 那个项目」和「风盾500 那条裤子」是两件事，不合并。
+- 「订货系统 那个项目」和「风盾500 那条裤子」是两件事，不合并。
 
 ## 同一段对话里冒出好几个名字，通常说明粒度切碎了
 
@@ -455,7 +455,7 @@ const CONVERGE_PROMPT = `你是记忆系统的话题管理员。系统里有一�
 
 ## 绝对不要合并
 
-- 两个不同的项目、不同的东西（MiniWMS 和 精简WMS设计 是两个项目/两份文档）。
+- 两个不同的项目、不同的东西（订货系统 和 精简设计 是两个项目/两份文档）。
 - 型号、版本、规格不同的东西（风盾500 和 风盾500pro 是两个 SKU）。
 - 只是字面像但实际无关的。
 
@@ -469,7 +469,7 @@ const CONVERGE_PROMPT = `你是记忆系统的话题管理员。系统里有一�
 /**
  * 话题收敛：一次看全表，把子话题并回父话题。
  *
- * 为什么必须有这一步：本地字面匹配解决不了「MiniWMS SKU 模型 → MiniWMS」——
+ * 为什么必须有这一步：本地字面匹配解决不了「订货系统 SKU 模型 → 订货系统」——
  * 差了 7 个字，`long.includes(short) && diff <= 4` 不成立，于是只能进待确认。
  * 而调松阈值会把「风盾500」和「风盾500pro」也吃进去，那是更糟的错误。
  * 这件事只有语义判断能做，所以攒成一次调用看全表。

@@ -12,7 +12,7 @@ import { join } from "node:path";
 
 process.env.HOME = mkdtempSync(join(tmpdir(), "mem-prompt-"));
 
-const { checkPrompt, resolvePrompt, savePrompt, resetPrompt, history, PROMPT_PATH } = await import("../src/prompt.mjs");
+const { checkPrompt, resolvePrompt, savePrompt, resetPrompt, history, PROMPT_PATH } = await import("../src/center/prompt.mjs");
 
 const BUILTIN = `你是记忆整理器。只输出 JSON。字段：entries[].text / brief / entity。
 一条记忆 2-4 句，话题用名词短语。`.padEnd(500, "　");

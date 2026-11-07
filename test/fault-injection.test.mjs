@@ -26,7 +26,7 @@ function run(code) {
 test("原文传到第 2 段时挂了：重试只补缺的那几段，不重传、不出现重叠", () => {
   const out = run(`
     import { readFileSync } from "node:fs";
-    import { archive } from "./src/raw.mjs";
+    import { archive } from "./src/shared/raw.mjs";
 
     const cfg = { raw: { dir: "mem-raw", forcePartBytes: 60, enabled: true } };
     const turns = Array.from({ length: 8 }, (_, i) => ({
@@ -83,7 +83,7 @@ test("原文传到第 2 段时挂了：重试只补缺的那几段，不重传�
 
 test("supersede 失败：账本记一笔，下一轮补上，不会留两条 current", () => {
   const out = run(`
-    import { notePending, loadPending, flushPending, dropPending } from "./src/repair.mjs";
+    import { notePending, loadPending, flushPending, dropPending } from "./src/center/repair.mjs";
 
     const fixedCalls = [];
     const broken = {

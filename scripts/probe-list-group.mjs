@@ -31,7 +31,7 @@ const append = async (parentID, data, previousID) => {
   return tx?.doOperations?.find((o) => o?.action === "insert" && o?.id)?.id;
 };
 
-const group = await append(doc, "- 2026-10-29 · MiniWMS（测试）");
+const group = await append(doc, "- 2026-10-29 · 订货系统（测试）");
 console.log("分组项 id:", group);
 await sleep(600);
 

@@ -16,7 +16,7 @@
 import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { HOME_DIR } from "./config.mjs";
+import { HOME_DIR } from "../shared/config.mjs";
 
 export const PROMPT_DIR = join(HOME_DIR, "prompts");
 /** 覆盖文件。存在就用它，不存在用内置的。 */

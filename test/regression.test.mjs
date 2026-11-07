@@ -5,10 +5,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { dedupe } from "../src/readers/index.mjs";
-import { ingestKey } from "../src/inbox.mjs";
-import { mergeEntries, planBatches } from "../src/extract.mjs";
-import { startUi } from "../src/ui.mjs";
+import { dedupe } from "../src/shared/readers/index.mjs";
+import { ingestKey } from "../src/center/inbox.mjs";
+import { mergeEntries, planBatches } from "../src/center/extract.mjs";
+import { startUi } from "../src/center/ui.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -50,16 +50,16 @@ test("长问答切段后，每一段都还带着原来的轮次范围", () => {
 
 test("前 40 字相同的两条不同结论，不能合并成一条", () => {
   // 旧实现比「去掉空白后的前 40 字」，两条开头一样就合并，留下长的那条。
-  const head = "MiniWMS 的索引用法是这样的：";
+  const head = "订货系统 的索引用法是这样的：";
   const a = {
     text: `${head}查询真的会发生且当前没有索引可用，两条都成立才加。`,
-    entity: "MiniWMS",
+    entity: "订货系统",
     brief: "两条都成立才加索引",
     confidence: 3,
   };
   const b = {
     text: `${head}不要提前加，等出现慢查询再补，加了反而拖慢写入。`,
-    entity: "MiniWMS",
+    entity: "订货系统",
     brief: "等慢查询再补",
     confidence: 3,
   };

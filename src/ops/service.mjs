@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { HOME_DIR } from "./config.mjs";
+import { HOME_DIR } from "../shared/config.mjs";
 
 export const LABEL = "com.siyuan.mem";
 export const PLIST_PATH = join(homedir(), "Library/LaunchAgents", `${LABEL}.plist`);
@@ -23,7 +23,7 @@ export const PLIST_PATH = join(homedir(), "Library/LaunchAgents", `${LABEL}.plis
  */
 export const LABEL_PUSH = "com.siyuan.mem.push";
 export const PLIST_PUSH_PATH = join(homedir(), "Library/LaunchAgents", `${LABEL_PUSH}.plist`);
-const CLI = fileURLToPath(new URL("./cli.mjs", import.meta.url));
+const CLI = fileURLToPath(new URL("../cli.mjs", import.meta.url));
 
 /**
  * 源码比二进制新的时候，别用二进制。
@@ -37,20 +37,22 @@ const CLI = fileURLToPath(new URL("./cli.mjs", import.meta.url));
 function srcNewerThan(binPath) {
   try {
     const binMs = statSync(binPath).mtimeMs;
-    const dir = dirname(CLI);
-    for (const f of readdirSync(dir)) {
-      if (!f.endsWith(".mjs")) continue;
-      if (statSync(join(dir, f)).mtimeMs > binMs) return true;
-    }
-    for (const sub of ["readers", "wire"]) {
-      const p = join(dir, sub);
-      if (!existsSync(p)) continue;
-      for (const f of readdirSync(p)) {
-        if (!f.endsWith(".mjs")) continue;
-        if (statSync(join(p, f)).mtimeMs > binMs) return true;
+    // 递归扫。src 下已经分了 shared/center/worker/ops 四层，只扫顶层的写法
+    // 在重组那天就会失效——改个 center/extract.mjs 不触发重编，服务跑旧代码，
+    // 而且看不出来。所以这里不写死目录名，见 .mjs 就比。
+    const walk = (dir) => {
+      for (const ent of readdirSync(dir, { withFileTypes: true })) {
+        if (ent.name === "node_modules") continue;
+        const p = join(dir, ent.name);
+        if (ent.isDirectory()) {
+          if (walk(p)) return true;
+        } else if (ent.name.endsWith(".mjs") && statSync(p).mtimeMs > binMs) {
+          return true;
+        }
       }
-    }
-    return false;
+      return false;
+    };
+    return walk(dirname(CLI));
   } catch {
     return true; // 读不出来就当源码更新，宁可跑源码
   }

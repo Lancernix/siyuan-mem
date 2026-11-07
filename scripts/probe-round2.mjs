@@ -4,7 +4,7 @@
  * 全部在临时笔记本里做，跑完自删，不碰正式库。
  * 每条结论都打印实测依据，方便以后复查。
  */
-import { SiYuan } from "../src/siyuan.mjs";
+import { SiYuan } from "../src/shared/siyuan.mjs";
 
 const BASE = "http://127.0.0.1:6806";
 const sy = new SiYuan({ baseUrl: BASE, timeoutMs: 20000 });

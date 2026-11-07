@@ -11,7 +11,7 @@ import { mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync } fro
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { parseArgs } from "../src/args.mjs";
+import { parseArgs } from "../src/shared/args.mjs";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 
@@ -28,7 +28,7 @@ function runWithHome(code) {
 
 test("记一笔欠账、补完、销账", () => {
   const { home, out } = runWithHome(`
-    import { notePending, loadPending, flushPending } from "./src/repair.mjs";
+    import { notePending, loadPending, flushPending } from "./src/center/repair.mjs";
     notePending({ old: "aaa", new: "bbb", entity: "mcp-adapter" });
     notePending({ old: "aaa", new: "ccc", entity: "mcp-adapter" }); // 同一个 old 只留最后一次
     const before = loadPending();
@@ -50,7 +50,7 @@ test("记一笔欠账、补完、销账", () => {
 
 test("旧块已经不在了、或者已经是 superseded，就销账不再重试", () => {
   const { out } = runWithHome(`
-    import { notePending, loadPending, flushPending } from "./src/repair.mjs";
+    import { notePending, loadPending, flushPending } from "./src/center/repair.mjs";
     notePending({ old: "gone", new: "n1" });
     notePending({ old: "done", new: "n2" });
     const calls = [];
@@ -68,7 +68,7 @@ test("旧块已经不在了、或者已经是 superseded，就销账不再重试
 
 test("账本写坏时不能静默当空：挪到旁边留证", () => {
   const { home } = runWithHome(`
-    import { notePending, loadPending } from "./src/repair.mjs";
+    import { notePending, loadPending } from "./src/center/repair.mjs";
     notePending({ old: "x", new: "y" });
     console.log(JSON.stringify({ n: loadPending().length }));
   `);
@@ -76,7 +76,7 @@ test("账本写坏时不能静默当空：挪到旁边留证", () => {
   writeFileSync(join(dir, "pending-supersede.json"), '{"old":"半截');
 
   const out = execFileSync(process.execPath, ["--input-type=module", "-e", `
-    import { loadPending } from "./src/repair.mjs";
+    import { loadPending } from "./src/center/repair.mjs";
     console.log(JSON.stringify({ n: loadPending().length }));
   `], { cwd: ROOT, env: { ...process.env, HOME: home }, encoding: "utf8" });
   assert.equal(JSON.parse(out.trim()).n, 0, "读不出来只能返回空");

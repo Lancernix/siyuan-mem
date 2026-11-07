@@ -12,8 +12,8 @@
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { HOME_DIR } from "./config.mjs";
-import { event } from "./log.mjs";
+import { HOME_DIR } from "../shared/config.mjs";
+import { event } from "../shared/log.mjs";
 
 const PATH = join(HOME_DIR, "pending-supersede.json");
 /** 超过这个天数的欠账直接丢：多半是两边块都被手删了，再补也是错。 */

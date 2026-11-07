@@ -16,9 +16,9 @@
  * 覆盖率取的是「较短那条被较长的覆盖了多少」，只看字面。所以 0.75 以上基本
  * 是同义改写，0.6-0.75 之间要人读一遍——经常是同一件事的不同侧面，不该合。
  */
-import { loadConfig } from "../src/config.mjs";
-import { SiYuan } from "../src/siyuan.mjs";
-import { ATTR } from "../src/store.mjs";
+import { loadConfig } from "../src/shared/config.mjs";
+import { SiYuan } from "../src/shared/siyuan.mjs";
+import { ATTR } from "../src/center/store.mjs";
 
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(`--${name}`);
