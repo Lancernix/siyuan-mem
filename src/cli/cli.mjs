@@ -28,7 +28,7 @@ import { checkPrompt, history as promptHistory, PROMPT_PATH, resetPrompt, restor
 const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 
 采集与抽取
-  mem init [--force]              建笔记本和文档（幂等；--force 丢掉 id 缓存重解析）
+  mem init [--force] [--rebind]   建笔记本和文档（幂等；--rebind 接受笔记本被删了重建）
   mem status                      连通性、条目数、队列长度、服务是否在跑
   mem serve [--once] [--interval 分钟] [--dry] [--no-model] [--force]
                                   常驻：每轮找新会话 → 投队列 → 写思源
@@ -90,7 +90,9 @@ function make() {
 
 async function cmdInit(flags) {
   const { store } = make();
-  const ids = await store.init({ force: Boolean(flags.force) });
+  // --force  只解析不新建（文档层面）
+  // --rebind 接受笔记本 id 变了（删了重建），并把配置指到新的那本
+  const ids = await store.init({ force: Boolean(flags.force), rebind: Boolean(flags.rebind) });
   console.log("笔记本与文档就绪：");
   for (const [k, v] of Object.entries(ids)) {
     // months 是一组按月分的文档（{ "2026-11": id }），直接打印会变成 [object Object]。

@@ -59,7 +59,7 @@ export class Store {
    * 必须有缓存这一级：思源的文档索引是异步更新的，createDocWithMd 刚返回时
    * 用 hpath 查还是空，于是下一次调用又会建一份一模一样的文档。
    */
-  async init({ force = false } = {}) {
+  async init({ force = false, rebind = false } = {}) {
     const name = this.#cfg.siyuan.notebook;
     const state = loadState();
     // 缓存要按"实例 + 笔记本"隔离。只按 baseUrl 存的话，改了 config 里的笔记本名，
@@ -70,24 +70,38 @@ export class Store {
     // 解析不到就报错，让人去看库里到底有几份同名文档。
     if (force) await new Promise((r) => setTimeout(r, 1500));
 
+    const configuredId = String(this.#cfg.siyuan.notebookId ?? "").trim();
     let nbId = cache.notebook;
     if (!nbId || !(await this.#existsNotebook(nbId))) {
+      let resolved;
       try {
         // 配了 notebookId 就用它；没配（或失效）按名字找。
-        nbId = await resolveNb(this.#sy, this.#cfg);
+        resolved = await resolveNb(this.#sy, this.#cfg);
       } catch (e) {
-        // 配过 id 就不许自动新建。改名或换库时静默建一本空库，旧记忆会"凭空消失"，
-        // 新 id 还会被写回配置——越走越远，而且全程不报错。
-        if (String(this.#cfg.siyuan.notebookId ?? "").trim()) {
+        // 名字也对不上、又没配过 id：这才是第一次跑，建。
+        if (configuredId) {
           throw new Error(
-            `${e.message}。配置里的 notebookId 已经失效，名字也对不上。\n` +
+            `${e.message}。配置里的 notebookId=${configuredId} 已经失效。\n` +
               "  确认要新建一本空库，先把 config 里的 siyuan.notebookId 清掉再 init。"
           );
         }
-        // 从没配过 id：这就是第一次跑，建。
-        nbId = await this.#sy.createNotebook(name);
+        resolved = await this.#sy.createNotebook(name);
       }
+
+      // 关键的一步：**比较 id，而不是靠抛错来判断**。
+      // resolveNb 在 id 失效时会"退回按名字找"，所以笔记本被删了重建（同名换 id）
+      // 的时候它不抛——上一版只把防呆放在 catch 里，这个主场景正好绕过去，
+      // 结果就是新 id 被写回配置、后续全写进新库，旧记忆凭空消失且无日志。
+      if (configuredId && resolved !== configuredId && !force && !rebind) {
+        throw new Error(
+          `笔记本的 id 变了：配置里是 ${configuredId}，按名字「${name}」找到的是 ${resolved}。\n` +
+            "  最常见的原因是这本笔记被删了重建（名字没变，id 换了）。\n" +
+            "  确认要换到新库上（旧库确实不要了），跑一次 mem init --rebind；否则先把旧笔记本恢复回来。"
+        );
+      }
+      nbId = resolved;
     }
+
     // 记下 id：之后再改名，这台机器不用改配置也能找得到。
     if (nbId && this.#cfg.siyuan.notebookId !== nbId) {
       try {

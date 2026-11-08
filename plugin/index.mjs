@@ -24,8 +24,10 @@ const PLUGIN_SOURCE = "siyuan-memory";
 // 外层必须容得下内层：注入要串两次查询（条目 + 实体），各 900ms。
 // 原来外层 800ms 比内层还短，等于每次都先被外层掐断——注释写着"宁可不注入"，
 // 实际是"永远注入不进去"。
-const INJECT_TIMEOUT_MS = 2500;
-const QUERY_TIMEOUT_MS = 900;
+// 外层包住两步查询（条目 + 实体），所以必须 ≥ 2×内层。但也不能太大：
+// 这一步是挡在用户消息前面的，超了就是白等。700×2 + 余量 = 1600。
+const INJECT_TIMEOUT_MS = 1600;
+const QUERY_TIMEOUT_MS = 700;
 const MIN_TURN_CHARS = 25;
 
 let createUserMessage;
@@ -98,11 +100,21 @@ async function resolveNotebookId(base, headers, name, wantId = "") {
     const list = body.data?.notebooks ?? [];
     const nb = (wantId ? list.find((n) => n.id === wantId) : null) ?? list.find((n) => n.name === name);
     if (!nb) return "";
-    notebookCache = { name, id: nb.id };
+    // 按真正解析到的 id 缓存：wantId 失效、退回按名字命中时，只记 name 会让
+    // 下一次带着旧 wantId 进来、缓存键对不上，于是每条消息都重查一遍。
+    notebookCache = { name: nb.name ?? name, id: nb.id };
     return nb.id;
   } catch {
     return "";
   }
+}
+
+/**
+ * 拼进 LIKE 之前转义。和 core/search.mjs 的 likeEsc 同一套规则：
+ * 单引号给 SQL，`%` `_` `\` 给 LIKE。两套 SQL 各写一份，漏一边就等于没修。
+ */
+function likeEsc(v) {
+  return String(v).replace(/[\\%_]/g, (c) => "\\" + c).replace(/'/g, "''");
 }
 
 async function queryEntries(cfg, keyword) {
@@ -122,7 +134,7 @@ async function queryEntries(cfg, keyword) {
   if (!notebookId) return [];
   const box = `box = '${notebookId}'`;
   const where = keyword
-    ? `${box} AND ${isEntry} AND ${status} AND content LIKE '%${keyword.replace(/'/g, "''")}%'`
+    ? `${box} AND ${isEntry} AND ${status} AND content LIKE '%${likeEsc(keyword)}%' ESCAPE '\\'`
     : `${box} AND ${isEntry} AND ${status}`;
   const stmt = `SELECT content, ial FROM blocks WHERE type='p' AND ${where} ORDER BY created DESC LIMIT 6`;
 

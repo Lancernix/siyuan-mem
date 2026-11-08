@@ -46,7 +46,7 @@ function fakeSy({ notebooks = [], createId = "new-nb" } = {}) {
 test("配过 notebookId 但对不上：报错，绝不偷偷建新库", async () => {
   const sy = fakeSy({ notebooks: [{ id: "other", name: "别的库" }] });
   const store = new Store(sy, cfgOf({ notebookId: "gone-but-configured" }));
-  await assert.rejects(() => store.init(), /notebookId 已经失效/);
+  await assert.rejects(() => store.init(), /已经失效/);
   assert.equal(sy.calls.created, 0, "不许建新笔记本");
 });
 
@@ -64,4 +64,19 @@ test("id 在库里：直接用，不新建", async () => {
   const ids = await store.init();
   assert.equal(ids.notebook, "keep");
   assert.equal(sy.calls.created, 0);
+});
+
+test("同名换了 id（笔记本删了重建）：必须报错，别把新 id 写回配置", async () => {
+  // 这是上一版漏掉的主场景：resolveNb 在 id 失效时会退回按名字找，所以它不抛错，
+  // 只靠 catch 判断的防呆就被绕过去了。
+  const sy = fakeSy({ notebooks: [{ id: "brand-new", name: "Harness-Mem" }] });
+  const store = new Store(sy, cfgOf({ notebookId: "old-gone" }));
+  await assert.rejects(() => store.init(), /id 变了/);
+});
+
+test("--rebind 时接受新 id：这是人工确认过的换库", async () => {
+  const sy = fakeSy({ notebooks: [{ id: "brand-new", name: "Harness-Mem" }] });
+  const store = new Store(sy, cfgOf({ notebookId: "old-gone" }));
+  const ids = await store.init({ rebind: true });
+  assert.equal(ids.notebook, "brand-new");
 });
