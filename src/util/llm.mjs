@@ -36,6 +36,7 @@ export const PROVIDERS = {
   gemini: { wire: "gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-3.5-flash", jsonMode: true, env: ["GEMINI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"] },
   ollama: { wire: "openai", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5:14b", jsonMode: false, keyless: true },
   lmstudio: { wire: "openai", baseUrl: "http://127.0.0.1:1234/v1", model: "local-model", jsonMode: false, keyless: true },
+  volcengine: { wire: "openai", baseUrl: "https://ark.cn-beijing.volces.com/api/v3", model: "doubao-seed-1-6", jsonMode: true, env: ["ARK_API_KEY"] },
 };
 
 /** 预设 provider 的 key 环境变量。命中第一个非空的就是它。 */
@@ -194,8 +195,13 @@ export function resolveModel(cfg) {
     retries: m.retries ?? 3,
     anthropicVersion: m.anthropicVersion,
     temperature: m.temperature,
-    /** 默认关思考。某些模型（DeepSeek V4、豆包 Seed）默认会先想一遍，成本差十倍。 */
-    noThinking: m.noThinking ?? true,
+    /**
+     * 默认开思考。场上只认这一个名字：请求体那边读的是 `thinking === false`。
+     * 之前这里产出的是 `noThinking`（还是默认 true），两边字段名对不上——
+     * 配置里写 noThinking 完全无效，而写 thinking 倒是有效，属于"开关看着有、实际空转"。
+     * 老配置里的 noThinking 仍然认（取反），别让人升级后行为突变。
+     */
+    thinking: m.thinking ?? (m.noThinking === true ? false : true),
   };
 }
 

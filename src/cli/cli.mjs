@@ -455,7 +455,16 @@ async function cmdModel(args, flags) {
     // models.dev 那份目录已经删掉了：5.6MB 的 JSON，解析进内存要 50MB，换来的只是
     // 「provider 不在预设里时自动找 baseUrl」——一年用不到一次。现在只认下面这十家
     // 和显式的 --base。要加一家，往 PROVIDERS 里补一行，比联网拉目录可靠。
-    for (const [id, p] of Object.entries(PROVIDERS)) {
+    // 后面跟一个词就只列匹配的（原来参数被忽略，`mem model list qwen` 照样列十家）。
+    const needle = String(args[1] ?? "").toLowerCase();
+    const rows = Object.entries(PROVIDERS).filter(([id, p]) =>
+      !needle || id.includes(needle) || String(p.model).toLowerCase().includes(needle) || String(p.wire).includes(needle)
+    );
+    if (!rows.length) {
+      console.log(`没有匹配「${args[1]}」的预设。内置：${Object.keys(PROVIDERS).join(" / ")}`);
+      return;
+    }
+    for (const [id, p] of rows) {
       console.log(`  ${id.padEnd(12)} ${String(p.wire).padEnd(9)} ${String(p.model).padEnd(28)} ${p.baseUrl}`);
     }
     console.log("\n用法：mem model use <id> --name <模型>；别家的端点直接写 --base <baseUrl> --wire <协议>");
@@ -602,6 +611,21 @@ async function cmdCenter(args, flags) {
     console.log(`token        ${ing.token ? maskKey(ing.token) : "（没配）"}`);
     console.log(`队列         ${pending().length} 个会话待处理`);
     if (ing.enabled) {
+      // 真去敲一下端口。只念配置的话，"配置开着但进程没起"和"一切正常"长得一模一样。
+      const probeHost = ing.bind === "0.0.0.0" ? "127.0.0.1" : ing.bind;
+      try {
+        const r = await fetch(`http://${probeHost}:${ing.port}/api/ping`, {
+          headers: ing.token ? { authorization: `Bearer ${ing.token}` } : {},
+          signal: AbortSignal.timeout(3000),
+        });
+        const j = await r.json().catch(() => ({}));
+        console.log(
+          `监听         ${r.ok ? "有应答" : `有应答但被拒（HTTP ${r.status}）`}` +
+            (j.queue != null ? `，中心队列 ${j.queue} 个` : "")
+        );
+      } catch (e) {
+        console.log(`监听         没应答（${e.name === "TimeoutError" ? "3 秒超时" : e.message}）`);
+      }
       const host = ing.bind === "0.0.0.0" ? lanAddresses()[0] ?? "<这台机器的地址>" : ing.bind;
       console.log(`\n边缘机器上跑：\n  mem push --to http://${host}:${ing.port} --token ${ing.token || "<token>"} --once`);
       console.log("  （公网走反向代理时把 http://… 换成 https://你的域名）");
@@ -829,7 +853,7 @@ async function cmdEntity(args, flags) {
     const r = await applyPending({ sy, cfg, ids, dry: Boolean(flags.dry), log: console.log });
     const s = r.stat;
     if (!s.todo && !s.merged && !s.rejected && !s.failed) {
-      console.log("05-实体待确认 里没有待办。");
+      console.log("03-实体待确认 里没有待办。");
       return;
     }
     for (const m of r.merged) console.log(`  合并 ${m.a} → ${m.b}${flags.dry ? "（dry）" : ""}`);

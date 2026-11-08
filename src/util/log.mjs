@@ -59,14 +59,20 @@ export function prune(keepDays = KEEP_DAYS) {
  * 任何异常都吞掉：日志失败不该让一条记忆写不进去。这里宁可静默，
  * 因为调用方全在写库的关键路径上。
  */
+let eventBroken = false;
 export function event(name, fields = {}) {
   try {
     mkdirSync(DIR, { recursive: true });
     prune();
     const rec = { ts: new Date().toISOString(), ev: name, ...fields };
     appendFileSync(pathOf(), JSON.stringify(rec) + "\n");
-  } catch {
-    /* 见上 */
+  } catch (e) {
+    // 磁盘满、目录只读的时候，原来这里是全静默的：日志没了，运行看起来完全正常。
+    // 只提示一次，别把 stderr 刷满。
+    if (!eventBroken) {
+      eventBroken = true;
+      process.stderr.write(`! 事件日志写不进去（${e.message}），后续统计会缺失\n`);
+    }
   }
 }
 

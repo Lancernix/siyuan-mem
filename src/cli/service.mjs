@@ -95,6 +95,9 @@ function esc(s) {
 
 export function plistFor({ intervalMinutes = 0, mode = "serve" } = {}) {
   const { program, args } = resolveRunner(mode);
+  // 定时模式必须带 --once。不然 launchd 每 N 分钟拉起一个"永不退出"的 serve，
+  // 第一个持有锁，后面每次都撞锁报"已经有一个在跑"——看着像服务坏了，其实是装错了。
+  if (intervalMinutes > 0 && mode === "serve") args.push("--once");
   const label = mode === "push" ? LABEL_PUSH : LABEL;
   const sched = intervalMinutes
     ? `  <key>StartInterval</key><integer>${intervalMinutes * 60}</integer>\n`
