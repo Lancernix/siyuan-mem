@@ -21,7 +21,10 @@ const CONFIG_PATH = join(HOME, "config.json");
 const PLUGIN_KIND = "plugin:siyuan-memory";
 const PLUGIN_SOURCE = "siyuan-memory";
 
-const INJECT_TIMEOUT_MS = 800; // 注入路径宁可不注入，也不能卡住对话
+// 外层必须容得下内层：注入要串两次查询（条目 + 实体），各 900ms。
+// 原来外层 800ms 比内层还短，等于每次都先被外层掐断——注释写着"宁可不注入"，
+// 实际是"永远注入不进去"。
+const INJECT_TIMEOUT_MS = 2500;
 const QUERY_TIMEOUT_MS = 900;
 const MIN_TURN_CHARS = 25;
 
@@ -73,10 +76,16 @@ function isSynthetic(message) {
 /* ---------- 注入 ---------- */
 
 
-/** 笔记本名 → id。缓存在模块里：一次会话里每条消息都会走这里。 */
+/**
+ * 笔记本 → id。缓存在模块里：一次会话里每条消息都会走这里。
+ *
+ * 先认 id 再认名字。改名之后所有机器配置里那份名字都过期了，而 id 不会变；
+ * 只按名字找的话，插件会静默返回空——记忆还在库里，只是注入不出去。
+ */
 let notebookCache = { name: "", id: "" };
-async function resolveNotebookId(base, headers, name) {
-  if (notebookCache.name === name && notebookCache.id) return notebookCache.id;
+async function resolveNotebookId(base, headers, name, wantId = "") {
+  if (wantId && notebookCache.id === wantId) return wantId;
+  if (!wantId && notebookCache.name === name && notebookCache.id) return notebookCache.id;
   try {
     const res = await fetch(`${base}/api/notebook/lsNotebooks`, {
       method: "POST",
@@ -86,7 +95,8 @@ async function resolveNotebookId(base, headers, name) {
     });
     if (!res.ok) return "";
     const body = await res.json();
-    const nb = (body.data?.notebooks ?? []).find((n) => n.name === name);
+    const list = body.data?.notebooks ?? [];
+    const nb = (wantId ? list.find((n) => n.id === wantId) : null) ?? list.find((n) => n.name === name);
     if (!nb) return "";
     notebookCache = { name, id: nb.id };
     return nb.id;
@@ -108,7 +118,7 @@ async function queryEntries(cfg, keyword) {
   // 但**不能**从 blocks 表按名字猜 id：`type='b'` 是引用块，不是笔记本，
   // 那个子查询永远返回空，整条注入路径会静默失效（记忆还在，只是查不到）。
   // 唯一可靠的来源是 /api/notebook/lsNotebooks。
-  const notebookId = await resolveNotebookId(base, headers, cfg.siyuan.notebook);
+  const notebookId = await resolveNotebookId(base, headers, cfg.siyuan.notebook, String(cfg.siyuan.notebookId ?? "").trim());
   if (!notebookId) return [];
   const box = `box = '${notebookId}'`;
   const where = keyword

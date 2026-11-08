@@ -45,7 +45,7 @@ try {
   const t0 = Date.now();
   run(
     bun,
-    ["build", "src/cli.mjs", "--compile", ...(target ? [`--target=${target}`] : []), `--outfile=${candidate}`],
+    ["build", "src/cli/cli.mjs", "--compile", ...(target ? [`--target=${target}`] : []), `--outfile=${candidate}`],
     { stdio: "inherit" }
   );
   const size = (statSync(candidate).size / 1048576).toFixed(0);
@@ -63,7 +63,7 @@ try {
 
   // 对账：同一份代码、同一批会话，两边必须逐字相同。
   console.log("对账中（node vs 产物，全部会话）…");
-  const ref = run(process.execPath, ["src/cli.mjs", "audit", "--all"]);
+  const ref = run(process.execPath, ["src/cli/cli.mjs", "audit", "--all"]);
   const got = run(candidate, ["audit", "--all"]);
 
   if (ref !== got) {
