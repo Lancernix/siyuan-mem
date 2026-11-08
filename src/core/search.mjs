@@ -122,7 +122,10 @@ export async function searchEntries(opts = {}) {
     `SELECT id, content, ial FROM blocks WHERE ${conds.join(" AND ")}
        ORDER BY updated DESC LIMIT 2000`
   );
-  if (!Array.isArray(rows)) return { terms, hits: [] };
+  if (!Array.isArray(rows)) {
+    event("memory.miss", { q: String(opts.q ?? "").slice(0, 60), terms, reason: "sql-not-array" });
+    return { terms, hits: [] };
+  }
   // 取候选的上限被撞到就说明可能有召回被截断：排序和日期过滤都在内存里做，
   // 被 SQL 砍掉的那些再也回不来。撞了要留痕，否则"查不到"永远查不出原因。
   if (rows.length >= 2000) event("search.truncated", { q: String(opts.q ?? "").slice(0, 60), terms, rows: rows.length });

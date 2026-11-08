@@ -5,3 +5,4 @@ node_modules/
 backup/
 # 部署目录里是真实配置（思源 token、模型 key、ingest token），绝不能进仓库
 deploy/data/
+deploy/sandbox/data/
