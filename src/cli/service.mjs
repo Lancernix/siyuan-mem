@@ -52,7 +52,10 @@ function srcNewerThan(binPath) {
       }
       return false;
     };
-    return walk(dirname(CLI));
+    // 从 src/ 开始扫，不是 dirname(CLI)。入口搬进 src/cli/ 之后，dirname(CLI)
+    // 只有三个文件，改 core/、util/、mcp/ 里的代码不会触发"源码比二进制新"，
+    // 服务就静默跑几天前的二进制——表现是"我明明改了提示词，抽出来还是老样子"。
+    return walk(join(dirname(CLI), ".."));
   } catch {
     return true; // 读不出来就当源码更新，宁可跑源码
   }

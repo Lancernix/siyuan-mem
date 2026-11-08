@@ -27,3 +27,17 @@ test("只有标点时返回空——调用方据此返回 no-terms，而不是�
   assert.deepEqual(termsOf("，。！？？"), []);
   assert.deepEqual(termsOf("   "), []);
 });
+
+// ---- LIKE 通配符必须转义 ----
+
+const { likeEsc } = await import("../src/core/search.mjs");
+
+test("百分号、下划线、反斜杠都转义：% 不该变成「匹配所有」", () => {
+  assert.equal(likeEsc("100%"), "100\\%");
+  assert.equal(likeEsc("a_b"), "a\\_b");
+  assert.equal(likeEsc("c\\d"), "c\\\\d");
+});
+
+test("单引号仍然按 SQL 规则转，两件事不互相覆盖", () => {
+  assert.equal(likeEsc("it's 50%"), "it''s 50\\%");
+});

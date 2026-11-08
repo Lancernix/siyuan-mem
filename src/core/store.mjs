@@ -71,11 +71,22 @@ export class Store {
     if (force) await new Promise((r) => setTimeout(r, 1500));
 
     let nbId = cache.notebook;
-    if (!nbId || !(await this.#exists(nbId))) {
-      // 配了 notebookId 就用它；没配（或失效）按名字找，找不到才新建。
-      nbId = await resolveNb(this.#sy, this.#cfg).catch(async () => {
-        return (await this.#sy.listNotebooks()).find((n) => n.name === name)?.id ?? (await this.#sy.createNotebook(name));
-      });
+    if (!nbId || !(await this.#existsNotebook(nbId))) {
+      try {
+        // 配了 notebookId 就用它；没配（或失效）按名字找。
+        nbId = await resolveNb(this.#sy, this.#cfg);
+      } catch (e) {
+        // 配过 id 就不许自动新建。改名或换库时静默建一本空库，旧记忆会"凭空消失"，
+        // 新 id 还会被写回配置——越走越远，而且全程不报错。
+        if (String(this.#cfg.siyuan.notebookId ?? "").trim()) {
+          throw new Error(
+            `${e.message}。配置里的 notebookId 已经失效，名字也对不上。\n` +
+              "  确认要新建一本空库，先把 config 里的 siyuan.notebookId 清掉再 init。"
+          );
+        }
+        // 从没配过 id：这就是第一次跑，建。
+        nbId = await this.#sy.createNotebook(name);
+      }
     }
     // 记下 id：之后再改名，这台机器不用改配置也能找得到。
     if (nbId && this.#cfg.siyuan.notebookId !== nbId) {
@@ -143,9 +154,15 @@ export class Store {
   }
 
   /** 块还在不在。缓存会过期：用户可能在思源里把文档删了。 */
-  async #exists(id) {
-    const rows = await this.#sy.sql(`SELECT id FROM blocks WHERE id='${id}' LIMIT 1`);
-    return Boolean(rows?.length);
+  /**
+   * 笔记本还在不在。
+   *
+   * 原来拿 notebook id 去 `blocks` 表里查——笔记本不是块，这个查询恒为 false，
+   * 于是每次 init 都当"笔记本没了"重新解析一遍。改成问 lsNotebooks。
+   */
+  async #existsNotebook(id) {
+    const list = (await this.#sy.listNotebooks()) ?? [];
+    return list.some((n) => n.id === id);
   }
 
   /** 这个块是不是真在这本笔记本里。blocks.box 就是笔记本 id。 */

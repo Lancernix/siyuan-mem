@@ -37,6 +37,17 @@ const ATTR = {
 const attr = (ial, k) => new RegExp(k + '="([^"]*)"').exec(ial ?? "")?.[1] ?? "";
 const plain = (s, raw = "") => stripRawLink(s, raw);
 
+/**
+ * 拼进 LIKE 之前要转义。两件事：单引号（SQL 字符串）和 `%` `_` `\`（LIKE 通配符）。
+ *
+ * 原来只转单引号，于是 `mem search %` 会变成 `LIKE '%%%'`——匹配全部条目，
+ * 召回里塞满不相干的东西，而且看不出是查询串的问题。`_` 同理会匹配任意单字。
+ * 配套的 `ESCAPE '\'` 写在 SQL 里。
+ */
+export function likeEsc(s) {
+  return String(s).replace(/[\\%_]/g, (c) => "\\" + c).replace(/'/g, "''");
+}
+
 /** 把一句话拆成检索词。中文不分词，按空格和标点切，去掉太短的。 */
 export function termsOf(q) {
   return String(q ?? "")
@@ -91,9 +102,9 @@ export async function searchEntries(opts = {}) {
     throw new Error(`status 只能是 current / superseded / 空，收到「${String(status).slice(0, 30)}」`);
   }
   if (status) conds.push(`ial LIKE '%${ATTR.status}="${status}"%'`);
-  if (opts.topic) conds.push(`ial LIKE '%${ATTR.entity}="${String(opts.topic).replace(/'/g, "''")}"%'`);
-  if (opts.project) conds.push(`ial LIKE '%${ATTR.project}="${String(opts.project).replace(/'/g, "''")}"%'`);
-  if (opts.type) conds.push(`ial LIKE '%${ATTR.type}="${String(opts.type).replace(/'/g, "''")}"%'`);
+  if (opts.topic) conds.push(`ial LIKE '%${ATTR.entity}="${likeEsc(opts.topic)}"%' ESCAPE '\\'`);
+  if (opts.project) conds.push(`ial LIKE '%${ATTR.project}="${likeEsc(opts.project)}"%' ESCAPE '\\'`);
+  if (opts.type) conds.push(`ial LIKE '%${ATTR.type}="${likeEsc(opts.type)}"%' ESCAPE '\\'`);
   // 日期不在 SQL 里比：ial 里是字符串，SQL 比大小要额外解析；
   // 拿回来在内存里筛更直接（候选最多 300 条）。
   const since = opts.days
@@ -101,8 +112,8 @@ export async function searchEntries(opts = {}) {
     : "";
   // 每个词都要出现（AND），但允许出现在正文或属性里——摘要和话题都在属性里。
   for (const t of terms) {
-    const esc = t.replace(/'/g, "''");
-    conds.push(`(content LIKE '%${esc}%' OR ial LIKE '%${esc}%')`);
+    const esc = likeEsc(t);
+    conds.push(`(content LIKE '%${esc}%' ESCAPE '\\' OR ial LIKE '%${esc}%' ESCAPE '\\')`);
   }
 
   // 这个 LIMIT 是**取候选**的上限，不是结果数。给得太小会静默漏召回：

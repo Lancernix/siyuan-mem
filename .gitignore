@@ -3,3 +3,5 @@ node_modules/
 *.log
 # 拆分/重跑前的导出快照，体积大且随时可再导一次
 backup/
+# 部署目录里是真实配置（思源 token、模型 key、ingest token），绝不能进仓库
+deploy/data/
