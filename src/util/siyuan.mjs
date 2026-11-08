@@ -80,8 +80,23 @@ export class SiYuan {
   }
 
   /** 用 markdown 建文档，path 是文档在笔记本里的路径，例如 "/01-条目"。 */
-  createDocWithMd(notebook, path, markdown = "") {
-    return this.#post("/api/filetree/createDocWithMd", { notebook, path, markdown });
+  /**
+   * 建文档。刚建完笔记本、或刚重启内核时，思源的后台索引还没跟上，这里会返回
+   * `document metadata is not ready`。以前是把这个错直接抛给用户，让人"等几秒再跑一次"——
+   * 初始化流程里连着建四个文档，每次都靠人手重跑一遍很蠢。这里自己重试。
+   */
+  async createDocWithMd(notebook, path, markdown = "") {
+    let lastErr;
+    for (let i = 0; i < 6; i++) {
+      try {
+        return await this.#post("/api/filetree/createDocWithMd", { notebook, path, markdown });
+      } catch (e) {
+        lastErr = e;
+        if (!/not ready|metadata/i.test(e.message ?? "")) throw e;
+        await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+      }
+    }
+    throw lastErr;
   }
 
   /**

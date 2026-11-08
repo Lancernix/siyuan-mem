@@ -23,6 +23,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { hostname } from "node:os";
+import { existsSync } from "node:fs";
 import { HOME_DIR, ensureDirs, loadConfig, loadOffsets, offsetsOf, machineId, LOCK_PATH, LOG_PATH } from "../util/config.mjs";
 import { listSessions } from "../util/harness.mjs";
 import { enqueueLog, processQueue, assertModel } from "./jobs.mjs";
@@ -137,9 +138,15 @@ export function acquire({ force = false, log = () => {} } = {}) {
   const info = readLock();
   if (info && alive(info.pid, info.host) && !force) {
     const since = info.startedAt ? new Date(info.startedAt).toLocaleString() : "?";
+    // 容器里 pid 1 永远是"活着的"，所以这里要额外告诉人怎么在容器里跑单轮，
+    // 否则 `mem once` 看起来就是"永远有另一个进程占着锁"，无处下手。
+    const inContainer = existsSync("/.dockerenv");
     throw new Error(
       `已经有一个 mem serve 在跑（pid ${info.pid}，${since} 启动，第 ${info.round ?? 0} 轮）。\n` +
-        `  要接手先停掉它；确认它是僵尸进程再加 --force。`
+        `  要接手先停掉它；确认它是僵尸进程再加 --force。` +
+        (inContainer
+          ? "\n  容器里想手动跑一轮：docker compose stop mem && docker compose run --rm --no-deps mem once"
+          : "")
     );
   }
   log(`接管上一把锁（pid ${info?.pid ?? "?"} 已不在，${info?.host ?? "?"}）`);
@@ -285,7 +292,11 @@ export async function serve({ once = false, dry = false, useModel = true, interv
     assertModel(cfg, { useModel, dry });
   } catch (e) {
     log(`配置问题，这次不启动：${e.message.split("\n")[0]}`);
-    log("  配好之后：mem service install 再装一次，或 launchctl kickstart -k gui/$(id -u)/com.siyuan.mem");
+    // 提示要跟着平台走。原来写死 launchctl，在 Linux 容器里看到这条只会一脸问号。
+    const kick = process.platform === "darwin"
+      ? "launchctl kickstart -k gui/$(id -u)/com.siyuan.mem"
+      : "systemctl --user restart siyuan-mem（容器里：docker compose restart mem）";
+    log(`  配好之后：mem service install 再装一次，或 ${kick}`);
     return;
   }
 
