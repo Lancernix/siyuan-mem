@@ -182,7 +182,8 @@ async function cmdIngestLog(flags, args) {
   // 默认跳过还在写的会话（3 分钟内改过），--force 强投。
   const r = enqueueLog(file, {
     format: flags.format === true ? "" : flags.format ?? "",
-    quietSeconds: flags.force ? 0 : Number(flags.quiet) || 180,
+    // 0 是合法值（"不用等"），不能用 || 兜底——那会把 0 变成 180。
+    quietSeconds: flags.force ? 0 : flags.quiet !== undefined ? Number(flags.quiet) : 180,
   });
   if (!r.added) {
     if (r.reason === "subagent") console.log("这是子代理会话（归属于另一个会话），不进记忆。");

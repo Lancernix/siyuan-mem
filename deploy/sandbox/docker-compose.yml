@@ -1,0 +1,49 @@
+# 自测沙箱：一本独立的思源 + 一个独立的 mem，跟线上完全隔开。
+#
+# 用途只有一个：照 README 从零走一遍，把"文档写的"和"代码干的"对不上的地方踩出来。
+# 线上那个容器和这本库都不要碰——沙箱里删库、重建、改名都可以随便来。
+#
+#   cd deploy/sandbox && docker compose up -d
+#   docker compose exec mem node /app/src/cli/cli.mjs init
+#
+# 打完收工：docker compose down -v（-v 连卷一起删，下次还是干净的）
+name: mem-sandbox
+
+services:
+  siyuan:
+    image: b3log/siyuan:v3.8.9
+    container_name: sandbox-siyuan
+    # 镜像的 entrypoint 是 kernel 本体，子命令 serve 不能省（省了它只会打 help）。
+    command:
+      - "serve"
+      - "--workspace=/siyuan/workspace/"
+      # 沙箱的访问授权码固定成 sandbox：只在内网，不对外暴露端口。
+      - "--accessAuthCode=sandbox"
+      - "--lang=zh_CN"
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - siyuan-workspace:/siyuan/workspace
+    networks:
+      - sandbox
+
+  mem:
+    image: siyuan-mem:0.1.0
+    container_name: sandbox-mem
+    depends_on:
+      - siyuan
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      # 配置、队列、日志都在这里；down -v 不会删它（是 bind mount），
+      # 想彻底重来就 rm -rf data。
+      - ./data:/data
+    networks:
+      - sandbox
+
+networks:
+  sandbox:
+    name: mem-sandbox
+
+volumes:
+  siyuan-workspace:
