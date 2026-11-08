@@ -335,7 +335,7 @@ export async function processQueue({
         sum.entities += r.created.length;
         sum.pending += r.weak.length;
         if (r.created.length) onLine(`    · 新实体 ${r.created.length} 个：${r.created.slice(0, 8).join("、")}`);
-        if (r.weak.length) onLine(`    · ${r.weak.length} 组拿不准，写进 05-实体待确认`);
+        if (r.weak.length) onLine(`    · ${r.weak.length} 组拿不准，写进 03-实体待确认`);
       } catch (e) {
         onLine(`    ! 实体归一失败：${e.message}（先用原名写）`);
       }

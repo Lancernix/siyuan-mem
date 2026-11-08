@@ -111,8 +111,7 @@ node src/cli/cli.mjs show <块id>          # 看这条结论对应的原文（�
 node src/cli/cli.mjs raw list             # 原文归档了哪些 part
 node src/cli/cli.mjs entity               # 实体表
 node src/cli/cli.mjs entity review        # 执行 03-实体待确认 里勾选的项
-node src/cli/cli.mjs model list qwen     # 目录里的 provider / 某家的模型（带价格）
-node src/cli/cli.mjs model refresh       # 刷新 models.dev 目录
+node src/cli/cli.mjs model list qwen     # 列内置 provider（可按关键词过滤）
 node src/cli/cli.mjs ui                  # 本地面板 127.0.0.1:7787
 node src/cli/cli.mjs service install     # 装成 launchd 服务
 node src/cli/cli.mjs center setup        # 把本机设成中心（开接收端、生成 token）
@@ -746,45 +745,13 @@ mem log grep <关键词>         # 在字段里搜（会话 id、话题、错误
 ## 目录
 
 ```
-src/
-  cli.mjs       命令入口
-  config.mjs    配置与本地状态
-  siyuan.mjs    HTTP 客户端（只走 HTTP，不走 CLI）
-  extract.mjs   会话过滤 + 抽取
-  readers/
-    base.mjs      共用引擎：解压、找消息、role 归一、子代理回报、对账
-    workbuddy.mjs 各家只声明差异（十几个到几十行）
-    claude.mjs
-    qoder.mjs
-    omp.mjs
-    dsh.mjs
-    generic.mjs   兜底：不认识的格式按形状读
-    index.mjs     注册表与分发
-  harness.mjs   在磁盘上找各家的会话目录
-  jobs.mjs      两件可复用的活：投递增量、把队列写进思源
-  serve.mjs     常驻：锁、节奏、退避、轮次日志
-  store.mjs     写入、去重、查询、状态
-  raw.mjs       原文归档：JSONL、切 part、传附件、指针、按指针回读
-  entities.mjs  实体表、相似度匹配、弱候选判重、待确认三态
-  inbox.mjs     队列（就是目录）
-  ui.mjs        本地面板（一个 HTML + 几个只读接口）
-  ingest.mjs    接收端：验 token、限大小、写队列（中心侧）
-  push.mjs      边缘侧：读本机日志、增量推给中心
-  service.mjs   launchd / systemd 注册
-  llm.mjs       模型调用层：重试、JSON 模式、用量记账、provider 预设
-  wire/         三种协议各一份：openai（SDK）/ anthropic（fetch）/ gemini（fetch）
-  catalog.mjs   models.dev 目录：provider 地址、env 变量名、价格、上下文
-plugin/
-  index.mjs     DSH 插件
-test/           单测（假接口，不花钱）+ e2e-raw.mjs（真连思源，建完自己删）
-scripts/        dist：打包 + 对账
-docs/           设计过程与调研（含思源能力盘点）
+目录结构见上面「目录结构」一节（cli / core / mcp / util 四个目录），这里不再重复。
 ```
 
 ## 还没做
 
-- fs.watch 即时触发（现在最慢要等 10 分钟一轮 + 30 分钟静默）
-- **主动召回还没接进 harness**：`mem search` 能查了，但 agent 不会自己想起来调它——缺一层 skill/MCP 封装，让"上次那个车架"这种话能自动变成一次检索
+- fs.watch 即时触发（现在最慢：静默 3 分钟 + 推送 ≤15 分钟 + 中心一轮 ≤10 分钟）
+- **MCP 还没挂到每个 harness 上**：`mem-mcp` 已经能用，但这台机器只接了 Claude Code 的注册说明；dsh / omp / qoder 的配置片段还没写
 - 冷热分层：`memory.hit` 已经在记，但"沉睡 / 归档"的判定和复审清单还没做
 - 长会话中途分段 flush：现在只在会话结束时抽一次，超长会话仍然一次性进 82 批
 - 画像层（人格与用户偏好的统一管理），设计在 `docs/记忆系统-分层与召回设计.md`

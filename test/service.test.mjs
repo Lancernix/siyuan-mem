@@ -73,3 +73,13 @@ test("边缘版和中心版用不同的 plist 路径", () => {
   assert.ok(push.path.endsWith("com.siyuan.mem.push.plist"));
   assert.notEqual(serve.path, push.path);
 });
+
+test("定时模式必须带 --once：否则每个 tick 都会撞锁", () => {
+  const p = plistFor({ intervalMinutes: 10 });
+  assert.match(p, /<string>serve<\/string>\s*<string>--once<\/string>/);
+});
+
+test("常驻模式不加 --once：它本来就该一直活着", () => {
+  const p = plistFor({});
+  assert.doesNotMatch(p, /--once/);
+});

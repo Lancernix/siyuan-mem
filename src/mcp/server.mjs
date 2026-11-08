@@ -34,7 +34,7 @@ export const TOOL = {
         type: "string",
         description: "关键词，空格分隔。中文不用分词，直接写词；多个词是「都要出现」。",
       },
-      limit: { type: "integer", minimum: 1, maximum: 20, description: "最多返回几条，默认 6。" },
+      limit: { type: "integer", minimum: 1, maximum: 20, description: "最多返回几条，默认 8。" },
       topic: { type: "string", description: "只查某个话题（实体名）下的条目。" },
       project: { type: "string", description: "只查某个项目下的条目（按会话的工作目录归的）。" },
       days: { type: "integer", description: "只看最近 N 天。" },

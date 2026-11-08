@@ -10,7 +10,7 @@ const VALUED = new Set([
   "entity", "type", "confidence", "limit", "format", "n", "interval", "key", "name", "wire",
   "port", "to", "token", "machine", "quiet", "every", "bind", "alias", "chars", "base",
   // search 的三个过滤条件。漏了它们，`--days 30` 会把 30 当成检索词拼进查询。
-  "topic", "days", "status",
+  "topic", "days", "status", "project",
 ]);
 
 export function parseArgs(argv) {

@@ -7,7 +7,7 @@
 import { loadConfig } from "../src/util/config.mjs";
 import { SiYuan } from "../src/util/siyuan.mjs";
 import { Store, ATTR } from "../src/core/store.mjs";
-import { archive, readRange, listParts, knownParts, loadRawIndex, saveRawIndex } from "../src/util/raw.mjs";
+import { archive, readRange, knownParts, loadRawIndex, saveRawIndex } from "../src/util/raw.mjs";
 import { resolveEntities, loadEntities, applyPending, parsePending, similarity, norm } from "../src/core/entities.mjs";
 
 const NB = "99-记忆测试";
@@ -76,7 +76,7 @@ console.log("\n4. 本地索引与属性");
 const known = await knownParts(sy, ids.raw, { machine: "Mac", harness: "workbuddy", session });
 ok("本地索引记下了", known.length === 1 && known[0].path === parts[0].path, JSON.stringify(known));
 await new Promise((r) => setTimeout(r, 4000));
-const listed = await listParts(sy, ids.raw, session);
+const listed = await knownParts(sy, ids.raw, session);
 ok("思源 SQL 里也能查到（索引异步，等 4 秒）", listed.length === 1, JSON.stringify(listed));
 ok("range 与 path 都在属性里", listed[0]?.from === 1 && listed[0]?.to === 12 && listed[0]?.path === parts[0].path);
 

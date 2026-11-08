@@ -123,6 +123,9 @@ export async function searchEntries(opts = {}) {
        ORDER BY updated DESC LIMIT 2000`
   );
   if (!Array.isArray(rows)) return { terms, hits: [] };
+  // 取候选的上限被撞到就说明可能有召回被截断：排序和日期过滤都在内存里做，
+  // 被 SQL 砍掉的那些再也回不来。撞了要留痕，否则"查不到"永远查不出原因。
+  if (rows.length >= 2000) event("search.truncated", { q: String(opts.q ?? "").slice(0, 60), terms, rows: rows.length });
 
   const hits = rows
     .map((r) => {
@@ -159,6 +162,17 @@ export async function searchEntries(opts = {}) {
     if (topics.length) event("memory.hit", { q: String(opts.q ?? "").slice(0, 60), topics, n: hits.length });
   } catch {
     /* 日志失败不影响检索 */
+  }
+
+  // 零结果的查询最值得记：召回不准的时候，"它到底查过什么、什么都没查到"是唯一线索。
+  if (!hits.length) {
+    event("memory.miss", {
+      q: String(opts.q ?? "").slice(0, 60),
+      terms,
+      topic: opts.topic ?? "",
+      project: opts.project ?? "",
+      rows: rows.length,
+    });
   }
 
   return { terms, hits, notebook };
