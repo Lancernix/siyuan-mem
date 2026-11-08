@@ -86,14 +86,25 @@ export class SiYuan {
    * 初始化流程里连着建四个文档，每次都靠人手重跑一遍很蠢。这里自己重试。
    */
   async createDocWithMd(notebook, path, markdown = "") {
+    // 只对这一句重试。原来的 /not ready|metadata/i 太宽，会把"永久错"也重试六次，
+    // 白等十几秒；而网络错误、401、超时反而不重试——正好反了。
+    const RETRYABLE = /document metadata is not ready/i;
     let lastErr;
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 5; i++) {
       try {
         return await this.#post("/api/filetree/createDocWithMd", { notebook, path, markdown });
       } catch (e) {
         lastErr = e;
-        if (!/not ready|metadata/i.test(e.message ?? "")) throw e;
-        await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+        if (!RETRYABLE.test(e.message ?? "")) throw e;
+        await new Promise((r) => setTimeout(r, 400 * (i + 1)));
+        // 重试前先回查一次：上一次请求可能已经在思源里落盘（只是元数据没好），
+        // 这时候再 POST 一次就会多出一份同名文档——索引跟上之后两份都查得到。
+        try {
+          const hit = await this.docIdByHPath(notebook, path);
+          if (hit) return hit;
+        } catch {
+          /* 查不到就继续重试 */
+        }
       }
     }
     throw lastErr;

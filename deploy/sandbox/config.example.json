@@ -1,0 +1,12 @@
+{
+  "siyuan": {
+    "baseUrl": "http://sandbox-siyuan:6806",
+    "token": "由 bootstrap.sh 从沙箱思源里读出来填进来",
+    "notebook": "Harness-Mem",
+    "notebookId": "",
+    "partition": "month"
+  },
+  "extract": { "minTurnChars": 25, "maxEntriesPerBatch": 18, "maxCharsPerCall": 38000 },
+  "ingest": { "enabled": false, "bind": "127.0.0.1", "port": 7799, "token": "sandbox" },
+  "serve": { "intervalMinutes": 10, "quietSeconds": 1800, "maxSessionsPerRound": 20, "maxMinutesPerRound": 20 }
+}

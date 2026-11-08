@@ -183,7 +183,16 @@ async function cmdIngestLog(flags, args) {
   const r = enqueueLog(file, {
     format: flags.format === true ? "" : flags.format ?? "",
     // 0 是合法值（"不用等"），不能用 || 兜底——那会把 0 变成 180。
-    quietSeconds: flags.force ? 0 : flags.quiet !== undefined ? Number(flags.quiet) : 180,
+    // 传了但不是数字，就当参数错误——静默跳过安静检查比"报错"危险得多。
+    quietSeconds: flags.force
+      ? 0
+      : flags.quiet === undefined
+        ? 180
+        : Number.isFinite(Number(flags.quiet))
+          ? Number(flags.quiet)
+          : (() => {
+              throw new Error(`--quiet 要一个秒数，收到「${flags.quiet}」`);
+            })(),
   });
   if (!r.added) {
     if (r.reason === "subagent") console.log("这是子代理会话（归属于另一个会话），不进记忆。");
@@ -530,6 +539,9 @@ async function cmdService(args, flags) {
     const minutes = Number(flags.interval) || 0;
     if (mode === "push") {
       const cfg = loadConfig();
+      if (flags.interval !== undefined) {
+        throw new Error("--push 没有 --interval：边缘是常驻进程（活跃 15 分钟一轮，空转退到 60），改节奏去配 push.intervalSeconds");
+      }
       const r = install({ mode: "push", print: Boolean(flags.print) });
       if (!flags.print && !cfg.push?.to) {
         throw new Error("先记住中心地址：mem push --to https://… --token … --save");
@@ -615,14 +627,21 @@ async function cmdCenter(args, flags) {
       // 真去敲一下端口。只念配置的话，"配置开着但进程没起"和"一切正常"长得一模一样。
       const probeHost = ing.bind === "0.0.0.0" ? "127.0.0.1" : ing.bind;
       try {
-        const r = await fetch(`http://${probeHost}:${ing.port}/api/ping`, {
+        // 非回环地址上用 https 前缀意味着中间有反代（证书在那边），明文 token
+        // 不该直接发到公网；这里只探本机/回环，规则写死成 http。
+        const scheme = /^(127\.|localhost$|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(probeHost)
+          ? "http"
+          : "https";
+        const r = await fetch(`${scheme}://${probeHost}:${ing.port}/api/ping`, {
           headers: ing.token ? { authorization: `Bearer ${ing.token}` } : {},
           signal: AbortSignal.timeout(3000),
         });
         const j = await r.json().catch(() => ({}));
+        // 端口被别的服务占着时也会 200，得认一下对面是不是 mem。
+        const isMem = j?.name === "siyuan-mem";
         console.log(
-          `监听         ${r.ok ? "有应答" : `有应答但被拒（HTTP ${r.status}）`}` +
-            (j.queue != null ? `，中心队列 ${j.queue} 个` : "")
+          `监听         ${!r.ok ? `有应答但被拒（HTTP ${r.status}）` : isMem ? "有应答" : "有应答但不是 mem（端口被别的服务占了？）"}` +
+            (isMem && j.queue != null ? `，中心队列 ${j.queue} 个` : "")
         );
       } catch (e) {
         console.log(`监听         没应答（${e.name === "TimeoutError" ? "3 秒超时" : e.message}）`);

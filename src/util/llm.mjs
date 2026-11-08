@@ -440,13 +440,18 @@ export function saveModelChoice(provider, { apiKey, model, wire, base } = {}) {
   ensureDirs();
   let cfg = {};
   if (existsSync(CONFIG_PATH)) cfg = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
+  const prev = cfg.model ?? {};
+  const switched = Boolean(prev.provider) && prev.provider !== provider;
   cfg.model = {
-    ...(cfg.model ?? {}),
+    ...prev,
     provider,
     wire: wire || preset?.wire || "openai",
     baseUrl,
     name,
-    ...(apiKey ? { apiKey } : {}),
+    // 换厂商时**不能**留着旧 key：错误提示教人"export ARK_API_KEY 再 mem model use
+    // volcengine"，照做的话旧厂商的 key 会被发到火山端点上去。没给新 key 就清空，
+    // 让下面的 hasModel 明确报"没有 key"。
+    ...(apiKey ? { apiKey } : switched ? { apiKey: "" } : {}),
   };
   writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
   try {

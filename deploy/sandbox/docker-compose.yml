@@ -28,12 +28,24 @@ services:
       - sandbox
 
   mem:
+    # 从仓库根构建，不依赖本地已有的镜像——干净 clone 之后也能直接起。
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
     image: siyuan-mem:0.1.0
     container_name: sandbox-mem
     depends_on:
       - siyuan
     environment:
       TZ: Asia/Shanghai
+    # 沙箱里不跑 serve：它需要模型 key，而沙箱默认不配 key（不花你的钱）。
+    # 这里只是个"命令游乐场"——容器一直挂着，所有命令用 exec 跑。
+    # 想连 serve 一起验，往 data/.siyuan-mem/config.json 里加 model 段，
+    # 再把下面这行注释掉、把 command 换成 serve。
+    entrypoint: ["sleep", "infinity"]
+    # 以宿主机当前用户跑：否则 /data 下的文件是 root 的，`rm -rf data` 删不掉，
+    # 想推倒重来还得 sudo。镜像本身不需要 root（只往 /data 写）。
+    user: "${UID:-1000}:${GID:-1000}"
     volumes:
       # 配置、队列、日志都在这里；down -v 不会删它（是 bind mount），
       # 想彻底重来就 rm -rf data。
