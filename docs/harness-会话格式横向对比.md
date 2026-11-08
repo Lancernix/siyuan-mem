@@ -108,9 +108,9 @@ readers/index.mjs     注册表 + 分发
 ## 五、查自己机器上有多少
 
 ```bash
-node src/cli.mjs scan           # 每家列 3 个样本
-node src/cli.mjs scan --all     # 全读一遍，统计轮数和字数
-node src/cli.mjs scan --harness omp
+node src/cli/cli.mjs scan           # 每家列 3 个样本
+node src/cli/cli.mjs scan --all     # 全读一遍，统计轮数和字数
+node src/cli/cli.mjs scan --harness omp
 ```
 
 本机 168 个会话全量扫描 1.8 秒。
