@@ -350,8 +350,12 @@ export async function processQueue({
         text: e.text,
         brief: e.brief ?? "",
       }));
-      const want = new Set(news.map((n) => String(n.entity ?? "").replace(/\s+/g, "").toLowerCase()));
-      const pool = known.filter((k) => want.has(String(k.entity ?? "").replace(/\s+/g, "").toLowerCase()));
+      // 候选池给全库，不再只给「同话题」。
+      // 只给同话题的那一版有个看不见的漏：同一件事被抽成两个话题名时（"本地调试环境"
+      // vs "nanobot"），两边永远比不到一起，于是互相否定的两条结论都留在 current。
+      // 筛候选的活交给 pickCandidates——它按字面覆盖率挑，同话题门槛低、跨话题门槛高，
+      // 送进模型的仍然是每条最多 10 条。
+      const pool = known;
       if (pool.length) {
         const t0 = Date.now();
         decisions = await judgeDuplicates({ cfg, news, existing: pool });

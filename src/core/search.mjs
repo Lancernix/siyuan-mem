@@ -61,7 +61,7 @@ export function termsOf(q) {
     .slice(0, 6);
 }
 
-function scoreOf(row, terms, entity) {
+export function scoreOf(row, terms, entity) {
   const text = row.text ?? "";
   let score = 0;
   for (const t of terms) {
@@ -71,9 +71,19 @@ function scoreOf(row, terms, entity) {
     if (String(entity).toLowerCase().includes(lower)) score += 6;
     if (String(row.brief).toLowerCase().includes(lower)) score += 3;
   }
-  // 新的略微靠前，但不能盖过相关性：一天 -0.05，最多 -5。
+  // 时间惩罚：一天 -0.08，最多 -8。
+  //
+  // 原来是 -0.05/最多 -5，太轻了：一个词多出现一次就 +2（上限 +10），实体命中 +6，
+  // 于是「旧但写得细」稳稳压过「新而简短」。实测查 bwrap 时 2026-05 那条排在
+  // 2026-06 前面，而 6 月那条明确写着「已移除 bwrap 沙箱」——过时结论排在前面，
+  // 是这种库最坏的一种错误。
+  //
+  // 为什么封顶是 8 而不是 14：14 会把任何超过半年的条目压到负分，连一份定稿的
+  // 设计决策都翻不了身。8 分约等于 4 次词频，正好是「同一个词说了四五遍」和
+  // 「只说一遍」的差距——够翻掉啰嗦的旧条目，又不至于让旧知识整体沉底。
+  // 约 100 天打满。矛盾条目真正的归宿是被标 superseded，不该靠排序去解决。
   const days = row.date ? Math.max(0, (Date.now() - Date.parse(row.date + "T00:00:00")) / 86400000) : 60;
-  score -= Math.min(days * 0.05, 5);
+  score -= Math.min(days * 0.08, 8);
   return score;
 }
 
@@ -155,7 +165,7 @@ export async function searchEntries(opts = {}) {
       };
     })
     .filter((h) => !since || (h.date && h.date >= since))
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) => b.score - a.score || String(b.date ?? "").localeCompare(String(a.date ?? "")))
     .slice(0, limit);
 
   // 记一次命中，按话题去重（同一轮里同一话题只算一次）。
