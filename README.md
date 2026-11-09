@@ -215,9 +215,14 @@ node scripts/eval-dedupe.mjs --with-model --batch 1   # 连模型裁决一起量
 ```
 
 评测集不随仓库分发：它由真实记忆正文构成，放在 `~/.siyuan-mem/eval/dedupe-pairs.json`
-（容器里是 `/data/.siyuan-mem/eval-dedupe-pairs.json`，用 `--fixture` 指过去）。34 对里
-18 对是「同一件事」、16 对是「同项目里的不同事实」。当前数字：候选召回 18/18，
-平均 6.7 条候选/条；带模型时正例 16/18、负例 9/16。
+（容器里是 `/data/.siyuan-mem/eval/dedupe-pairs.json`，用 `--fixture` 指过去）。
+
+**标负例必须读全文，不能看预览。** 这是踩过的坑：第一版按 120 字预览标，把 4 对
+「B 是 A 的超集」误标成负例——而判重的定义是「删掉其中一条不丢信息」，超集满足
+这个定义，判 replace 本来就对。按预览标出来的「误判率」有三分之一是标注错误。
+
+现在 34 对（22 正 / 12 负），每对立项都写了 `labelNote`。当前数字：候选召回 22/22
+（holdout 7/7），平均 6.4 条候选/条、约 900 token 一条；带模型的结果跑 `--with-model`。
 
 为什么不上向量和重排序——都试过，都撤了：
 
