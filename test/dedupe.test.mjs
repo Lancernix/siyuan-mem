@@ -148,3 +148,23 @@ test("回了个不相干的串：不认", () => {
   assert.equal(resolveMatch("abc", IDS), "");
   assert.equal(resolveMatch("", IDS), "");
 });
+
+// ---- 提示词里的编号必须按块内序号 ----
+
+const { renderChunk } = await import("../src/core/dedupe.mjs");
+
+const item = (i, text, cands = ["c1", "c2"]) => ({
+  i,
+  n: { entity: "x", text, brief: "" },
+  cands: cands.map((id) => ({ e: { id, entity: "x", text: "候选正文", brief: "" }, s: 1, why: [] })),
+});
+
+test("第二块从「新 1」「候选 1」重新数，不是接着上一块编下去", () => {
+  // 用全局下标时第二块印的是【新 3】…，解析端按 1..块长 校验，整块决定被丢掉。
+  const chunk = [item(5, "第五条的正文"), item(9, "第九条的正文")];
+  const text = renderChunk(chunk);
+  assert.match(text, /^【新 1】/);
+  assert.match(text, /【新 2】/);
+  assert.doesNotMatch(text, /【新 6】|【新 10】/);
+  assert.match(text, /候选 1：/);
+});
