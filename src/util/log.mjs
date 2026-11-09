@@ -159,5 +159,8 @@ export function stats({ days = 7 } = {}) {
     models: [...models.entries()],
     prompts: [...prompts.entries()],
     byEv: [...byEv.entries()].sort((a, b) => b[1] - a[1]),
+    // 判重调用失败（拆半重试之后仍失败）。单独拎出来是因为它的表现是「什么都没发生」——
+    // 不报警、不写错，只是重复条目照写，事后完全看不出来。
+    dedupeFailed: byEv.get("dedupe.failed") ?? 0,
   };
 }

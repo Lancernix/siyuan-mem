@@ -923,6 +923,7 @@ async function cmdLog(args, flags) {
         `  ⚠ 模型降级: ${s.fallbacks.map(([k, v]) => `${why[k] ?? k}×${v}`).join("；")}`
       );
     }
+    if (s.dedupeFailed) console.log(`  ⚠ 判重失败 ${s.dedupeFailed} 次（那几批当「没有重复」处理了）`);
     if (s.hits) console.log(`  召回 ${s.hits} 次（memory.hit，按话题去重）`);
     if (s.tokens) console.log(`  tokens ${s.tokens}`);
     if (s.written) {
