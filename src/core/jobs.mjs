@@ -448,7 +448,9 @@ export async function processQueue({
           });
           onLine(`    + [${entity || "-"}] ${e.text}`);
           // 这一场新写的条目也要进池子：同一轮里后面的会话能看见它。
-          known.push({ id: r.id, entity, brief: e.brief ?? "", text: e.text });
+          // 带 project：一轮里处理多个会话时，前一个会话刚写的条目要能参与后一个会话的
+          // 「同项目」判重。漏了这个字段，那条兜底通道对同一轮内的新条目等于关闭。
+          known.push({ id: r.id, entity, brief: e.brief ?? "", text: e.text, project: projectOf(payload.cwd, payload.harness) });
           if (verdict?.action === "replace") {
             // 新的更全：写新的，旧的标过时，指针留着。
             // 先记账再动：upsert 成功了但 supersede 挂了，下一轮能补。

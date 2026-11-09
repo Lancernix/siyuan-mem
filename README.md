@@ -214,8 +214,10 @@ node scripts/eval-dedupe.mjs --no-project    # 消融：关掉同项目兜底
 node scripts/eval-dedupe.mjs --with-model --batch 1   # 连模型裁决一起量（花钱，慢）
 ```
 
-评测集是 `test/fixtures/dedupe-pairs.json`：34 对真实条目，18 对是「同一件事」、
-16 对是「同项目里的不同事实」。当前数字：候选召回 18/18，平均 6.7 条候选/条。
+评测集不随仓库分发：它由真实记忆正文构成，放在 `~/.siyuan-mem/eval/dedupe-pairs.json`
+（容器里是 `/data/.siyuan-mem/eval-dedupe-pairs.json`，用 `--fixture` 指过去）。34 对里
+18 对是「同一件事」、16 对是「同项目里的不同事实」。当前数字：候选召回 18/18，
+平均 6.7 条候选/条；带模型时正例 16/18、负例 9/16。
 
 为什么不上向量和重排序——都试过，都撤了：
 

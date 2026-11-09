@@ -277,6 +277,16 @@ async function judgeChunk({ cfg, chunk, out, depth = 0 }) {
     if (process.env.MEM_DEBUG) console.log("[dedupe 原文]", r.text);
     const parsed = JSON.parse(String(r.text ?? "").replace(/^\s*```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim());
     const decisions = Array.isArray(parsed?.decisions) ? parsed.decisions : [];
+    // 这两种「没抛错但也没结果」以前全是静默的：模型换了个键名、或者回了编号但一个都
+    // 对不上，整块就当没重复——日志上跟「库里本来就没重复」长得一样。
+    if (!decisions.length) {
+      event("dedupe.failed", {
+        size: chunk.length,
+        reason: "no-decisions",
+        keys: Object.keys(parsed ?? {}).slice(0, 3).join(","),
+      });
+    }
+    let accepted = 0;
     for (const d of decisions) {
       // 模型看到的是块内的局部编号，先落回全局下标。
       const n = Number(d?.new);
@@ -288,7 +298,13 @@ async function judgeChunk({ cfg, chunk, out, depth = 0 }) {
       // 只认这条新条目自己候选里的东西：模型编一个 id 出来不能当数。
       if (!match) continue;
       const action = d?.action === "covered" || d?.action === "replace" ? d.action : "keep";
-      if (action !== "keep") out.set(p.i, { action, id: match });
+      if (action !== "keep") {
+        out.set(p.i, { action, id: match });
+        accepted++;
+      }
+    }
+    if (decisions.length && accepted === 0) {
+      event("dedupe.failed", { size: chunk.length, reason: "unresolved", decisions: decisions.length });
     }
     return out;
   } catch (e) {

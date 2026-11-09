@@ -2,7 +2,7 @@
 /**
  * 判重候选的评测：三条通道各自捞回多少真重复、又放进多少噪音。
  *
- *   node scripts/eval-dedupe.mjs                    # 拿当前库跑 test/fixtures/dedupe-pairs.json
+ *   node scripts/eval-dedupe.mjs                    # 拿当前库跑 ~/.siyuan-mem/eval/dedupe-pairs.json
  *   node scripts/eval-dedupe.mjs --no-project       # 消融：把「同项目」通道关掉再跑
  *   node scripts/eval-dedupe.mjs --with-model       # 再把模型叫来判一遍（要花钱，量的是终局准确率）
  *   node scripts/eval-dedupe.mjs --fixture xxx.json --json
@@ -33,7 +33,12 @@ const valueOf = (name, dflt) => {
   return i >= 0 && args[i + 1] ? args[i + 1] : dflt;
 };
 
-const fixturePath = resolve(valueOf("fixture", join(ROOT, "test/fixtures/dedupe-pairs.json")));
+// 评测集不在仓库里。它由真实记忆正文构成，进公开仓库等于把私人笔记搬到大街上
+// （这件事真的发生过一次，见提交历史里那次 history rewrite）。所以默认读用户目录，
+// 想放别处就 --fixture 指过去。
+const fixturePath = resolve(
+  valueOf("fixture", join(process.env.HOME ?? "~", ".siyuan-mem/eval/dedupe-pairs.json"))
+);
 const wantJson = flag("json");
 // 带模型跑：候选召回只是第一段，模型看得到之后判不判得对是第二段。两段分开量，
 // 才知道该调门槛还是该调提示词。
@@ -51,7 +56,16 @@ const store = new Store(new SiYuan(cfg.siyuan), cfg);
 const known = await store.listCurrent(3000);
 const pool = dropProject ? known.map((e) => ({ ...e, project: "" })) : known;
 
-const doc = JSON.parse(readFileSync(fixturePath, "utf8"));
+let doc;
+try {
+  doc = JSON.parse(readFileSync(fixturePath, "utf8"));
+} catch (e) {
+  console.error(
+    `读不到评测集：${fixturePath}\n` +
+      "  它是私有的（真实记忆正文），不随仓库分发。放一份到上面这个路径，或者用 --fixture 指过去。"
+  );
+  process.exit(2);
+}
 const pairs = doc.pairs ?? doc;
 
 /** 命中的那条候选是靠哪条通道进来的。多条同时命中时按「先验强弱」取最有代表性的一个。 */
