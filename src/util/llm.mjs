@@ -126,6 +126,25 @@ function usageOf(u = {}) {
   };
 }
 
+/**
+ * 服务端说的「多久之后再来」，换算成毫秒。
+ *
+ * AI SDK 的错误对象上没有 `retryAfterMs` 这个字段（读它永远是 undefined，于是所有
+ * 429 都退回 800ms 指数退避，服务端让等 10 秒也照撞）。真正带这个信息的是
+ * `responseHeaders`，标准头名 `retry-after`，两种写法都合法：秒数，或 HTTP 日期。
+ */
+function retryAfterOf(e) {
+  const h = e?.responseHeaders ?? e?.cause?.responseHeaders ?? {};
+  const raw = h["retry-after"] ?? h["Retry-After"];
+  if (raw != null && raw !== "") {
+    const sec = Number(raw);
+    if (Number.isFinite(sec)) return Math.max(0, sec * 1000);
+    const at = Date.parse(String(raw));
+    if (Number.isFinite(at)) return Math.max(0, at - Date.now());
+  }
+  return e?.retryAfterMs;
+}
+
 /** AI SDK 的错误 → 我们的 {status, retryable, retryAfterMs}，重试策略只认这几个。 */
 function shapeError(e) {
   const status = e?.statusCode ?? e?.status;
@@ -135,7 +154,7 @@ function shapeError(e) {
   const err = new Error(e?.responseBody ? `${e.message}｜${String(e.responseBody).slice(0, 300)}` : (e?.message ?? String(e)));
   err.status = status;
   err.retryable = retryable;
-  err.retryAfterMs = e?.retryAfterMs;
+  err.retryAfterMs = retryAfterOf(e);
   // schema 校验失败单独标出来：调用方要据此决定"退回文本再解析一次"。
   if (e?.name === "AI_NoObjectGeneratedError") {
     err.noObject = true;
@@ -144,6 +163,11 @@ function shapeError(e) {
   // 空回包两个原因：max_tokens 被思考吃光，或者服务端偶发返回空 content
   // （DeepSeek 官方文档自己写着「有概率返回空的 content」）。两种都值得重试一次，
   // 所以标成 retryable——按不可重试处理会把一整批降级成规则抽取。
+  // 超时（AbortSignal.timeout 抛的 TimeoutError / AbortError）值得重试一次：
+  // 多数是端点抖动，不是请求本身有问题。
+  if (e?.name === "TimeoutError" || e?.name === "AbortError" || e?.code === "ABORT_ERR") {
+    err.retryable = true;
+  }
   if (e?.name === "AI_NoOutputGeneratedError") {
     err.retryable = true;
     err.message = `${err.message}（模型没吐正文：max_tokens 太小被思考吃光，或服务端偶发空回包）`;
@@ -298,6 +322,9 @@ async function call(cfg, { messages, json = false, schema = null, maxTokens, tag
     try {
       const res = await generateText({
         model,
+        // timeoutMs 一直被读进配置、却从没往下传（评审指出）：端点挂住就真的挂着，
+        // 45 秒的默认值形同虚设。abortSignal 是 SDK 唯一认的中断方式。
+        abortSignal: AbortSignal.timeout(m.timeoutMs ?? 45_000),
         // 重试必须关在 SDK 里面：它默认自己重试两次，且不认我们的 Retry-After 策略，
         // 结果就是"日志上 attempts=1，实际打了三次"（实测）。
         maxRetries: 0,
