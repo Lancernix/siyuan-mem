@@ -170,6 +170,19 @@ function ptrFor(parts, from, to) {
 }
 
 /**
+ * 把一个刚被标过时的条目从本轮候选池里摘掉。
+ *
+ * 摘掉是必须的：`known` 是这一轮开始时读的 current 快照，supersede 只改了块属性、
+ * 不动这份内存数组。一轮里处理好几个会话时，后面那个会话的新条目仍可能拿「已经被
+ * 标过时的旧条目」当候选，判成 covered 就直接不写了——而它参照的那条已经不是 current，
+ * 等于拿一份作废的底稿去比对，还不报错。
+ */
+function forgetFromPool(pool, id) {
+  const i = pool.findIndex((e) => e.id === id);
+  if (i >= 0) pool.splice(i, 1);
+}
+
+/**
  * 处理队列。
  *
  * maxSessions / maxMs 是**一轮的预算**，不是总量：跑不完留到下一轮。
@@ -430,6 +443,7 @@ export async function processQueue({
             notePending({ old: verdict.id, new: r.id, entity });
             await store.supersede(verdict.id, r.id);
             dropPending(verdict.id);
+            forgetFromPool(known, verdict.id);
             sum.replaced++;
             event("entry.replace", { session: payload.session_id ?? "", old: verdict.id, new: r.id, entity, retried: true });
             onLine(`    ~ 补做取代（上一轮没做完）`);
@@ -457,6 +471,7 @@ export async function processQueue({
             notePending({ old: verdict.id, new: r.id, entity });
             await store.supersede(verdict.id, r.id);
             dropPending(verdict.id);
+            forgetFromPool(known, verdict.id);
             sum.replaced++;
             event("entry.replace", { session: payload.session_id ?? "", old: verdict.id, new: r.id, entity });
             onLine(`    ~ 取代了旧的一条`);
