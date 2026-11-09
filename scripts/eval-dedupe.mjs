@@ -146,10 +146,13 @@ if (withModel) {
     // 正例判对的口径是「认出了重复」，不是「指到我标的那一条」——库里同一件事常常
     // 有三四份拷贝（同一次抽取跑两遍、按月导入），模型指到另一份是正确行为。
     // 所以凡是与 a 正文覆盖率 ≥0.6 的条目都算「同一份」，指到其中任何一个都算对。
+    // 不再要求实体名相同：改名那件事在库里同时挂在「思源笔记」和「思源记忆库」下，
+    // 实体名不同但正文几乎一样，要求同名会把正确行为判成错。
     const pair = pairs[i];
-    const equivalents = new Set(
-      [pair.a.id, ...pool.filter((e) => coverOf(e.text, pair.a.text) >= 0.6 && e.entity === pair.a.entity).map((e) => e.id)]
-    );
+    const equivalents = new Set([
+      pair.a.id,
+      ...pool.filter((e) => coverOf(e.text, pair.a.text) >= 0.6).map((e) => e.id),
+    ]);
     if (r.same) r.correct = Boolean(d && equivalents.has(d.id));
     // 负例：没被判成重复才算对。
     else r.correct = !d;
