@@ -519,6 +519,9 @@ export class Store {
       id: r.id,
       entity: attrOf(r.ial, ATTR.entity),
       brief: attrOf(r.ial, ATTR.brief),
+      // 项目与日期：判重按「同项目」再开一条通道，评测脚本也要按日期看新旧。
+      project: attrOf(r.ial, ATTR.project),
+      date: attrOf(r.ial, ATTR.date),
       // 这份 text 直接喂给判重比相似度，原文路径必须先去掉：同一场会话的条目
       // 共用那串 mem-raw/… 路径，留着会让两条不相干的东西「很像」。
       text: stripRawLink(r.content, attrOf(r.ial, ATTR.raw)).replace(/\s+/g, " ").trim(),

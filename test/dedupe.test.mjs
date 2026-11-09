@@ -10,7 +10,7 @@ import { pickCandidates } from "../src/core/dedupe.mjs";
 
 const ENT = "思源笔记每日复盘";
 
-const mk = (id, text, entity = ENT) => ({ id, entity, brief: text.slice(0, 20), text });
+const mk = (id, text, entity = ENT, project = "") => ({ id, entity, brief: text.slice(0, 20), text, project });
 
 test("同话题的排前面，话题名漂移但字面高度重合的也要进来", () => {
   // 这里原来是「话题不同的不比」。那个规则有个看不见的漏：同一件事被抽成两个
@@ -70,4 +70,47 @@ test("候选上限是 10 条，不是 6 条", () => {
 test("一条候选都没有时不产生调用计划", () => {
   const news = [mk("n", "完全不相干的一句话，长度也够。")];
   assert.equal(pickCandidates({ news, existing: [] }).plan.length, 0);
+});
+
+// ---- 第三条通道：同项目 ----
+
+test("同项目、纯中文、覆盖率 0.12：进候选（跨项目时进不来）", () => {
+  // 这对句子覆盖率 0.12：同话题的 0.15 门槛过不去，跨话题的 0.28 更过不去，
+  // 没有任何英文稀有词。只有「同一个项目」这一条能把它们撞到一起。
+  const a = "服务器总内存不到两千兆，交换区已经用掉一大半，所以不能再同时跑两个网关。";
+  const b = "机器上内存本来就紧张，交换用了七成，再起一个服务就撑不住。";
+  const sameProj = pickCandidates({
+    news: [mk("n", b, "服务器", "ubuntu")],
+    existing: [mk("e", a, "服务器", "ubuntu")],
+  });
+  assert.equal(sameProj.plan[0]?.cands.length, 1, "同项目要能进来");
+  assert.match(sameProj.plan[0].cands[0].why.join(" "), /同项目/);
+
+  const crossProj = pickCandidates({
+    news: [mk("n", b, "服务器", "其他项目")],
+    existing: [mk("e", a, "服务器", "ubuntu")],
+  });
+  assert.equal(crossProj.plan[0]?.cands.length ?? 0, 0, "不同项目就该挡在门外");
+});
+
+test("项目名都是空的：不走这条通道，否则全库互相成为候选", () => {
+  // 老条目可能没有 custom-mem-project（空串）。空对空不当成「同项目」——
+  // 那等于把所有没打标签的条目都塞进同一个池子，10 个名额立刻被无关条目占满。
+  const a = "服务器总内存不到两千兆，交换区已经用掉一大半，所以不能再同时跑两个网关。";
+  const b = "机器上内存本来就紧张，交换用了七成，再起一个服务就撑不住。";
+  const r = pickCandidates({ news: [mk("n", b)], existing: [mk("e", a)] });
+  assert.equal(r.plan[0]?.cands.length ?? 0, 0);
+});
+
+test("同话题的排序加成还在：覆盖率一样时它排在前面", () => {
+  // 两段一模一样的正文，唯一的区别是一个挂在同话题下。同话题 +0.06、
+  // 另一个只靠覆盖率，所以同话题那条排前面——名额有限时先给先验更强的。
+  const text = "服务器总内存不到两千兆，交换区已经用掉一大半，所以不能再同时跑两个网关。";
+  const existing = [
+    mk("sameProjOnly", text, "内存", "ubuntu"),
+    mk("sameEntity", text, "服务器", "ubuntu"),
+  ];
+  const news = [mk("n", text, "服务器", "ubuntu")];
+  const { plan } = pickCandidates({ news, existing });
+  assert.deepEqual(plan[0].cands.map((c) => c.e.id), ["sameEntity", "sameProjOnly"]);
 });

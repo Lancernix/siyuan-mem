@@ -349,6 +349,9 @@ export async function processQueue({
         entity: entityMap.get(e.entity) ?? e.entity,
         text: e.text,
         brief: e.brief ?? "",
+        // 项目名要带上：判重的第三条通道是「同项目」，同一个 cwd 下的两条即使话题
+        // 名不同也值得让模型看一眼。不带就是空的，那条通道对这批条目等于关闭。
+        project: projectOf(payload.cwd, payload.harness),
       }));
       // 候选池给全库，不再只给「同话题」。
       // 只给同话题的那一版有个看不见的漏：同一件事被抽成两个话题名时（"本地调试环境"

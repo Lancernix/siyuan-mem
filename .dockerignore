@@ -3,5 +3,7 @@ node_modules
 .gitignore
 deploy/data
 test
+# 但评测集要进镜像：scripts/eval-dedupe.mjs 在容器里跑（那里才有库和模型）
+!test/fixtures
 *.md
 deploy/sandbox/data/

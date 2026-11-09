@@ -14,6 +14,9 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 COPY src ./src
 COPY scripts ./scripts
+# 判重评测集。scripts/eval-dedupe.mjs 要跑它，而评测必须在「有库、有模型」的地方跑
+# ——也就是这个容器里。25KB，不带进来就只能靠手工 docker cp。
+COPY test/fixtures ./test/fixtures
 
 # 配置、队列、原文索引、锁、日志全在 ~/.siyuan-mem 下，挂卷出去。
 # 容器重建不会丢队列——丢掉意味着那几场会话白推了。
