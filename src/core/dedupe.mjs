@@ -9,7 +9,8 @@
  * 「这段话库里是不是已经说过」。
  *
  * 三步：
- *   1) 从旧条目里按字面覆盖率挑前 10 条候选（同话题 + 话题名漂移了的）；
+ *   1) 从旧条目里挑前 10 条候选：同话题按覆盖率 0.15、跨话题按稀有词命中或
+ *      覆盖率 0.28，前几条一条都挑不出来时才用「同项目」兜底（见 pickCandidates）；
  *   2) 一次调用，让模型对每条新条目给出 covered / replace / keep；
  *   3) covered 不写，replace 写新的并把旧的标 superseded，keep 正常写。
  *
@@ -77,6 +78,30 @@ const SAME_ENTITY_BONUS = 0.06;
 /** 每个共享稀有词加一点分，最多算三个。 */
 const RARE_HIT_BONUS = 0.04;
 /**
+ * 同一个项目下的两条，字面门槛压到 0.10。
+ *
+ * 这是第三条通道，理由是最便宜的：同一个 cwd 推出来的项目名，属性里本来就写着，
+ * 不用算也不用调模型。同一个项目里的两条，即使话题名不同、字面不像，也值得让
+ * 模型看一眼——「本地调试环境」和「nanobot」都挂在 ubuntu 这个项目下，正是这样一个
+ * 例子（bwrap 那对还能靠稀有词命中，换成纯中文的表述就只剩这条通道救得回来）。
+ *
+ * 0.10 是个很松的门槛，作用是别把项目里完全两回事的条目也塞进去；排序仍然按
+ * 覆盖率，真正相关的排前面，10 个名额不会被挤爆。
+ */
+const SAME_PROJECT_MIN_COVERAGE = 0.1;
+/**
+ * 同项目这条通道**只在别的通道没凑够候选时才用**，补到这么多条为止。
+ *
+ * 一开始它是无条件开的，跑评测才发现代价不对：34 对真实数据上召回没变（18/18），
+ * 平均候选从 6.5 条涨到 8.8 条、每条多花约 300 token——因为「同一个项目」这个先验
+ * 太松，一个项目几百条，10 个名额很容易被同项目的近邻占满，把真正该看的挤下去。
+ *
+ * 所以改成兜底：先按前两条通道挑，挑不到 3 条才拿同项目来补。bwrap 那类「同一件事
+ * 被起了两个话题名、又没有共享英文词」的情况，正因为别的通道一条都挑不出来才落进
+ * 这里——兜底正好用在对的地方，活跃话题上的常规判重一点成本都不多付。
+ */
+const PROJECT_FALLBACK_AT = 3;
+/**
  * 候选给到 10 条而不是 6 条。这一条是实测出来的最大收益：
  * 6 条召回 87%，10 条 99%。条目越长（200 字口径）字面越准，多给几个位置就够了。
  */
@@ -103,12 +128,24 @@ function tokensOf(text) {
  * 那些有辨识度的词（bwrap、GH_CONFIG_DIR、某个仓库名）会一起出现；只在全库出现
  * ≤3 次的词才算稀有，命中一个就送模型。
  *
+ * 第三条通道是**同项目**：同一个 cwd 下的两条即使话题名、字面都不像也送（理由
+ * 见 SAME_PROJECT_MIN_COVERAGE）。
+ *
  * 判不判得准交给模型，这里只负责别把它挡在门外。多送一条候选的代价是几十个
  * token，漏掉一条的代价是库里永久并存两个互相否定的结论。
+ *
+ * 每条候选带一个 why（命中了哪些通道），判重时不进提示词，只给评测脚本和排查用：
+ * 想调门槛时，得先知道是哪条通道把真重复捞回来的、又是哪条把噪音放进去的。
  */
 export function pickCandidates({ news, existing, top = MAX_CANDIDATES }) {
   // 二元组和词表对每条旧条目只算一次：库里有几千条时，逐条重算是这段的性能热点。
-  const pre = existing.map((e) => ({ e, key: entityKey(e.entity), bg: bigrams(e.text), tk: tokensOf(e.text) }));
+  const pre = existing.map((e) => ({
+    e,
+    key: entityKey(e.entity),
+    proj: String(e.project ?? "").trim().toLowerCase(),
+    bg: bigrams(e.text),
+    tk: tokensOf(e.text),
+  }));
   const df = new Map();
   for (const p of pre) for (const t of p.tk) df.set(t, (df.get(t) ?? 0) + 1);
 
@@ -116,20 +153,44 @@ export function pickCandidates({ news, existing, top = MAX_CANDIDATES }) {
   let picked = 0;
   news.forEach((n, i) => {
     const key = entityKey(n.entity);
+    const proj = String(n.project ?? "").trim().toLowerCase();
     const nbg = bigrams(n.text);
     const rare = [...tokensOf(n.text)].filter((t) => (df.get(t) ?? 0) <= RARE_DF_MAX);
     const scored = [];
     for (const p of pre) {
       const same = p.key === key;
-      let share = 0;
-      for (const t of rare) if (p.tk.has(t)) share++;
+      const sameProj = Boolean(proj) && p.proj === proj;
+      const hitRare = [];
+      for (const t of rare) if (p.tk.has(t)) hitRare.push(t);
       const cov = coverOf(nbg, p.bg);
-      if (!same && !share && cov < CROSS_MIN_COVERAGE) continue;
-      if (same && !share && cov < MIN_COVERAGE) continue;
-      scored.push({ e: p.e, s: cov + (same ? SAME_ENTITY_BONUS : 0) + Math.min(share, 3) * RARE_HIT_BONUS });
+      // 主通道只有两条：同话题（0.15）、跨话题（0.28）；有共享稀有词则直接进。
+      // 「同项目」不在这里——它是兜底，见下面 PROJECT_FALLBACK_AT。
+      const floor = same ? MIN_COVERAGE : CROSS_MIN_COVERAGE;
+      if (!hitRare.length && cov < floor) continue;
+      const why = [];
+      if (same) why.push("同话题");
+      if (hitRare.length) why.push(`稀有词:${hitRare.slice(0, 3).join(",")}`);
+      why.push(`覆盖${cov.toFixed(2)}`);
+      scored.push({
+        e: p.e,
+        s: cov + (same ? SAME_ENTITY_BONUS : 0) + Math.min(hitRare.length, 3) * RARE_HIT_BONUS,
+        why,
+      });
     }
     scored.sort((a, b) => b.s - a.s);
-    const cands = scored.slice(0, top);
+    let cands = scored.slice(0, top);
+    // 兜底：前两条通道给得太少（0～2 条），说明这条新条目在库里几乎没有近邻，
+    // 这时候「同项目」是唯一还能提供线索的东西。
+    if (cands.length < PROJECT_FALLBACK_AT && proj) {
+      const have = new Set(cands.map((c) => c.e.id));
+      const fill = pre
+        .filter((p) => p.proj === proj && !have.has(p.e.id))
+        .map((p) => ({ e: p.e, s: coverOf(nbg, p.bg), why: [`同项目兜底`, `覆盖${coverOf(nbg, p.bg).toFixed(2)}`] }))
+        .filter((c) => c.s >= SAME_PROJECT_MIN_COVERAGE)
+        .sort((a, b) => b.s - a.s)
+        .slice(0, Math.max(0, PROJECT_FALLBACK_AT - cands.length));
+      cands = cands.concat(fill);
+    }
     picked += cands.length;
     if (cands.length) plan.push({ i, n, cands });
   });
@@ -139,7 +200,7 @@ export function pickCandidates({ news, existing, top = MAX_CANDIDATES }) {
 /**
  * @param {object} cfg
  * @param {{entity:string,text:string,brief:string}[]} news 这一场要写的条目（已归一过实体名）
- * @param {{id:string,entity:string,text:string,brief:string}[]} existing 库里同话题的旧条目
+ * @param {{id:string,entity:string,text:string,brief:string,project?:string}[]} existing 库里的旧条目（全库，不用预先按话题筛）
  * @returns {Promise<Map<number, {action:string, id:string}>>} 下标 → 决定
  */
 export async function judgeDuplicates({ cfg, news, existing }) {
