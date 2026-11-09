@@ -159,7 +159,6 @@ export function pickCandidates({ news, existing, top = MAX_CANDIDATES }) {
     const scored = [];
     for (const p of pre) {
       const same = p.key === key;
-      const sameProj = Boolean(proj) && p.proj === proj;
       const hitRare = [];
       for (const t of rare) if (p.tk.has(t)) hitRare.push(t);
       const cov = coverOf(nbg, p.bg);
@@ -179,13 +178,16 @@ export function pickCandidates({ news, existing, top = MAX_CANDIDATES }) {
     }
     scored.sort((a, b) => b.s - a.s);
     let cands = scored.slice(0, top);
-    // 兜底：前两条通道给得太少（0～2 条），说明这条新条目在库里几乎没有近邻，
+    // 兜底：上面三条给得太少（0～2 条），说明这条新条目在库里几乎没有近邻，
     // 这时候「同项目」是唯一还能提供线索的东西。
     if (cands.length < PROJECT_FALLBACK_AT && proj) {
       const have = new Set(cands.map((c) => c.e.id));
       const fill = pre
         .filter((p) => p.proj === proj && !have.has(p.e.id))
-        .map((p) => ({ e: p.e, s: coverOf(nbg, p.bg), why: [`同项目兜底`, `覆盖${coverOf(nbg, p.bg).toFixed(2)}`] }))
+        .map((p) => {
+          const cov = coverOf(nbg, p.bg);
+          return { e: p.e, s: cov, why: ["同项目兜底", `覆盖${cov.toFixed(2)}`] };
+        })
         .filter((c) => c.s >= SAME_PROJECT_MIN_COVERAGE)
         .sort((a, b) => b.s - a.s)
         .slice(0, Math.max(0, PROJECT_FALLBACK_AT - cands.length));
