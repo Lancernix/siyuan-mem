@@ -12,7 +12,10 @@ const ENT = "思源笔记每日复盘";
 
 const mk = (id, text, entity = ENT) => ({ id, entity, brief: text.slice(0, 20), text });
 
-test("同话题里按字面覆盖率挑，话题不同的不比", () => {
+test("同话题的排前面，话题名漂移但字面高度重合的也要进来", () => {
+  // 这里原来是「话题不同的不比」。那个规则有个看不见的漏：同一件事被抽成两个
+  // 话题名时，两边永远比不到一起，于是互相否定的两条结论都留在 current。
+  // 实测就是 bwrap 那对（「本地调试环境」vs「nanobot」）。
   const existing = [
     mk("a", "补卡只处理复盘里「今日完成/复写」明确列出的题，跳过「后续仍需补充」和「明日计划」中的未做题。"),
     mk("b", "「06-算法」下的复盘卡按题号升序连续编号，新建卡从当前最大编号接续。"),
@@ -21,7 +24,32 @@ test("同话题里按字面覆盖率挑，话题不同的不比", () => {
   const news = [mk("n", "补卡只处理复盘里「今日完成/复写」明确列出的题，跳过「后续仍需补充」和「明日计划」中的未做题。")];
   const { plan } = pickCandidates({ news, existing });
   assert.equal(plan.length, 1);
-  assert.deepEqual(plan[0].cands.map((c) => c.e.id), ["a"], "只有同话题的 a 该进来");
+  assert.deepEqual(plan[0].cands.map((c) => c.e.id), ["a", "c"], "同话题的 a 排前，漂移话题的 c 也要进来");
+});
+
+test("同一对句子：同话题进候选，跨话题不进——覆盖率门槛确实分两档", () => {
+  // 纯中文、没有共享的英文词，所以只能走覆盖率这条路。这对的覆盖率约 0.185。
+  const a = "服务器总内存不到两千兆，交换区已经用掉一大半，所以不能再同时跑两个网关。";
+  const b = "可用内存只剩七百兆，交换吃掉七成，两个服务一起跑就会撑爆机器。";
+  const asSame = pickCandidates({ news: [mk("n", b)], existing: [mk("e", a)] });
+  const asCross = pickCandidates({ news: [mk("n", b, "别的项目")], existing: [mk("e", a)] });
+  assert.equal(asSame.plan[0]?.cands.length, 1, "同话题：0.15 的门槛能过");
+  assert.equal(asCross.plan[0]?.cands.length ?? 0, 0, "跨话题：0.28 的门槛过不去");
+});
+
+test("跨话题但共享一个有辨识度的词：必须进候选——bwrap 那对就是靠这条抓到的", () => {
+  // 这两条真实数据的话题名完全不同（本地调试环境 / nanobot），字面覆盖率只有 0.213，
+  // 靠覆盖率永远撞不到一起；共同点是 bwrap 这个词全库只出现几次。
+  const old = mk("a", "本地调试环境是 bwrap 沙箱，只有 workspace 持久，无 sudo、不能 bind mount。", "本地调试环境");
+  const neu = mk("n", "已移除 bwrap 沙箱、保留 rm -rf guard，可用 sudo。", "nanobot");
+  const { plan } = pickCandidates({ news: [neu], existing: [old] });
+  assert.equal(plan[0]?.cands.length, 1, "共享稀有词要能把它送进模型");
+});
+
+test("既没有共享稀有词、覆盖率也低：不进候选", () => {
+  const existing = [mk("a", "DataPilot 用 Polars + calamine 引擎 + Parquet 做主存储，替代 Pandas 处理百万行 Excel。", "DataPilot")];
+  const news = [mk("n", "复盘卡按题号升序连续编号，新建的卡从当前最大编号往后接一位。", "复盘卡")];
+  assert.equal(pickCandidates({ news, existing }).plan.length, 0);
 });
 
 test("覆盖率低于 0.15 的不送模型——那是两回事，不是换个说法", () => {

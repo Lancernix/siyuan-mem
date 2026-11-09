@@ -9,7 +9,7 @@
  * 「这段话库里是不是已经说过」。
  *
  * 三步：
- *   1) 从同话题的旧条目里按字面覆盖率挑前 10 条候选；
+ *   1) 从旧条目里按字面覆盖率挑前 10 条候选（同话题 + 话题名漂移了的）；
  *   2) 一次调用，让模型对每条新条目给出 covered / replace / keep；
  *   3) covered 不写，replace 写新的并把旧的标 superseded，keep 正常写。
  *
@@ -31,6 +31,8 @@ const PROMPT = `你是记忆库的入库裁判。下面有「待写入的新条�
 - 同一件事：删掉其中一条不丢信息，只是换了说法或详略不同。
 - 不是同一件事：两条各讲一个事实、各是一个决策，各自能独立成立——
   哪怕都关于同一个方面，也不算。
+- 候选**不一定和它同话题**：同一个对象被起了两个名字、或者话题名后来改了，
+  也会出现在候选里。这种恰恰要看仔细：它可能正是「旧结论已经被推翻」的那一条。
 
 是同一条时，再判断留哪条：
 - covered：库里那条已经把信息说完了 → 新条目不写。
@@ -49,10 +51,14 @@ function bigrams(s) {
   return out;
 }
 
+/** 实体名归一：判重只认名字，不认 id——同一个对象在两个会话里被起了两个名字，
+ *  正是要抓的那种漏。 */
+function entityKey(name) {
+  return String(name ?? "").replace(/\s+/g, "").toLowerCase();
+}
+
 /** 短的那条有多少二元组被长的覆盖住。1 表示完全被包含。 */
-function coverage(a, b) {
-  const A = bigrams(a);
-  const B = bigrams(b);
+function coverOf(A, B) {
   if (!A.size || !B.size) return 0;
   const [small, big] = A.size <= B.size ? [A, B] : [B, A];
   let hit = 0;
@@ -62,30 +68,68 @@ function coverage(a, b) {
 
 /** 同话题、字面又不沾边的，不必送模型；0.15 是「换个说法」的下限，再低就是两回事。 */
 const MIN_COVERAGE = 0.15;
+/** 跨话题时的高覆盖兜底：整段都是中文、没有稀有词可用时，只能靠字面。 */
+const CROSS_MIN_COVERAGE = 0.28;
+/** 稀有词：全库出现不超过这么多次，才算「有辨识度」。 */
+const RARE_DF_MAX = 3;
+/** 覆盖率打平时优先同话题：先验上它更可能是重复。 */
+const SAME_ENTITY_BONUS = 0.06;
+/** 每个共享稀有词加一点分，最多算三个。 */
+const RARE_HIT_BONUS = 0.04;
 /**
  * 候选给到 10 条而不是 6 条。这一条是实测出来的最大收益：
  * 6 条召回 87%，10 条 99%。条目越长（200 字口径）字面越准，多给几个位置就够了。
  */
 const MAX_CANDIDATES = 10;
 
-/** 同话题的旧条目按字面覆盖率排，取前 N。纯函数，方便测。 */
+/** 取有辨识度的英文/标识符词：bwrap、GH_CONFIG_DIR、某个仓库名。中文不切词。 */
+function tokensOf(text) {
+  const out = new Set();
+  for (const m of String(text ?? "").matchAll(/[A-Za-z][A-Za-z0-9_.-]{2,}/g)) out.add(m[0].toLowerCase());
+  return out;
+}
+
+/**
+ * 挑候选。纯函数，方便测。
+ *
+ * 同话题和跨话题都看。只装同话题的那一版有个看不见的漏：同一件事被抽成两个
+ * 话题名时（「本地调试环境」vs「nanobot」），两边永远比不到一起，于是互相否定的
+ * 两条结论都留在 current。实测就是 bwrap 那对：5 月说「是沙箱、无 sudo」，
+ * 6 月说「已移除沙箱、可用 sudo」，检索时一起返回。
+ *
+ * 但跨话题只看字面覆盖率分不开：那一对覆盖率只有 0.213，而全库完全不相干的条目
+ * （podcastfy、算法复盘卡）也能到 0.18 —— 中文共享的二字组太多，0.2 附近分不出
+ * 「同一件事」和「都在讲技术」。所以跨话题改看**稀有词命中**：讨论同一个东西时，
+ * 那些有辨识度的词（bwrap、GH_CONFIG_DIR、某个仓库名）会一起出现；只在全库出现
+ * ≤3 次的词才算稀有，命中一个就送模型。
+ *
+ * 判不判得准交给模型，这里只负责别把它挡在门外。多送一条候选的代价是几十个
+ * token，漏掉一条的代价是库里永久并存两个互相否定的结论。
+ */
 export function pickCandidates({ news, existing, top = MAX_CANDIDATES }) {
-  const byEntity = new Map();
-  for (const e of existing) {
-    const key = String(e.entity ?? "").replace(/\s+/g, "").toLowerCase();
-    const list = byEntity.get(key) ?? [];
-    list.push(e);
-    byEntity.set(key, list);
-  }
+  // 二元组和词表对每条旧条目只算一次：库里有几千条时，逐条重算是这段的性能热点。
+  const pre = existing.map((e) => ({ e, key: entityKey(e.entity), bg: bigrams(e.text), tk: tokensOf(e.text) }));
+  const df = new Map();
+  for (const p of pre) for (const t of p.tk) df.set(t, (df.get(t) ?? 0) + 1);
+
   const plan = [];
   let picked = 0;
   news.forEach((n, i) => {
-    const key = String(n.entity ?? "").replace(/\s+/g, "").toLowerCase();
-    const cands = (byEntity.get(key) ?? [])
-      .map((e) => ({ e, s: coverage(n.text, e.text) }))
-      .filter((x) => x.s >= MIN_COVERAGE)
-      .sort((a, b) => b.s - a.s)
-      .slice(0, top);
+    const key = entityKey(n.entity);
+    const nbg = bigrams(n.text);
+    const rare = [...tokensOf(n.text)].filter((t) => (df.get(t) ?? 0) <= RARE_DF_MAX);
+    const scored = [];
+    for (const p of pre) {
+      const same = p.key === key;
+      let share = 0;
+      for (const t of rare) if (p.tk.has(t)) share++;
+      const cov = coverOf(nbg, p.bg);
+      if (!same && !share && cov < CROSS_MIN_COVERAGE) continue;
+      if (same && !share && cov < MIN_COVERAGE) continue;
+      scored.push({ e: p.e, s: cov + (same ? SAME_ENTITY_BONUS : 0) + Math.min(share, 3) * RARE_HIT_BONUS });
+    }
+    scored.sort((a, b) => b.s - a.s);
+    const cands = scored.slice(0, top);
     picked += cands.length;
     if (cands.length) plan.push({ i, n, cands });
   });
