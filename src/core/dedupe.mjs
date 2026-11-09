@@ -244,15 +244,26 @@ export function resolveMatch(match, ids) {
  * 所以拆半重试，最多两层（8 → 4+4 → 2+2）；还失败的才放弃，并记一条事件。
  * 方向仍然是「宁可多写一条」——但这次留下痕迹。
  */
-async function judgeChunk({ cfg, chunk, out, depth = 0 }) {
+/**
+ * 一块候选渲染成提示词正文。编号一律**块内序号**，1 开始。
+ *
+ * 这里是踩过的坑：原来用全局下标（`p.i + 1`），分块之后第二块印出的是【新 9】…，
+ * 而解析端按 1..块长 校验，整块决定被判成越界丢掉——模型全判了，库里一条没生效。
+ */
+export function renderChunk(chunk) {
   const lines = [];
-  for (const p of chunk) {
-    lines.push(`【新 ${p.i + 1}】${p.n.brief || p.n.text.slice(0, 30)}`);
+  chunk.forEach((p, k) => {
+    lines.push(`【新 ${k + 1}】${p.n.brief || p.n.text.slice(0, 30)}`);
     lines.push(`  正文：${p.n.text.replace(/\s+/g, " ").slice(0, 260)}`);
-    p.cands.forEach((c, k) => {
-      lines.push(`  候选 ${k + 1}：${c.e.brief || c.e.text.slice(0, 30)}｜${c.e.text.replace(/\s+/g, " ").slice(0, 200)}`);
+    p.cands.forEach((c, j) => {
+      lines.push(`  候选 ${j + 1}：${c.e.brief || c.e.text.slice(0, 30)}｜${c.e.text.replace(/\s+/g, " ").slice(0, 200)}`);
     });
-  }
+  });
+  return lines.join("\n");
+}
+
+async function judgeChunk({ cfg, chunk, out, depth = 0 }) {
+  const lines = renderChunk(chunk).split("\n");
 
   try {
     const r = await chat(cfg, {
