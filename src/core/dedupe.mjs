@@ -25,6 +25,7 @@
  * 一律当 keep 处理。
  */
 import { chat } from "../util/llm.mjs";
+import { event } from "../util/log.mjs";
 
 const PROMPT = `你是记忆库的入库裁判。下面有「待写入的新条目」和每条新条目对应的「库里已有的相关条目」。
 
@@ -40,8 +41,9 @@ const PROMPT = `你是记忆库的入库裁判。下面有「待写入的新条�
 - replace：新条目更全或更新（多了条件、理由、更新的结论）→ 写新的，旧的标过时。
 
 只输出 JSON，不要解释：
-{"decisions":[{"new":1,"match":12,"action":"covered"},{"new":2,"match":7,"action":"replace"}]}
-不重复的新条目不要出现在结果里。match 是候选的编号。
+{"decisions":[{"new":1,"match":2,"action":"covered"},{"new":2,"match":1,"action":"replace"}]}
+不重复的新条目不要出现在结果里。
+new 是「新条目」的编号，match 是**这条新条目下面候选的编号**（都从 1 开始数），不是 id。
 拿不准就当不重复——多写一条，比错删一条便宜。`;
 
 /** 去掉空白和标点后取字二元组。中文没有词边界，只能按字形切。 */
@@ -205,20 +207,51 @@ export function pickCandidates({ news, existing, top = MAX_CANDIDATES }) {
  * @param {{id:string,entity:string,text:string,brief:string,project?:string}[]} existing 库里的旧条目（全库，不用预先按话题筛）
  * @returns {Promise<Map<number, {action:string, id:string}>>} 下标 → 决定
  */
-export async function judgeDuplicates({ cfg, news, existing }) {
-  const out = new Map();
-  if (!news.length || !existing.length) return out;
+/** 判重一次最多判几条新条目。 */
+const MAX_NEWS_PER_CALL = 8;
 
-  const { plan } = pickCandidates({ news, existing });
-  if (!plan.length) return out;
+/**
+ * 模型给的 match 到底指哪一条候选。
+ *
+ * 三种写法都认：**候选编号**（1 开始，最稳）、完整 id、被截断的 id（前缀唯一才认）。
+ *
+ * 为什么编号优先：提示词一开始让模型回「候选编号」，而候选行上印的却是 20 位 id，
+ * 示例里又给了个数——模型于是两种都回。回编号的那次，校验层只认 id，把它当成编造的
+ * 值扔掉，结果是「静默判定为不重复」：不报错、不回滚，重复条目照写。实测 10 对里
+ * 至少有 1 对是这么丢的，而它看起来像「模型判错了」。
+ *
+ * 截断 id 那条路要**唯一**才认：同一秒建的两条 id 前缀一模一样，猜错比不猜更糟。
+ */
+export function resolveMatch(match, ids) {
+  const m = String(match ?? "").trim();
+  if (!m) return "";
+  if (ids.includes(m)) return m;
+  if (/^\d+$/.test(m)) {
+    const n = Number(m);
+    if (n >= 1 && n <= ids.length) return ids[n - 1];
+  }
+  const near = ids.filter((id) => id.startsWith(m) || m.startsWith(id));
+  return near.length === 1 ? near[0] : "";
+}
 
+/**
+ * 一批候选送一次模型。编号在每一块内部重新从 1 开始。
+ *
+ * 失败**必须能自己往回退**：一次调用超时或者返回的 JSON 断了，原来直接把整块当
+ * 「全都不重复」——8 条、16 条的决定一起丢掉，而且日志上什么都没留下。实测评测里
+ * 有一整块（8 对全对的数据）就是这么丢的，看起来像「模型判不准」，其实是调用失败。
+ *
+ * 所以拆半重试，最多两层（8 → 4+4 → 2+2）；还失败的才放弃，并记一条事件。
+ * 方向仍然是「宁可多写一条」——但这次留下痕迹。
+ */
+async function judgeChunk({ cfg, chunk, out, depth = 0 }) {
   const lines = [];
-  for (const p of plan) {
+  for (const p of chunk) {
     lines.push(`【新 ${p.i + 1}】${p.n.brief || p.n.text.slice(0, 30)}`);
     lines.push(`  正文：${p.n.text.replace(/\s+/g, " ").slice(0, 260)}`);
-    for (const c of p.cands) {
-      lines.push(`  候选 ${c.e.id}：${c.e.brief || c.e.text.slice(0, 30)}｜${c.e.text.replace(/\s+/g, " ").slice(0, 200)}`);
-    }
+    p.cands.forEach((c, k) => {
+      lines.push(`  候选 ${k + 1}：${c.e.brief || c.e.text.slice(0, 30)}｜${c.e.text.replace(/\s+/g, " ").slice(0, 200)}`);
+    });
   }
 
   try {
@@ -233,27 +266,46 @@ export async function judgeDuplicates({ cfg, news, existing }) {
     if (process.env.MEM_DEBUG) console.log("[dedupe 原文]", r.text);
     const parsed = JSON.parse(String(r.text ?? "").replace(/^\s*```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim());
     const decisions = Array.isArray(parsed?.decisions) ? parsed.decisions : [];
-    const ids = new Set(existing.map((e) => e.id));
     for (const d of decisions) {
-      const i = Number(d?.new) - 1;
-      if (!Number.isInteger(i) || i < 0 || i >= news.length || out.has(i)) continue;
-      let match = String(d?.match ?? "").trim();
-      const mine = (plan.find((p) => p.i === i)?.cands ?? []).map((c) => c.e.id);
-      // 只认这条新条目的候选里出现过的 id：模型编一个 id 出来不能当数。
-      if (!ids.has(match)) {
-        // 模型偶尔把 id 截断（20261030101042-nn0ncq3 → 20261030101042）。
-        // 前缀能唯一对上就认，对不上就当它没说——这一条会照写，不会丢内容。
-        const near = mine.filter((id) => id.startsWith(match) || match.startsWith(id));
-        if (near.length !== 1) continue;
-        match = near[0];
-      }
-      if (!mine.includes(match)) continue;
+      // 模型看到的是块内的局部编号，先落回全局下标。
+      const n = Number(d?.new);
+      if (!Number.isInteger(n) || n < 1 || n > chunk.length) continue;
+      const p = chunk[n - 1];
+      if (out.has(p.i)) continue;
+      const ids = p.cands.map((c) => c.e.id);
+      const match = resolveMatch(d?.match, ids);
+      // 只认这条新条目自己候选里的东西：模型编一个 id 出来不能当数。
+      if (!match) continue;
       const action = d?.action === "covered" || d?.action === "replace" ? d.action : "keep";
-      if (action !== "keep") out.set(i, { action, id: match });
+      if (action !== "keep") out.set(p.i, { action, id: match });
     }
     return out;
-  } catch {
-    // 判重失败就当没有重复：重复一条是脏，丢一条是错。
+  } catch (e) {
+    if (depth < 2 && chunk.length > 1) {
+      const mid = Math.ceil(chunk.length / 2);
+      await judgeChunk({ cfg, chunk: chunk.slice(0, mid), out, depth: depth + 1 });
+      await judgeChunk({ cfg, chunk: chunk.slice(mid), out, depth: depth + 1 });
+      return out;
+    }
+    // 判重失败就当没有重复：重复一条是脏，丢一条是错。但要在日志里留一条，
+    // 不然「判重一直没生效」和「库里本来就没有重复」看起来一模一样。
+    event("dedupe.failed", { size: chunk.length, error: String(e?.message ?? e).slice(0, 100) });
     return out;
   }
+}
+
+export async function judgeDuplicates({ cfg, news, existing, chunkSize = MAX_NEWS_PER_CALL }) {
+  const out = new Map();
+  if (!news.length || !existing.length) return out;
+
+  const { plan } = pickCandidates({ news, existing });
+  if (!plan.length) return out;
+
+  // 分块。一次性把 34 条新条目塞进去试过：模型会退化成「几乎全判 covered」，
+  // 分批才恢复正常。线上一个会话通常几条到十几条，8 条一块已经够用，
+  // 也留了余量给「一轮里混进一个特别长的会话」。
+  for (let s = 0; s < plan.length; s += chunkSize) {
+    await judgeChunk({ cfg, chunk: plan.slice(s, s + chunkSize), out });
+  }
+  return out;
 }

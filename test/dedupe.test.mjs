@@ -114,3 +114,37 @@ test("同话题的排序加成还在：覆盖率一样时它排在前面", () =>
   const { plan } = pickCandidates({ news, existing });
   assert.deepEqual(plan[0].cands.map((c) => c.e.id), ["sameEntity", "sameProjOnly"]);
 });
+
+// ---- 模型的 match 怎么落到候选上 ----
+
+const { resolveMatch } = await import("../src/core/dedupe.mjs");
+
+const IDS = ["20261106132222-mvs7k16", "20261106132214-jgwrzsi", "20261109184651-9t4q5b7"];
+
+test("回编号：按这条新条目自己的候选顺序数，从 1 开始", () => {
+  assert.equal(resolveMatch(1, IDS), IDS[0]);
+  assert.equal(resolveMatch("3", IDS), IDS[2]);
+});
+
+test("编号越界就不认：宁可当没判，也不要落到别的条目上", () => {
+  assert.equal(resolveMatch(0, IDS), "");
+  assert.equal(resolveMatch(4, IDS), "");
+});
+
+test("回完整 id：直接用", () => {
+  assert.equal(resolveMatch(IDS[1], IDS), IDS[1]);
+});
+
+test("回截断的 id：前缀唯一才认", () => {
+  assert.equal(resolveMatch("20261106132222", IDS), IDS[0]);
+});
+
+test("截断得能对上两条：不猜", () => {
+  // 同一秒建的两条 id 前 14 位一样，猜错比不猜更糟。
+  assert.equal(resolveMatch("202611061322", IDS), "");
+});
+
+test("回了个不相干的串：不认", () => {
+  assert.equal(resolveMatch("abc", IDS), "");
+  assert.equal(resolveMatch("", IDS), "");
+});
