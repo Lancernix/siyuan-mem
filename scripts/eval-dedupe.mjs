@@ -62,6 +62,23 @@ function channelOf(why = []) {
   return "仅覆盖率";
 }
 
+/** 字二元组覆盖率，和 dedupe.mjs 里同一套算法（这边只要它判「是不是同一份内容的另一份拷贝」）。 */
+function coverOf(a, b) {
+  const grams = (s) => {
+    const t = String(s ?? "").replace(/[\s\p{P}]/gu, "");
+    const out = new Set();
+    for (let i = 0; i < t.length - 1; i++) out.add(t.slice(i, i + 2));
+    return out;
+  };
+  const A = grams(a);
+  const B = grams(b);
+  if (!A.size || !B.size) return 0;
+  const [small, big] = A.size <= B.size ? [A, B] : [B, A];
+  let hit = 0;
+  for (const g of small) if (big.has(g)) hit++;
+  return hit / small.size;
+}
+
 const rows = [];
 let candTotal = 0;
 let charsTotal = 0;
@@ -105,6 +122,11 @@ for (const [i, p] of pairs.entries()) {
 // 守住太多组上下文；线上一个会话也就几条到十几条，天然比这个大杂烩小。
 let judged = null;
 if (withModel) {
+  // b 自己绝不能留在池子里：它在库里存在（评测集是从库里挖的），而线上这一刻它还没入库。
+  // 留着的话模型会把它当成「库里已有的一条」，直接指回它自己——第一版就是这么错的，
+  // 34 对里 30 对判成了「把新条目当成旧条目」，看起来像模型不会判。
+  const bIds = new Set(pairs.map((p) => p.b.id));
+  const poolForJudge = pool.filter((e) => !bIds.has(e.id));
   const batchSize = Number(valueOf("batch", 6));
   const t0 = Date.now();
   const decisions = new Map();
@@ -114,15 +136,22 @@ if (withModel) {
       const bb = dropProject ? { ...p.b, project: "" } : { ...p.b };
       return { entity: bb.entity, text: bb.text, brief: "", project: bb.project };
     });
-    const got = await judgeDuplicates({ cfg, news, existing: pool });
+    const got = await judgeDuplicates({ cfg, news, existing: poolForJudge });
     for (const [i, d] of got) decisions.set(start + i, d);
   }
   judged = { decisions, ms: Date.now() - t0 };
   for (const [i, r] of rows.entries()) {
     const d = decisions.get(i);
     r.decision = d ?? null;
-    // 正例：判成 covered / replace 且指到 a 才算对；负例：没被判成重复才算对。
-    if (r.same) r.correct = Boolean(d && d.id === pairs[i].a.id);
+    // 正例判对的口径是「认出了重复」，不是「指到我标的那一条」——库里同一件事常常
+    // 有三四份拷贝（同一次抽取跑两遍、按月导入），模型指到另一份是正确行为。
+    // 所以凡是与 a 正文覆盖率 ≥0.6 的条目都算「同一份」，指到其中任何一个都算对。
+    const pair = pairs[i];
+    const equivalents = new Set(
+      [pair.a.id, ...pool.filter((e) => coverOf(e.text, pair.a.text) >= 0.6 && e.entity === pair.a.entity).map((e) => e.id)]
+    );
+    if (r.same) r.correct = Boolean(d && equivalents.has(d.id));
+    // 负例：没被判成重复才算对。
     else r.correct = !d;
   }
 }
