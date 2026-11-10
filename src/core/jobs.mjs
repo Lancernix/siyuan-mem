@@ -12,7 +12,7 @@ import { hasModel } from "../util/llm.mjs";
 import { SiYuan } from "../util/siyuan.mjs";
 import { Store } from "./store.mjs";
 import { normalizeTurns, toExchanges, extractEntries, promptVersion } from "./extract.mjs";
-import { pending, readSession, archive, drop } from "./inbox.mjs";
+import { pending, readSession, archive, drop, rewrite, bumpAttempt, clearAttempt, deadLetter } from "./inbox.mjs";
 import { readLog } from "../util/readers/index.mjs";
 import { event } from "../util/log.mjs";
 import { archive as archiveRaw } from "../util/raw.mjs";
@@ -189,6 +189,20 @@ function forgetFromPool(pool, id) {
  * 没有预算的那一版把整个队列一口气抽完——第一次全量迁移时第 2 轮跑了四小时，
  * 那四小时里心跳不动、`mem status` 看着像死了，边缘新推的东西也插不进来。
  * 队列本身是持久的，留到下一轮没有任何损失；看不见进度才是真问题。
+ *
+ * 但轮预算只在**会话之间**看，还不够。2026-11-10 凌晨那几轮是这么过的：
+ *
+ *     02:55  这一轮到预算了（3 个会话 / 86 分钟）
+ *     04:05  这一轮到预算了（4 个会话 / 52 分钟）
+ *
+ * 一轮 20 分钟的预算，实际跑 86 分钟才收手——因为一场会话内部的判重 + 写库
+ * 可以无限制拖下去，而那时思源已经开始 5 秒超时。于是：
+ *
+ *   - maxSessionMs：会话内部也设闸门，到点就停手，已写的条目留着（幂等，下轮
+ *     重跑会命中 hash 判重跳过），没写的留队列。
+ *   - maxConsecutiveFailures：写库连着失败就熔断本轮。思源卡住时一条 5 秒超时，
+ *     一场会话几十条就是几分钟纯等待，还会把内存越顶越高。
+ *   - maxAttempts：老是过不去的会话进死信，别再压着队头。
  */
 export async function processQueue({
   dry = false,
@@ -196,13 +210,24 @@ export async function processQueue({
   onLine = () => {},
   maxSessions = Number.POSITIVE_INFINITY,
   maxMs = Number.POSITIVE_INFINITY,
+  maxSessionMs = 10 * 60_000,
+  maxConsecutiveFailures = 3,
+  maxAttempts = 3,
+  deps = null,
 } = {}) {
-  const { cfg, sy, store } = open();
+  // deps 只给测试用：注入假的 store/sy，才能在几百毫秒里把"思源卡住"造出来。
+  // 生产路径永远是 open() 自己建连接。
+  const { cfg, sy, store } = deps ?? open();
+  const extract = deps?.extract ?? extractEntries;
 
   const files = pending();
   const startedAt = Date.now();
   let done = 0;
-  const sum = { sessions: files.length, left: 0, written: 0, skipped: 0, replaced: 0, failed: 0, degraded: 0, raw: 0, entities: 0, pending: 0, dedupeCalls: 0, dedupeMs: 0, tokens: { prompt: 0, completion: 0 } };
+  // 写库连续失败计数。成功一次就归零：只有"连着"失败才说明思源本身不对，
+  // 偶尔一条写不进去（块索引没准备好）不该把整轮停掉。
+  let writeFails = 0;
+  let broken = null;
+  const sum = { sessions: files.length, left: 0, written: 0, skipped: 0, replaced: 0, failed: 0, degraded: 0, raw: 0, entities: 0, pending: 0, dedupeCalls: 0, dedupeMs: 0, dead: 0, unfinished: 0, trimmed: 0, broken: false, tokens: { prompt: 0, completion: 0 } };
 
   // 先补上一轮没标完的"过时"。这件事跟模型无关，也不该等队列里有活才干——
   // 偏偏最容易漏的就是"队列空了但账本还欠着"。
@@ -231,6 +256,29 @@ export async function processQueue({
   // 每个会话各查一遍的话，下一个会话会把它当新的再造一份。
   let entityTable = null;
 
+  /**
+   * 死信收口：一次失败可能是偶然，连着 maxAttempts 次就不是了。
+   *
+   * 只有"这个会话本身有问题"的失败才计数（读不动、超预算、抽取不完整）。
+   * 写库失败不在这里记——那是思源的毛病，记到会话头上会让一次故障把整队扫进 dead/。
+   */
+  const park = (file, reason) => {
+    const n = bumpAttempt(file);
+    if (n < maxAttempts) {
+      onLine(`    · 这个会话第 ${n} 次没过（${reason}），原文留在队列里`);
+      return false;
+    }
+    try {
+      deadLetter(file, `第 ${n} 次失败后挪入死信：${reason}`);
+      sum.dead++;
+      event("session.dead", { file: String(file).split("/").pop(), attempts: n, reason });
+      onLine(`  ! 试了 ${n} 次还是不行，挪进 dead/：${String(file).split("/").pop()}（${reason}）`);
+    } catch (e) {
+      onLine(`  ! 挪死信失败：${e.message}`);
+    }
+    return true;
+  };
+
   for (const file of files) {
     // 预算用尽就停：跑不完的留在队列里，下一轮接着来。
     if (done >= maxSessions || Date.now() - startedAt >= maxMs) {
@@ -239,6 +287,10 @@ export async function processQueue({
       break;
     }
     done++;
+    const sessionStart = Date.now();
+    const sessionDeadline = sessionStart + maxSessionMs;
+    const overSession = () => Date.now() >= sessionDeadline;
+    let aborted = false;
     let payload;
     try {
       payload = readSession(file);
@@ -246,6 +298,7 @@ export async function processQueue({
       onLine(`  ! 读不出来，跳过：${file}（${e.message}）`);
       event("session.read_fail", { file: String(file).split("/").pop(), message: e.message });
       sum.failed++;
+      park(file, `读不动：${e.message}`);
       continue;
     }
 
@@ -301,17 +354,30 @@ export async function processQueue({
       }
     }
 
+    // 原文传完就已经可能超预算了：附件上传是最慢的一段（几 MB 的 jsonl 分片）。
+    // 这里停手最划算——原文进度记在 raw-index 里，下轮从断点接着传，抽取和判重全不用重来。
+    if (!dry && overSession()) {
+      onLine(`    · 这场光归档就超了单会话上限（${Math.round((Date.now() - sessionStart) / 60000)} 分钟），条目下轮再抽`);
+      event("session.budget", { session: payload.session_id ?? "", stage: "raw", ms: Date.now() - sessionStart });
+      sum.failed++;
+      park(file, "归档阶段超预算");
+      continue;
+    }
+
     // 2) 抽取时带上已有实体清单，从源头减少「同一款裤子五个名字」。
     if (!entityTable) entityTable = loadEntities();
     const entityShot = shotList(entityTable, cfg.extract?.entityShotList ?? 300);
 
     const fallbackEntity = (payload.cwd ?? "").split("/").filter(Boolean).pop() ?? "";
     const tExtract = Date.now();
-    const { entries, mode, error, batches, dropped, droppedBriefs, merged, usage } = await extractEntries(cfg, exchanges, {
+    const { entries, mode, error, batches, dropped, droppedBriefs, merged, usage, stoppedEarly, coveredThrough, remainingBatches } = await extract(cfg, exchanges, {
       fallbackEntity,
       useModel,
       entityShot,
       session: payload.session_id ?? "",
+      // 抽取也要看表：一场 384 轮的会话能拆十几批，一批一次模型调用、实测单次
+      // 最长 254 秒。不给它这个数，光抽取就能把一轮拖到四十分钟。
+      deadline: sessionDeadline,
     });
     if (error) onLine(`  ! 模型失败，退回规则：${error}`);
     // 记账：回灌一百多个会话时，"花了多少 token"是唯一能判断该不该继续跑的指标。
@@ -331,6 +397,8 @@ export async function processQueue({
       tokens: usage ?? { prompt: 0, completion: 0 },
       model: cfg.model?.name ?? "",
       prompt: promptVersion(),
+      stoppedEarly: stoppedEarly || undefined,
+      remainingBatches: stoppedEarly ? remainingBatches : undefined,
       error: error ?? undefined,
     });
 
@@ -374,7 +442,7 @@ export async function processQueue({
       const pool = known;
       if (pool.length) {
         const t0 = Date.now();
-        decisions = await judgeDuplicates({ cfg, news, existing: pool });
+        decisions = await judgeDuplicates({ cfg, news, existing: pool, deadline: sessionDeadline });
         sum.dedupeCalls += decisions.size ? 1 : 0;
         sum.dedupeMs += Date.now() - t0;
         for (const [idx, d] of decisions) {
@@ -394,7 +462,23 @@ export async function processQueue({
     let failedHere = 0;
     let writtenHere = 0;
     let skippedHere = 0;
+    // 开写之前就已经超预算的，这一场就写完再算——见下面那条注释。
+    const overAtWriteStart = !dry && overSession();
     for (const [idx, e] of entries.entries()) {
+      // 单会话闸门：到点就收手。
+      //
+      // 但**开写之前就已经超时的那一场要写完**。抽取一趟可能是十几分钟的模型调用，
+      // 时间全花在抽取和判重上、到写这一步才收手，等于这一场白抽——下轮从头再来，
+      // 三趟之后还会被当成老赖挪进 dead/。所以这个标记在进循环前算一次：
+      // 进来时还在预算内，才允许写到一半停下；进来时就超了，这一场写完。
+      if (!overAtWriteStart && writtenHere > 0 && overSession()) {
+        aborted = true;
+        onLine(
+          `    · 这场超了单会话上限（${Math.round((Date.now() - sessionStart) / 60000)} 分钟），已写 ${writtenHere} 条，剩下的下轮继续`
+        );
+        event("session.budget", { session: payload.session_id ?? "", stage: "write", written: writtenHere, total: entries.length, ms: Date.now() - sessionStart });
+        break;
+      }
       const entity = entityMap.get(e.entity) ?? e.entity;
       const verdict = decisions.get(idx);
       const rawPtr =
@@ -432,6 +516,8 @@ export async function processQueue({
             raw: rawPtr,
           }
         );
+        // 思源回了话，说明它不是卡死，计数器归零。
+        writeFails = 0;
         if (r.duplicate) {
           sum.skipped++;
           skippedHere++;
@@ -479,8 +565,15 @@ export async function processQueue({
         }
       } catch (err) {
         failedHere++;
+        writeFails++;
         event("error", { where: "write-entry", session: payload.session_id ?? "", entity, message: err.message });
         onLine(`    ! 写入失败：${err.message}`);
+        // 连着几条都写不进去，就不是这一条的问题了：思源多半卡住了。
+        // 继续写只会把 5 秒超时一条条叠起来，把内存和这一轮的时间一起耗掉。
+        if (writeFails >= maxConsecutiveFailures) {
+          broken = `连续 ${writeFails} 次写库失败：${err.message}`;
+          break;
+        }
       }
     }
 
@@ -520,6 +613,31 @@ export async function processQueue({
     sum.failed += failedHere;
     const degraded = mode === "heuristic-after-error" || mode === "partial";
     if (degraded) sum.degraded++;
+
+    // 抽取到预算就收手的那种：已经抽过的那几轮从队列里摘掉，剩下的下轮接着抽。
+    // 放在写完条目之后做——先摘再写，万一写库挂了，那几轮的结论就再也没人抽了。
+    let trimmed = false;
+    if (!dry && stoppedEarly && coveredThrough != null) {
+      const rawTurns = payload.turns ?? payload.events ?? [];
+      const rest = rawTurns.slice(coveredThrough + 1);
+      if (rest.length) {
+        try {
+          rewrite(file, { ...payload, turns: rest, events: undefined, turnFrom: turnFrom + coveredThrough + 1 });
+          trimmed = true;
+          sum.trimmed++;
+          event("session.trim", {
+            session: payload.session_id ?? "",
+            covered: coveredThrough + 1,
+            left: rest.length,
+            batchesLeft: remainingBatches,
+          });
+          onLine(`    · 抽到点了：前 ${coveredThrough + 1} 轮已写进库，还剩 ${rest.length} 轮，下轮接着抽`);
+        } catch (e) {
+          onLine(`    ! 队列改写失败，这场下轮会从头重抽：${e.message}`);
+        }
+      }
+    }
+
     event("session.end", {
       session: payload.session_id ?? "",
       entries: entries.length,
@@ -527,9 +645,31 @@ export async function processQueue({
       skipped: skippedHere,
       failed: failedHere,
       degraded,
+      aborted,
+      trimmed,
     });
-    if (!dry && failedHere === 0 && !degraded) archive(file);
-    else if (degraded) onLine("    · 抽取没跑完整，原文留在队列里，下次重试");
+    const complete = !aborted && failedHere === 0 && !degraded && !trimmed;
+    // 没做完的场次要单独报出来：失败数是按"条"算的，超预算停手的那场一条都没失败，
+    // 只看 failed 会以为一切正常。
+    if (!complete && !trimmed) sum.unfinished++;
+    if (!dry && complete) archive(file);
+    else if (!dry && !trimmed) {
+      if (degraded) onLine("    · 抽取没跑完整，原文留在队列里，下次重试");
+      // 抽不到东西和超预算是这个会话自己的毛病，记次数；纯粹写不进去是思源的问题，
+      // 不记——否则一次思源抖动就能把整队会话挨个记满、集体挪进 dead/。
+      if (aborted || degraded) park(file, aborted ? "单会话超预算" : "抽取不完整");
+    }
+
+    // 写库熔断：本轮到此为止。剩下的会话原样留在队列，下一轮重来。
+    if (broken) break;
+  }
+
+  if (broken) {
+    sum.broken = true;
+    sum.left = Math.max(sum.left, files.length - done);
+    event("round.broken", { reason: broken, written: sum.written });
+    onLine(`  !! 本轮熔断：${broken}`);
+    onLine("  !! 思源多半卡住了（内存/磁盘），先去看容器；队列原样保留，好了会自动接着跑");
   }
 
   // 一轮处理完再收敛，不是每个会话跑一次。
@@ -549,7 +689,7 @@ export async function processQueue({
         if (list.length < 3 && r.brief) list.push(r.brief);
         samples.set(r.entity, list);
       }
-      const merges = await convergeTopics({ cfg, table: entityTable, samples, log: onLine });
+      const merges = await convergeTopics({ cfg, table: entityTable, samples, log: onLine, deadline: Date.now() + 5 * 60_000 });
       for (const [from, to] of merges) {
         try {
           const r = await mergeEntities(sy, from, to, { log: onLine, box: ids.notebook });

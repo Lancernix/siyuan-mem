@@ -150,6 +150,8 @@ async function cmdOnce(flags) {
     const tk = sum.tokens ? `，tokens 输入 ${sum.tokens.prompt} / 输出 ${sum.tokens.completion}` : "";
     console.log(`\n写入 ${sum.written}，跳过 ${sum.skipped}，失败 ${sum.failed}${tk}`);
     if (sum.degraded) console.log(`${sum.degraded} 个会话抽取不完整，原文留在队列里等重试。`);
+    if (sum.dead) console.log(`${sum.dead} 个会话试到上限，已挪进 dead/（旁边有 .why 写原因）。`);
+    if (sum.broken) console.log("本轮熔断：思源写不进去，队列原样保留，修好后重跑就行。");
     if (sum.failed) process.exitCode = 1;
   } finally {
     release();
@@ -665,8 +667,9 @@ async function cmdCenter(args, flags) {
     console.log(`  接收端 ${bind}:${port}  token ${maskKey(token)}`);
     console.log(`  重启 mem serve 生效：mem service install（或 kill 掉再起）`);
     console.log(`\n在边缘机器上：`);
-    console.log(`  mem push --to http://${host}:${port} --token ${token} --once`);
-    console.log(`\n提醒：这是写入通道。公网暴露请走 HTTPS 反向代理，并把 token 当密码对待。`);
+    console.log(`  mem push --to https://<你的域名> --token ${token} --once`);
+    console.log(`\n同一台机器上自测可以先写 http://${host}:${port}，但这是写入通道：`);
+    console.log(`公网暴露必须走 HTTPS 反向代理（明文 HTTP 等于把 token 交出去），token 当密码对待。`);
     return;
   }
 
@@ -683,7 +686,18 @@ async function cmdPush(flags, args) {
     saveConfig({ push: { ...(flags.to ? { to: flags.to } : {}), ...(flags.token ? { token: flags.token } : {}), ...(flags.machine ? { machine: flags.machine } : {}) } });
     console.log(`已写入 ${CONFIG_PATH}`);
   }
-  if (!to) throw new Error("没有中心地址：mem push --to http://中心:7788 --token …（加 --save 记住）");
+  if (!to) throw new Error("没有中心地址：mem push --to https://中心 --token …（加 --save 记住）");
+  // 明文 http 会把 ingest token 摊在链路上：同一 wifi、中继、代理都看得到。
+  // 不拦（内网、tailscale 里跑明文是合理的），但要说出来——这个 token 就是写入权限。
+  try {
+    const u = new URL(to);
+    const loop = ["127.0.0.1", "localhost", "[::1]", "::1"].includes(u.hostname);
+    if (u.protocol === "http:" && !loop) {
+      console.warn(`提醒：${to} 走的是明文 HTTP，token 会跟着请求头明文传。公网请用 HTTPS（反代终止也行）。`);
+    }
+  } catch {
+    // 地址写错了下面自然会报，不用在这里抢着报
+  }
 
   if (flags.test) {
     const r = await pingPush({ to, token });

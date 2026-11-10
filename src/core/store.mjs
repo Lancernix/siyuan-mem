@@ -46,6 +46,16 @@ export class Store {
   #ids = null;
   /** 本进程内已写过的内容哈希。SQL 索引是异步的，刚写完查不到，靠它挡同批重复。 */
   #recent = new Set();
+  /** 验过确实还在的月文档。缓存 id 不能盲信：思源里那种「文档被删了」的情况查一次就够。 */
+  #monthOk = new Set();
+  /**
+   * 最近成功追加过的列表 id → 时间。
+   *
+   * 写失败之后要靠它判断「是锚点没了，还是结果未知」。SQL 索引有延迟，刚建好的
+   * 列表查不到，只靠 SQL 会把「还在」误判成「没了」，于是重建分组、把同一条再写
+   * 一遍——正是 #3 说的那种重复条目。
+   */
+  #listSeen = new Map();
 
   constructor(sy, cfg) {
     this.#sy = sy;
@@ -153,12 +163,27 @@ export class Store {
     const raw = String(date ?? "");
     const month = /^\d{4}-\d{2}/.test(raw) ? raw.slice(0, 7) : new Date().toISOString().slice(0, 7);
     const hit = ids.months?.[month];
-    if (hit) return hit;
+    if (hit) {
+      // 缓存不能盲信：用户可能在思源里把这个月的文档删了。原来直接 return，
+      // 之后整场会话的条目全写不进去，报的还是「tree not found」这种看不出根因的错。
+      // 每个进程每个月只验一次——这是加一次 SQL，不是加一次往返。
+      if (this.#monthOk.has(hit)) return hit;
+      if (await this.#inNotebook(hit, ids.notebook)) {
+        this.#monthOk.add(hit);
+        return hit;
+      }
+      delete ids.months[month];
+      const key0 = `${this.#cfg.siyuan.baseUrl}#${this.#cfg.siyuan.notebook}`;
+      const st = loadState();
+      st[key0] = ids;
+      saveState(st);
+    }
 
     const rootTitle = this.#cfg.siyuan.docs.entries;
     const path = `/${rootTitle}/${month}`;
     let id = await this.#sy.docIdByHPath(ids.notebook, path);
     if (!id) id = await this.#sy.createDocWithMd(ids.notebook, path, "");
+    this.#monthOk.add(id);
     ids.months = { ...(ids.months ?? {}), [month]: id };
     const key = `${this.#cfg.siyuan.baseUrl}#${this.#cfg.siyuan.notebook}`;
     const state = loadState();
@@ -326,7 +351,7 @@ export class Store {
     // 直接信记录，不查 SQL：块的索引是异步的，刚写完的那条查不到，
     // 一查就会以为锚点没了、又插一个新标题——54 条就插出 54 个标题。
     if (g?.list) {
-      const r = await this.#appendOne(g.list, body);
+      const r = await this.#appendOne(g.list, body, text);
       groups[session].last = r.blockId;
       saveGroups(groups);
       return { blockId: r.blockId, key: session };
@@ -417,13 +442,65 @@ export class Store {
    * 旧代码没踩到，是因为它 append 到列表项、插入的是纯段落，那种情况返回值是真的。
    * 多两次 childBlocks 换一个可靠的 id，比事后发现属性挂在空气上便宜。
    */
-  async #appendOne(listId, text) {
-    await this.#sy.appendBlock(listId, `- ${text}`, "markdown");
-    const items = await this.#sy.childBlocks(listId);
-    const last = items[items.length - 1];
-    if (!last) throw new Error("列表追加后找不到新项");
-    const kids = await this.#sy.childBlocks(last.id);
-    return { itemId: last.id, blockId: kids[0]?.id ?? last.id };
+  async #appendOne(listId, body, probe = body) {
+    try {
+      await this.#sy.appendBlock(listId, `- ${body}`, "markdown");
+      const items = await this.#sy.childBlocks(listId);
+      const last = items[items.length - 1];
+      if (!last) throw new Error("列表追加后找不到新项");
+      const kids = await this.#sy.childBlocks(last.id);
+      this.#listSeen.set(listId, Date.now());
+      return { itemId: last.id, blockId: kids[0]?.id ?? last.id };
+    } catch (e) {
+      // 结果未知：appendBlock 可能已经落库，只是后面那步读卡住了。上层要是按
+      // 「没写成」重建分组再写一遍，库里就是两条一样的记忆——而且这时候属性还没
+      // 打上，连 custom-mem-hash 都没有，后面的判重一条都挡不住。所以先按内容回捞。
+      const found = await this.#adopt(listId, probe);
+      if (found) {
+        this.#listSeen.set(listId, Date.now());
+        return found;
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * 写失败之后按内容把可能已经落库的那一条捞回来。
+   *
+   * 只回看列表末尾三条：重复落库的窗口就是这一次调用，不会跑到很远。捞到就用它，
+   * 上层照常打属性，等于把一次「结果未知」变成了「成功」。
+   */
+  async #adopt(listId, probe) {
+    const needle = String(probe ?? "").replace(/\s+/g, " ").trim().slice(0, 40);
+    if (!needle) return null;
+    try {
+      const items = await this.#sy.childBlocks(listId);
+      for (const it of items.slice(-3).reverse()) {
+        const kids = await this.#sy.childBlocks(it.id);
+        const block = kids[0] ?? it;
+        const md = String((await this.#sy.getBlockKramdown(block.id)) ?? "").replace(/\s+/g, " ");
+        if (md.includes(needle)) return { itemId: it.id, blockId: block.id };
+      }
+    } catch {
+      // 连回捞都失败：交给上层当失败，下一轮重试时 hash 判重会兜住。
+    }
+    return null;
+  }
+
+  /** 分组列表还在不在。查不动的时候按「还在」处理——见下面的注释。 */
+  async #anchorAlive(listId) {
+    if (!listId) return false;
+    const seen = this.#listSeen.get(listId);
+    // 一分钟内刚往这个列表里写成功过：块索引有延迟，别把它误判成被删了。
+    if (seen && Date.now() - seen < 60_000) return true;
+    try {
+      const rows = await this.#sy.sql(`SELECT id FROM blocks WHERE id='${listId}' LIMIT 1`);
+      return Boolean(rows?.[0]);
+    } catch {
+      // 思源在抖的时候查不出来。这时候按「还在」：重建分组的代价是多一条重复
+      // 记忆，而思源不稳恰好是最容易走到这个分支的时候。
+      return true;
+    }
   }
 
   async writeEntry(entry, meta = {}) {
@@ -443,8 +520,14 @@ export class Store {
       blockId = (await this.#writeInto(entries, meta, date, text)).blockId;
     } catch (e) {
       // 分组标题被手删了（列表跟着没了）：丢掉记录重建一次，再写。
+      //
+      // 但**只在确认锚点不在了的时候重建**。别的错（超时、结果未知）很可能块已经
+      // 写进去了，重建再写一遍就是一条重复记忆——这时属性还没打，hash 也没有，
+      // 判重根本挡不住。宁可这一条报失败、下一轮重试（那时 hash 能兜住）。
       const session = String(meta.session ?? "");
       if (!session) throw e;
+      const g = loadGroups()[session];
+      if (await this.#anchorAlive(g?.list)) throw e;
       const groups = loadGroups();
       delete groups[session];
       saveGroups(groups);
@@ -530,10 +613,12 @@ export class Store {
 
   /** 最近写入的 N 条，供人工扫一眼。 */
   async review(limit = 20) {
-    await this.#ensure();
+    const ids = await this.#ensure();
+    // 和 listCurrent / stats 一样按笔记本收口：SQL 是全局的，不收口会把别的
+    // 笔记本里同样带 custom-mem-hash 的块当成「最近写的记忆」翻出来。
     const rows = await this.#sy.sql(
       `SELECT id, content, ial, created FROM blocks
-        WHERE type='p' AND ial LIKE '%${ATTR.hash}="%'
+        WHERE box='${ids.notebook}' AND type='p' AND ial LIKE '%${ATTR.hash}="%'
         ORDER BY created DESC LIMIT ${limit}`
     );
     return (rows ?? []).map(toHit);

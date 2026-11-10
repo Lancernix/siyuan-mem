@@ -46,7 +46,13 @@ push("assistant", "直筒版型有风险，建议用束脚带或者选收口款�
 const session = "e2e-" + Date.now().toString(36);
 
 console.log("1. 建测试笔记本");
+// 整段包一层 try/finally：中途任何一条断言抛错（比如思源突然连不上），
+// 测试笔记本也要删掉。原来清理写在最后一行，一抛错就跳过，于是每次失败都在
+// 思源里留一本"99-记忆测试"——下一次 init 会复用它，测试之间互相污染。
+let nbId = "";
+try {
 const ids = await store.init();
+nbId = ids.notebook;
 ok("五个文档都在", Boolean(ids.notebook && ids.entries && ids.raw && ids.entities && ids.pending));
 
 console.log("\n2. 归档原文");
@@ -149,7 +155,11 @@ ok("回填了条目", merged.changed >= 1, `${merged.changed} 条`);
 const after = await sy.getBlockAttrs(w.id);
 ok("原条目不受影响", after?.[ATTR.entity] === "风盾500");
 
-console.log("\n清理");
-await sy.removeNotebook(ids.notebook);
+} finally {
+  console.log("\n清理");
+  if (nbId) {
+    await sy.removeNotebook(nbId).catch((e) => console.log(`  删测试笔记本失败：${e.message}`));
+  }
+}
 console.log(`\n通过 ${pass}，失败 ${fail}`);
 process.exit(fail ? 1 : 0);

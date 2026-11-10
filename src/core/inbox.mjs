@@ -1,7 +1,31 @@
-import { readdirSync, readFileSync, renameSync, writeFileSync, existsSync } from "node:fs";
+import { readdirSync, readFileSync, renameSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { INBOX_DIR, DONE_DIR, ensureDirs } from "../util/config.mjs";
+import { INBOX_DIR, DONE_DIR, DEAD_DIR, ATTEMPTS_PATH, ensureDirs } from "../util/config.mjs";
+
+/**
+ * 写文件要么完整、要么不见。
+ *
+ * 原来直接 writeFileSync 到目标路径：进程在写到一半时被 kill（容器重建、机器重启），
+ * 队列里就留下一个半截 JSON。它每轮都被当成队头读一遍、读不动，后面的会话全堵在
+ * 它后面。先写同目录下的临时文件再 rename，rename 是原子的，读到的永远是完整内容。
+ *
+ * 顺手把权限收到 0600：队列里是会话原文，没必要让同机其他用户读。
+ */
+function writeAtomic(file, body) {
+  const tmp = `${file}.tmp-${process.pid}`;
+  try {
+    writeFileSync(tmp, body, { mode: 0o600 });
+    renameSync(tmp, file);
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* 临时文件可能压根没建出来 */
+    }
+    throw e;
+  }
+}
 
 /**
  * 队列就是目录。
@@ -23,7 +47,7 @@ export function drop(payload, { key } = {}) {
   if (key && (existsSync(file) || existsSync(join(DONE_DIR, name)))) {
     return { file: join(DONE_DIR, name), duplicate: true };
   }
-  writeFileSync(file, body);
+  writeAtomic(file, body);
   return { file, duplicate: false };
 }
 
@@ -73,5 +97,75 @@ export function archive(file) {
   ensureDirs();
   const target = join(DONE_DIR, file.split("/").pop());
   renameSync(file, target);
+  clearAttempt(file);
   return target;
+}
+
+/**
+ * 就地改写队列里的一包内容。
+ *
+ * 只有一个用途：这一场抽到单会话预算就用完了，把已经抽过的那几轮从 payload 里摘掉，
+ * 剩下的下轮接着抽。不摘的话每轮都从头重抽一遍，永远走不到后半段——一场 384 轮的
+ * 会话能抽到下辈子。
+ */
+export function rewrite(file, payload) {
+  writeAtomic(file, JSON.stringify(payload));
+}
+
+/**
+ * 死信：这个会话试到上限了，挪出去别再占着队头。
+ *
+ * 原文件整个保留，旁边写一份 .why 说明为什么挪的、试了几次、最后一次报什么错；
+ * 修好之后 `mv` 回 inbox 就能重跑（文件名没变，幂等键也没变）。
+ */
+export function deadLetter(file, reason = "") {
+  ensureDirs();
+  const name = file.split("/").pop();
+  const target = join(DEAD_DIR, name);
+  renameSync(file, target);
+  try {
+    writeAtomic(`${target}.why`, `${new Date().toISOString()}\n${reason}\n`);
+  } catch {
+    // 说明文件写不进去不影响打包本身，死信已经在 dead/ 里了。
+  }
+  clearAttempt(file);
+  return target;
+}
+
+function loadAttempts() {
+  try {
+    return JSON.parse(readFileSync(ATTEMPTS_PATH, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function saveAttempts(map) {
+  try {
+    writeAtomic(ATTEMPTS_PATH, JSON.stringify(map));
+  } catch {
+    // 记不上账最多是死信永远不触发，比抛出去让整轮挂掉好。
+  }
+}
+
+/** 这个会话又失败了一次，返回累计次数。 */
+export function bumpAttempt(file) {
+  const map = loadAttempts();
+  const name = file.split("/").pop();
+  map[name] = (Number(map[name]) || 0) + 1;
+  saveAttempts(map);
+  return map[name];
+}
+
+export function clearAttempt(file) {
+  const map = loadAttempts();
+  const name = file.split("/").pop();
+  if (name in map) {
+    delete map[name];
+    saveAttempts(map);
+  }
+}
+
+export function attemptsOf(file) {
+  return Number(loadAttempts()[file.split("/").pop()]) || 0;
 }

@@ -226,6 +226,29 @@ function fromThisPage(req) {
   }
 }
 
+/**
+ * Host 头是不是本机的。
+ *
+ * 防的是 DNS rebinding：攻击者把 `evil.com` 解析到 127.0.0.1，你打开那个页面，
+ * 页面里的脚本 fetch('http://evil.com:7787/api/search') 就到了这里——浏览器认为
+ * 是同源，响应读得到。Origin 校验挡不住这条路（同源请求根本没有 Origin/跨站标记），
+ * 只有 Host 会老老实实写着 `evil.com`。所以 GET 也要查。
+ */
+function hostOk(req, boundHost) {
+  const raw = String(req.headers.host ?? "");
+  // 去掉端口，IPv6 去掉方括号。
+  const name = raw.replace(/:\d+$/, "").replace(/^\[|\]$/g, "").toLowerCase();
+  if (!name) return false;
+  if (name === "127.0.0.1" || name === "localhost" || name === "::1") return true;
+  const bound = String(boundHost ?? "").toLowerCase();
+  // 显式绑到别的地址（--host 192.168.x.x）时，浏览器里敲的就是那个地址。
+  if (name === bound) return true;
+  // 绑到通配地址时没法预知会被用哪个名字访问，只放行 IP 字面量和 localhost：
+  // 局域网里敲 192.168.x.x 照常用，而 evil.com 这种域名一律拒掉。
+  if (bound === "0.0.0.0" || bound === "::") return /^[0-9a-f.]+$/.test(name) || name === "localhost";
+  return false;
+}
+
 export function startUi({ port = 7787, host = "127.0.0.1", runRound } = {}) {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
@@ -235,6 +258,9 @@ export function startUi({ port = 7787, host = "127.0.0.1", runRound } = {}) {
     };
 
     try {
+      if (!hostOk(req, host)) {
+        return json(403, { error: `不认这个 Host（${String(req.headers.host ?? "")}）：面板只服务本机` });
+      }
       if (req.method === "GET" && url.pathname === "/") {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
         return res.end(PAGE);

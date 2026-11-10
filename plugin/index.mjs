@@ -6,7 +6,7 @@
  * agent/pre-step 走 waterfall（拿到 next() 之后返回追加的 messages），
  * session/event 拿原始事件，session/flush 收尾。
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -192,7 +192,20 @@ function queueSession(session, turns) {
     turns: kept,
   };
   const file = join(INBOX, `dsh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`);
-  writeFileSync(file, JSON.stringify(payload));
+  // 先写临时文件再 rename：DSH 进程被关掉时正好在写，留下的半截 JSON 会被中心
+  // 当成队头反复读、反复失败，后面的会话全堵着。
+  const tmp = `${file}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify(payload), { mode: 0o600 });
+    renameSync(tmp, file);
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* 没建出来就没什么可删的 */
+    }
+    throw e;
+  }
   return kept.length;
 }
 
@@ -258,11 +271,15 @@ export function apply(ctx) {
     if (session?.header?.origin === "subagent") return;
     const turns = buf(session);
     if (!turns.length) return;
-    buffers.set(session, []);
+    // 先写盘、成功之后再清缓冲。反过来的话，写失败就把这一批丢干净了——
+    // 磁盘满、权限错、目录被删，任何一种都表现为「这段对话再也抽不出来」，
+    // 而日志里只有一句 warn。
     try {
       queueSession(session, turns);
     } catch (error) {
-      ctx.logger?.warn?.(`siyuan-memory: 写队列失败 ${error?.message ?? error}`);
+      ctx.logger?.warn?.(`siyuan-memory: 写队列失败 ${error?.message ?? error}，这一批留在内存里下次再试`);
+      return;
     }
+    buffers.set(session, []);
   });
 }

@@ -13,12 +13,22 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 COPY src ./src
-COPY scripts ./scripts
+
+# 镜像里不拷 scripts/：那是开发期的构建和冒烟脚本，运行时不碰。少一份代码就少
+# 一份要跟着补丁的东西，也少一条从容器里往外跑的路径。
+
+# 不以 root 运行：容器里任何一处被拿下，宿主上的 /data 连同思源 token 就全在手里了。
+#
+# 直接用官方镜像自带的 node 用户（uid/gid 都是 1000），跟宿主机上的数据目录属主
+# 对齐，容器写的队列、日志、索引，宿主机上的用户都能直接读写。
+# 别自己 adduser：1000 已经被 node 占了，`addgroup -g 1000` 会直接失败。
 
 # 配置、队列、原文索引、锁、日志全在 ~/.siyuan-mem 下，挂卷出去。
 # 容器重建不会丢队列——丢掉意味着那几场会话白推了。
 ENV HOME=/data
 VOLUME ["/data"]
+
+USER node
 
 ENTRYPOINT ["node", "/app/src/cli/cli.mjs"]
 CMD ["serve"]

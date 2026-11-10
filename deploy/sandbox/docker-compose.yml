@@ -45,7 +45,11 @@ services:
     entrypoint: ["sleep", "infinity"]
     # 以宿主机当前用户跑：否则 /data 下的文件是 root 的，`rm -rf data` 删不掉，
     # 想推倒重来还得 sudo。镜像本身不需要 root（只往 /data 写）。
-    user: "${UID:-1000}:${GID:-1000}"
+    #
+    # 变量名不能叫 UID/GID：那俩是 shell 内建变量，默认不导出，compose 读不到，
+    # 于是 `${UID:-1000}` 永远落到 1000——在 uid 不是 1000 的机器上照样是 root 的文件。
+    # bootstrap.sh 会把真实值写进同目录的 .env，compose 启动时自动读。
+    user: "${MEM_UID:-1000}:${MEM_GID:-1000}"
     volumes:
       # 配置、队列、日志都在这里；down -v 不会删它（是 bind mount），
       # 想彻底重来就 rm -rf data。

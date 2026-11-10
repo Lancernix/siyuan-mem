@@ -476,7 +476,7 @@ const CONVERGE_PROMPT = `你是记忆系统的话题管理员。系统里有一�
  *
  * 只在新话题出现时才跑（`created` 非空）。没有新名字的轮次跑它纯属浪费。
  */
-export async function convergeTopics({ cfg, table, extra = [], samples = null, log = () => {} }) {
+export async function convergeTopics({ cfg, table, extra = [], samples = null, log = () => {}, deadline = Number.POSITIVE_INFINITY }) {
   const names = Array.from(new Set([...table.filter((e) => e.status !== "merged").map((e) => e.name), ...extra])).filter(Boolean);
   if (names.length < 2) return new Map();
   const describe = (n) => {
@@ -502,6 +502,7 @@ export async function convergeTopics({ cfg, table, extra = [], samples = null, l
       ],
       json: true,
       tag: "converge",
+      deadline,
     });
   } catch (e) {
     log(`    · 话题收敛没跑成（${e.message}），名字保持原样`);

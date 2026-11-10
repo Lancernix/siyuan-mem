@@ -276,6 +276,7 @@ async function judgeChunk({ cfg, chunk, out, depth = 0 }) {
       ],
       json: true,
       tag: "dedupe",
+      deadline,
     });
     if (process.env.MEM_DEBUG) console.log("[dedupe 原文]", r.text);
     const parsed = JSON.parse(String(r.text ?? "").replace(/^\s*```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim());
@@ -324,7 +325,7 @@ async function judgeChunk({ cfg, chunk, out, depth = 0 }) {
   }
 }
 
-export async function judgeDuplicates({ cfg, news, existing, chunkSize = MAX_NEWS_PER_CALL }) {
+export async function judgeDuplicates({ cfg, news, existing, chunkSize = MAX_NEWS_PER_CALL, deadline = Number.POSITIVE_INFINITY }) {
   const out = new Map();
   if (!news.length || !existing.length) return out;
 

@@ -73,6 +73,10 @@ export async function collect({ sy, ids }) {
       type: attrOf(r.ial, ATTR.type) || "fact",
       confidence: Number(attrOf(r.ial, ATTR.confidence)) || 3,
       raw: attrOf(r.ial, ATTR.raw),
+      // 项目名直接读属性。原来它是「下载这个会话的原文附件、解 JSON、取第一行的 cwd」，
+      // 一个附件可能是几 MB，一百个会话就是几百 MB 流量换个分组标题——而写入时
+      // 早就把 cwd 推出来的项目名记在 custom-mem-project 上了。
+      project: attrOf(r.ial, ATTR.project),
     });
     bySession.set(session, e);
   }
@@ -85,25 +89,35 @@ export async function collect({ sy, ids }) {
       }
       // 高置信度排前面；同一置信度里保持写入顺序。
       for (const list of byType.values()) list.sort((a, b) => b.confidence - a.confidence);
-    return { ...g, byType, total: g.items.length };
+    // 项目名优先取属性（写入时就有），老条目才回落到原文附件。
+    const g0 = { ...g, byType, total: g.items.length };
+    g0.project = g.items.find((it) => it.project)?.project ?? "";
+    return g0;
   });
 
-  // 项目名从原文的 meta 行取（那里存着 cwd）。会话 id 前 8 位对人没有意义，
-  // 「这个项目」才是分组时想看到的东西。取不到就退回 harness 名，不影响渲染。
+  // 兜底：早期写的条目没有 custom-mem-project，从原文的 meta 行（那里存着 cwd）补。
+  // 会话 id 前 8 位对人没有意义，「这个项目」才是分组时想看到的东西。
+  //
+  // 每个附件只下一次：同一场会话的所有条目共用一份原文，原来是一个会话下一个
+  // 几 MB 的附件，还按 item 找第一个就算——一个会话一次，一百个会话一百次。
+  const seen = new Map();
   await Promise.all(
-    groups.map(async (g) => {
-      const first = g.items.find((it) => it.raw);
-      if (!first) return;
-      try {
-        const p = parsePtr(first.raw);
-        const text = await sy.getAsset(p.path);
-        if (!text) return;
-        const head = JSON.parse(text.slice(0, text.indexOf("\n")) || "{}");
-        g.project = String(head.cwd ?? "").split("/").filter(Boolean).pop() ?? "";
-      } catch {
-        // 读不到就算了，标题退回 harness 名
-      }
-    })
+    groups
+      .filter((g) => !g.project)
+      .map(async (g) => {
+        const first = g.items.find((it) => it.raw);
+        if (!first) return;
+        try {
+          const ptr = parsePtr(first.raw);
+          if (!seen.has(ptr.path)) seen.set(ptr.path, await sy.getAsset(ptr.path));
+          const text = seen.get(ptr.path);
+          if (!text) return;
+          const head = JSON.parse(text.slice(0, text.indexOf("\n")) || "{}");
+          g.project = String(head.cwd ?? "").split("/").filter(Boolean).pop() ?? "";
+        } catch {
+          // 读不到就算了，标题退回 harness 名
+        }
+      })
   );
 
   // 有日期的按日期倒序，没日期的（早期手动记的）沉到最后。

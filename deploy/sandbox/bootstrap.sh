@@ -7,6 +7,12 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# 记下当前用户的 uid/gid，给 compose 用（${UID} 在 shell 里不导出，compose 看不见）。
+{
+  echo "MEM_UID=$(id -u)"
+  echo "MEM_GID=$(id -g)"
+} > .env
+
 echo "== 起沙箱思源 =="
 docker compose up -d --build siyuan
 

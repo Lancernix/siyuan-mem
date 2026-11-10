@@ -61,6 +61,10 @@ const server = http.createServer((req, res) => {
     if (scenario === "retry" && hit === 1) {
       return send(429, { error: { message: "rate limited" } }, { "Retry-After": "1" });
     }
+    // 有的网关只给 retry-after-ms（云flare / Azure 那类），单位是毫秒。
+    if (scenario === "retryms" && hit === 1) {
+      return send(429, { error: { message: "rate limited" } }, { "Retry-After-Ms": "900" });
+    }
     if (scenario === "nojson" && parsed.response_format) {
       return send(400, { error: { message: "response_format is not supported by this model" } });
     }
@@ -177,4 +181,16 @@ test("服务端不认 json_schema 时自动降级成 json_object，不整批失�
   const out = await extractEntries(openaiCfg, [{ q: "通勤十公里穿什么裤子", a: "选风盾500。" }], { useModel: true });
   assert.equal(out.mode, "model", `不该降级成规则抽取：${out.error ?? ""}`);
   assert.equal(hit, 2, "先 json_schema 被 400，再 json_object 成功");
+});
+
+test("openai：只给 retry-after-ms 的网关也要等够——按秒理解会多等一千倍", async () => {
+  hit = 0;
+  scenario = "retryms";
+  const t0 = Date.now();
+  const r = await chat(openaiCfg, { messages: msgs, tag: "retryms" });
+  const ms = Date.now() - t0;
+  assert.equal(hit, 2, "应该重试过一次");
+  // 按 800ms 默认退避的话是 800ms 上下；按"900 秒"理解的话这条会挂很久。
+  assert.ok(ms >= 850 && ms < 5000, `应该等约 900ms，实际 ${ms}ms`);
+  assert.match(r.text, /ok/);
 });

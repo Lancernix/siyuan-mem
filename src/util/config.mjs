@@ -7,6 +7,15 @@ export const HOME_DIR = join(homedir(), ".siyuan-mem");
 export const CONFIG_PATH = join(HOME_DIR, "config.json");
 export const INBOX_DIR = join(HOME_DIR, "inbox");
 export const DONE_DIR = join(HOME_DIR, "done");
+/**
+ * 死信：重试到上限还是过不去的会话挪到这里，不再参与每轮扫描。
+ *
+ * 必须有个出口。队列是 FIFO，一个每次都超预算/读不动的会话压在最前面，
+ * 后面的永远轮不到——看上去队列有活、其实一条也走不动。
+ */
+export const DEAD_DIR = join(HOME_DIR, "dead");
+/** 每个会话失败了几次。放文件里而不是内存：容器每轮重启都会清零，就永远到不了上限。 */
+export const ATTEMPTS_PATH = join(HOME_DIR, "attempts.json");
 /** 解析出来的块 id 缓存在这里：思源的文档索引是异步的，刚建完查不到，不缓存就会重复建。 */
 export const STATE_PATH = join(HOME_DIR, "state.json");
 /** 每个会话日志读到哪儿了。没有它，同一个会话每次都要整份重发一遍。 */
@@ -99,6 +108,16 @@ const DEFAULTS = {
     maxSessionsPerRound: 20,
     // 另一道保险：单轮的时间预算。20 个会话里混进几个超长的，也会在 20 分钟收手。
     maxMinutesPerRound: 20,
+    /**
+     * 单个会话的硬上限。轮预算只在**会话之间**检查，所以只要一场会话自己跑得久，
+     * 一轮就能跑到天亮：2026-11-10 凌晨那场「3 个会话 / 86 分钟」就是这么来的，
+     * 内存换页把整机拖死。这个数是会话内部的闸门，到点就收手、留队列下轮继续。
+     */
+    maxMinutesPerSession: 10,
+    /** 连续几次写库失败就熔断本轮：思源卡住时 5 秒超时 × 几十条，越跑越死。 */
+    maxConsecutiveFailures: 3,
+    /** 同一个会话失败几次进死信。只对「自身有问题」的失败计数，不包含写库故障。 */
+    maxAttemptsPerSession: 3,
   },
   ui: {
     /** 本地面板。只有 127.0.0.1，没有鉴权，别绑 0.0.0.0。 */
@@ -189,8 +208,10 @@ function deepMerge(base, patch) {
 }
 
 export function ensureDirs() {
-  for (const d of [HOME_DIR, INBOX_DIR, DONE_DIR]) {
-    if (!existsSync(d)) mkdirSync(d, { recursive: true });
+  // 0700：这几个目录里放的是会话原文、原文索引和配置，同机其他用户没必要读。
+  // 原来 mkdir 用的是默认 0777 & ~umask（一般 0755），队列里的会话内容别人随手能看。
+  for (const d of [HOME_DIR, INBOX_DIR, DONE_DIR, DEAD_DIR]) {
+    if (!existsSync(d)) mkdirSync(d, { recursive: true, mode: 0o700 });
   }
 }
 
@@ -223,7 +244,8 @@ export function loadState() {
 
 export function saveState(state) {
   ensureDirs();
-  writeFileSync(STATE_PATH, JSON.stringify(state, null, 2) + "\n");
+  writeFileSync(STATE_PATH, JSON.stringify(state, null, 2) + "\n", { mode: 0o600 });
+  tightenPerms(STATE_PATH);
 }
 
 /**
@@ -242,7 +264,8 @@ export function loadGroups() {
 
 export function saveGroups(o) {
   ensureDirs();
-  writeFileSync(GROUPS_PATH, JSON.stringify(o, null, 2) + "\n");
+  writeFileSync(GROUPS_PATH, JSON.stringify(o, null, 2) + "\n", { mode: 0o600 });
+  tightenPerms(GROUPS_PATH);
 }
 
 /** 本机标识。三台机器的日志路径长得一模一样，不分开就会互相顶掉。 */
@@ -276,7 +299,8 @@ export function loadOffsets() {
 
 export function saveOffsets(o) {
   ensureDirs();
-  writeFileSync(OFFSET_PATH, JSON.stringify(o, null, 2) + "\n");
+  writeFileSync(OFFSET_PATH, JSON.stringify(o, null, 2) + "\n", { mode: 0o600 });
+  tightenPerms(OFFSET_PATH);
 }
 
 /** 取某台机器的偏移表（会就地补上缺失的层级，方便直接改再整体保存）。 */

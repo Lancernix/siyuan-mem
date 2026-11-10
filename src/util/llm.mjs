@@ -135,6 +135,13 @@ function usageOf(u = {}) {
  */
 function retryAfterOf(e) {
   const h = e?.responseHeaders ?? e?.cause?.responseHeaders ?? {};
+  // 有些网关（Cloudflare、Azure OpenAI）只给 `retry-after-ms`，单位就是毫秒。
+  // 先看它：带 -ms 的那个更精确，按秒解释会多等三个数量级。
+  const ms = h["retry-after-ms"] ?? h["Retry-After-Ms"];
+  if (ms != null && ms !== "") {
+    const n = Number(ms);
+    if (Number.isFinite(n)) return Math.max(0, n);
+  }
   const raw = h["retry-after"] ?? h["Retry-After"];
   if (raw != null && raw !== "") {
     const sec = Number(raw);
@@ -154,7 +161,9 @@ function shapeError(e) {
   const err = new Error(e?.responseBody ? `${e.message}｜${String(e.responseBody).slice(0, 300)}` : (e?.message ?? String(e)));
   err.status = status;
   err.retryable = retryable;
-  err.retryAfterMs = retryAfterOf(e);
+  // 上限保护：服务端说等一小时也不能真的等——一轮的预算就二十分钟，
+  // 超过上限就按上限来，剩下的交给下一轮。
+  err.retryAfterMs = Math.min(retryAfterOf(e) ?? 0, 5 * 60_000) || undefined;
   // schema 校验失败单独标出来：调用方要据此决定"退回文本再解析一次"。
   if (e?.name === "AI_NoObjectGeneratedError") {
     err.noObject = true;
@@ -277,7 +286,7 @@ const JSON_MODE_REJECTED = /response_format|json_object|json mode|responseMimeTy
  * 重试策略三家统一：429/408/409/5xx 退避重试（认 retry-after），4xx 其余立刻抛。
  * 统一在策略层而不是各家 adapter 里，否则"试了几次"在不同 provider 之间不可比。
  */
-async function withRetry(m, send) {
+async function withRetry(m, send, left = () => Number.POSITIVE_INFINITY) {
   const tries = Math.max(0, m.retries) + 1;
   let last;
   for (let attempt = 1; attempt <= tries; attempt++) {
@@ -286,7 +295,11 @@ async function withRetry(m, send) {
     } catch (e) {
       last = e;
       if (!e.retryable || attempt === tries) break;
-      await sleep(e.retryAfterMs ?? Math.min(30_000, 800 * 2 ** (attempt - 1)));
+      const wait = e.retryAfterMs ?? Math.min(30_000, 800 * 2 ** (attempt - 1));
+      // 剩下的时间连等待都不够，就别再撞了：重试的意义是"再试一次还有可能成"，
+      // 预算已经不够的时候重试只会把超时乘上次数。
+      if (left() <= wait) break;
+      await sleep(wait);
     }
   }
   throw last;
@@ -301,7 +314,7 @@ async function withRetry(m, send) {
  * JSON 模式被拒时去掉该能力重发一次，不算失败：那是服务端不支持，不是配置错，
  * 也不该让整段会话降级成规则抽取。
  */
-async function call(cfg, { messages, json = false, schema = null, maxTokens, tag = "" } = {}) {
+async function call(cfg, { messages, json = false, schema = null, maxTokens, tag = "", deadline = Number.POSITIVE_INFINITY } = {}) {
   const m = resolveModel(cfg);
   // problem 优先：不认识的 provider 也要说清楚是「哪一家不认识」，不能笼统报「没配模型」。
   if (m.problem) throw new Error(m.problem);
@@ -315,16 +328,33 @@ async function call(cfg, { messages, json = false, schema = null, maxTokens, tag
   const key = `${m.baseUrl}|${m.model}`;
   const wantSchema = Boolean(schema) && !noSchema.has(key);
   const t0 = Date.now();
+  /**
+   * 这次逻辑调用还剩多少时间。
+   *
+   * 之前只有"单次尝试"的超时（timeoutMs），没有"这次调用总共能用多久"。于是一个
+   * 卡住的请求会把 180 秒全用掉，再按 retries=3 重来三遍，一次调用就是十二分钟——
+   * 2026-11-10 那轮里 converge 单次 688 秒就是这么来的，会话闸门再严也拦不住，
+   * 因为闸门只能在两次调用之间看表。
+   */
+  const left = () => (Number.isFinite(deadline) ? deadline - Date.now() : Number.POSITIVE_INFINITY);
 
   const send = async ({ json: useJson = wantJson, withSchema = wantSchema } = {}) => {
     const model = await modelFor(m, { json: useJson && !withSchema });
     const { system, messages: rest } = splitMessages(messages);
+    // 单次尝试也不许超过总预算：端点在最后十秒里挂住，没必要再陪它耗三分钟。
+    const perTry = Math.min(m.timeoutMs ?? 45_000, left());
+    if (perTry <= 0) {
+      const e = new Error("这次调用的时间预算用完了");
+      e.retryable = false;
+      e.budget = true;
+      throw e;
+    }
     try {
       const res = await generateText({
         model,
         // timeoutMs 一直被读进配置、却从没往下传（评审指出）：端点挂住就真的挂着，
         // 45 秒的默认值形同虚设。abortSignal 是 SDK 唯一认的中断方式。
-        abortSignal: AbortSignal.timeout(m.timeoutMs ?? 45_000),
+        abortSignal: AbortSignal.timeout(perTry),
         // 重试必须关在 SDK 里面：它默认自己重试两次，且不认我们的 Retry-After 策略，
         // 结果就是"日志上 attempts=1，实际打了三次"（实测）。
         maxRetries: 0,
@@ -343,7 +373,7 @@ async function call(cfg, { messages, json = false, schema = null, maxTokens, tag
   let res;
   let fallback = false;
   try {
-    res = await withRetry(m, () => send());
+    res = await withRetry(m, () => send(), left);
   } catch (e) {
     if (schema && e.noObject) {
       // schema 没过但模型确实回了内容：退回文本模式再要一次，让调用方自己解析。
@@ -351,7 +381,7 @@ async function call(cfg, { messages, json = false, schema = null, maxTokens, tag
       fallback = true;
       event("llm.fallback", { kind: "schema-validate", model: m.model, wire: m.wire });
       try {
-        res = await withRetry(m, () => send({ withSchema: false }));
+        res = await withRetry(m, () => send({ withSchema: false }), left);
       } catch (e2) {
         record({ at: new Date().toISOString(), model: m.model, wire: m.wire, tag, error: describe(e2) });
         throw new Error(`模型调用失败：${describe(e2)}`);
@@ -363,7 +393,7 @@ async function call(cfg, { messages, json = false, schema = null, maxTokens, tag
       fallback = true;
       event("llm.fallback", { kind: "schema-unsupported", model: m.model, wire: m.wire });
       try {
-        res = await withRetry(m, () => send({ withSchema: false, json: true }));
+        res = await withRetry(m, () => send({ withSchema: false, json: true }), left);
       } catch (e2) {
         record({ at: new Date().toISOString(), model: m.model, wire: m.wire, tag, error: describe(e2) });
         throw new Error(`模型调用失败：${describe(e2)}`);
@@ -372,7 +402,7 @@ async function call(cfg, { messages, json = false, schema = null, maxTokens, tag
       fallback = true;
       event("llm.fallback", { kind: "json-unsupported", model: m.model, wire: m.wire });
       try {
-        res = await withRetry(m, () => send({ json: false }));
+        res = await withRetry(m, () => send({ json: false }), left);
       } catch (e2) {
         record({ at: new Date().toISOString(), model: m.model, wire: m.wire, tag, error: describe(e2) });
         throw new Error(`模型调用失败：${describe(e2)}`);

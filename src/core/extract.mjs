@@ -389,6 +389,7 @@ const ENTRIES_SCHEMA = z.object({
 });
 
 async function callModel(cfg, batch, entityShot = [], part = null) {
+  const deadline = part?.deadline ?? Number.POSITIVE_INFINITY;
   // 告诉它这是第几段：不说的话，模型会以为整场对话就这一段，
   // 于是一段里能写七八条，后面的段落又写七八条，同一件事被总结三遍。
   const dialog = part
@@ -421,6 +422,7 @@ async function callModel(cfg, batch, entityShot = [], part = null) {
     ],
     schema: ENTRIES_SCHEMA,
     tag: "extract",
+    deadline,
   });
   // 有对象就用对象（字段是服务端按 schema 强制的）；退回文本模式时再自己解析。
   // 判的是"里面有没有 entries"，不是"对象真不真"：SDK 在没走 schema 的时候也可能
@@ -562,6 +564,17 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
   const useModel = willUseModel(cfg, opts.useModel);
   const plan = planBatches(exchanges, budget);
   /**
+   * 抽到哪个点就该收手了。
+   *
+   * 一场 384 轮的会话能拆出十几批，一批一次模型调用；实测单次 113 秒、254 秒都有过。
+   * 也就是说光**抽取**就能跑四十分钟——2026-11-10 那几轮「3 个会话 / 86 分钟」就是这么来的，
+   * 跟思源卡不卡没关系。所以抽取也要有闸门：到点就不再发下一批，已经抽出来的照常写库，
+   * 剩下的轮次从队头摘掉、留在队列里下轮接着抽（见 jobs.mjs 的 trimQueue）。
+   *
+   * 只在这一批**开始前**看时间，不发半截请求；第一批永远跑，保证每轮都有进展。
+   */
+  const deadline = Number(opts.deadline) || Number.POSITIVE_INFINITY;
+  /**
    * 一个会话最多收多少条。
    *
    * 这里原来是「批数 ×4，夹在 8~36」。实测一场 1272 轮的会话（82 批）撞了 36 的天花板，
@@ -592,7 +605,22 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
   // 本会话已经抽出的条目。串行的意义就在这儿：后一批能看着前面的结论抽，
   // 同一件事不会在批与批的接缝处再记一遍。并发发出去就只剩 converge 事后归并了。
   const drafted = [];
+  let stoppedAt = plan.length;
+  let coveredThrough = null;
+  // 第一批永远给一次机会：会话预算是"别拖太久"，不是"到点就白跑"。
+  // 这一批的调用本身还有自己的总预算（见 llm.mjs 的 deadline），不会无限等。
+  const oneBatchMs = Math.min(Number(cfg.model?.timeoutMs) || 120_000, 180_000);
   for (const [idx, batch] of plan.entries()) {
+    if (idx > 0 && Date.now() >= deadline) {
+      stoppedAt = idx;
+      break;
+    }
+    const batchDeadline = idx === 0 ? Math.max(deadline, Date.now() + oneBatchMs) : deadline;
+    // 一次批调用的总预算（含重试）。不给这个的话，"总预算"是会话级的那 10 分钟，
+    // 于是一个卡住的请求可以按 180 秒 × 4 次尝试把这 10 分钟吃干净——实测 12:26
+    // 那轮就是这么走的：一整批耗掉九分钟，一条都没多抽。一次调用最多三分钟，
+    // 抽不完就是抽不完，剩下的留给下一轮。
+    const callDeadline = Math.min(batchDeadline, Date.now() + oneBatchMs);
     // 这一批覆盖哪几轮。条目继承它，指针才落得到具体段落上——
     // 否则一条结论只能指整个会话（几十万字），等于没有原文。
     const from = batch[0]?.from;
@@ -602,6 +630,7 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
         index: idx + 1,
         total: plan.length,
         drafted,
+        deadline: callDeadline,
       });
       usage.prompt += r.usage.prompt;
       usage.completion += r.usage.completion;
@@ -615,16 +644,35 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
         drafted.push({ entity: name, brief: e.brief, text: e.text });
       }
       all.push(...kept.map((e) => ({ ...e, from, to })));
+      // 只有**抽出来了**才推进覆盖点。原来在 try 之前就推进，于是预算到点掐掉的那一批
+      // 也算「抽过了」，jobs 按这个点把轮次从队列里摘掉——那几轮就再也没人抽，
+      // 而且看不出来：日志上写的是「抽到点了」。
+      coveredThrough = to ?? coveredThrough;
     } catch (e) {
+      // 时间到点被我们自己掐掉的，不算失败。
+      //
+      // 记成失败的话整场会被判成「抽取不完整」→ 原文留在队列里 → 试满三次进 dead/，
+      // 而那半场一行都没处理错。到点就是到点，按收手处理，剩下的下轮接着抽。
+      //
+      // 但要分两种：前面已经有批次成功过，就把这一批也留给下一轮（收手）；
+      // 一批都没成的时候不能收手，那样这一轮等于白跑，退化抽一条保证有进展。
+      if (e?.budget || Date.now() >= callDeadline) {
+        if (coveredThrough != null) {
+          stoppedAt = idx;
+          break;
+        }
+      }
       failures++;
       lastError = e.message;
       all.push(...heuristicEntries(batch, opts.fallbackEntity ?? "", 1));
+      // 退回规则抽取也算这一批处理过了：至少从里面捞了一条，指针能落到这段。
+      coveredThrough = to ?? coveredThrough;
     }
   }
   // 先去重（字面），再收敛（语义），最后才截断——
   // 顺序反了就会先砍掉再合并，被砍的那条本来是另一条的下半句。
   const deduped = mergeEntries(all, Number.MAX_SAFE_INTEGER).entries;
-  const conv = await convergeEntries(cfg, deduped, opts.session ?? "");
+  const conv = await convergeEntries(cfg, deduped, opts.session ?? "", deadline);
   usage.prompt += conv.usage.prompt;
   usage.completion += conv.usage.completion;
   const sorted = conv.entries.sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
@@ -632,6 +680,7 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
   // 被上限砍掉的那些，只记个数等于扔掉。留下话题 + 摘要，事后还能人工捞回来。
   const droppedBriefs = sorted.slice(perSession).slice(0, 40).map((e) => `${e.entity}｜${e.brief ?? ""}`);
   const mode = failures === 0 ? "model" : failures === plan.length ? "heuristic-after-error" : "partial";
+  const stoppedEarly = stoppedAt < plan.length;
   return {
     entries: kept,
     mode,
@@ -640,6 +689,11 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
     dropped: Math.max(0, conv.entries.length - kept.length) + overflow,
     droppedBriefs,
     usage,
+    // 到点收手时已经把前 N 批抽完了。调用方据此把队列里的这一场从队头摘掉，
+    // 下轮从剩下的轮次接着抽——不这么做的话，每轮都从头重抽，永远走不到后半段。
+    stoppedEarly,
+    coveredThrough,
+    remainingBatches: plan.length - stoppedAt,
     error: failures ? `${failures}/${plan.length} 批失败：${lastError}` : undefined,
   };
 }
@@ -660,7 +714,7 @@ const CONVERGE_PROMPT = `下面是一场对话里抽出来的记忆条目，每�
 没有重复就给 {"groups":[]}。每组至少两个编号，一个编号只能出现在一组里。
 拿不准就别合并——并起来会丢信息的，不算重复；只是同一个话题下的两个不同结论，也不算。`;
 
-async function convergeEntries(cfg, entries, session = "") {
+async function convergeEntries(cfg, entries, session = "", deadline = Number.POSITIVE_INFINITY) {
   const empty = { entries, merged: 0, usage: { prompt: 0, completion: 0 } };
   if (entries.length < 4) return empty;
   const lines = entries.map(
@@ -674,6 +728,7 @@ async function convergeEntries(cfg, entries, session = "") {
       ],
       json: true,
       tag: "converge",
+      deadline,
     });
     const parsed = JSON.parse(stripFence(r.text));
     const groups = Array.isArray(parsed?.groups) ? parsed.groups : [];

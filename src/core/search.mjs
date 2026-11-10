@@ -61,16 +61,29 @@ export function termsOf(q) {
     .slice(0, 6);
 }
 
-export function scoreOf(row, terms, entity) {
+/**
+ * 相关度：只算「词真的出现在正文/话题/摘要里」这部分，不含时间惩罚。
+ *
+ * 单独拆出来是为了给召回设下限：SQL 是在整个 ial 上做 LIKE 的，一条记忆哪怕只是
+ * 原文路径里带个 `Mac`，也能成为候选。分数里那个时间惩罚会让它的总分变成负数，
+ * 但负分照样排在结果里——于是「查一个词，返回一堆完全不相干的旧条目」。
+ * 相关度为 0 的一律不算命中。
+ */
+export function relevanceOf(row, terms, entity) {
   const text = row.text ?? "";
-  let score = 0;
+  let rel = 0;
   for (const t of terms) {
     const lower = t.toLowerCase();
     const inText = text.toLowerCase().split(lower).length - 1;
-    score += Math.min(inText, 5) * 2;
-    if (String(entity).toLowerCase().includes(lower)) score += 6;
-    if (String(row.brief).toLowerCase().includes(lower)) score += 3;
+    rel += Math.min(inText, 5) * 2;
+    if (String(entity).toLowerCase().includes(lower)) rel += 6;
+    if (String(row.brief).toLowerCase().includes(lower)) rel += 3;
   }
+  return rel;
+}
+
+export function scoreOf(row, terms, entity) {
+  let score = relevanceOf(row, terms, entity);
   // 时间惩罚：一天 -0.08，最多 -8。
   //
   // 原来是 -0.05/最多 -5，太轻了：一个词多出现一次就 +2（上限 +10），实体命中 +6，
@@ -120,10 +133,17 @@ export async function searchEntries(opts = {}) {
   const since = opts.days
     ? new Date(Date.now() - Number(opts.days) * 86400000).toISOString().slice(0, 10)
     : "";
-  // 每个词都要出现（AND），但允许出现在正文或属性里——摘要和话题都在属性里。
+  // 每个词都要出现（AND）。除了正文，只认「人写的那几个属性」：话题、摘要、项目、类型。
+  //
+  // 原来是在整个 ial 上 LIKE，于是 `custom-mem-raw` 里那串
+  // `assets/mem-raw/laptop/workbuddy/xxx.jsonl#120-180` 也算命中——查 `Mac`、查 `jsonl`、
+  // 查任何会话 id 片段，都能把大半个库翻出来，看着有结果其实一条都不相关。
   for (const t of terms) {
     const esc = likeEsc(t);
-    conds.push(`(content LIKE '%${esc}%' ESCAPE '\\' OR ial LIKE '%${esc}%' ESCAPE '\\')`);
+    const fields = [ATTR.entity, ATTR.brief, ATTR.project, ATTR.type].map(
+      (k) => `ial LIKE '%${k}="%${esc}%' ESCAPE '\\'`
+    );
+    conds.push(`(content LIKE '%${esc}%' ESCAPE '\\' OR ${fields.join(" OR ")})`);
   }
 
   // 这个 LIMIT 是**取候选**的上限，不是结果数。给得太小会静默漏召回：
@@ -162,8 +182,12 @@ export async function searchEntries(opts = {}) {
         source: attr(r.ial, ATTR.source),
         project: attr(r.ial, ATTR.project),
         score: scoreOf({ text, brief, date }, terms, entity),
+        rel: relevanceOf({ text, brief }, terms, entity),
       };
     })
+    // 相关度为 0 = 只是候选，不是命中（词落在了原文路径之类的地方）。留着它
+    // 只会让「查不到」看起来像「查到了但都不太对」。
+    .filter((h) => h.rel > 0)
     .filter((h) => !since || (h.date && h.date >= since))
     .sort((a, b) => b.score - a.score || String(b.date ?? "").localeCompare(String(a.date ?? "")))
     .slice(0, limit);

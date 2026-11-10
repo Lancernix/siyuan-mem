@@ -13,7 +13,7 @@
     "test": "node --test"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.15.0"
   },
   "license": "MIT",
   "private": true,

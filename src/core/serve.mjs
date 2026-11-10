@@ -268,6 +268,9 @@ async function runRound({ dry, useModel, log }) {
     onLine: log,
     maxSessions: cfg.serve?.maxSessionsPerRound ?? 20,
     maxMs: (cfg.serve?.maxMinutesPerRound ?? 20) * 60_000,
+    maxSessionMs: (cfg.serve?.maxMinutesPerSession ?? 10) * 60_000,
+    maxConsecutiveFailures: cfg.serve?.maxConsecutiveFailures ?? 3,
+    maxAttempts: cfg.serve?.maxAttemptsPerSession ?? 3,
   });
   return { version, scanned: sessions.length, candidates: candidates.length, enqueued, turns, left, ...sum };
 }
@@ -390,6 +393,9 @@ export async function serve({ once = false, dry = false, useModel = true, interv
             (r.tokens?.prompt ? `，tokens ${r.tokens.prompt}+${r.tokens.completion}` : "")
       );
       if (r.degraded) log(`  · ${r.degraded} 个会话抽取不完整，原文留在队列里等重试`);
+      if (r.trimmed) log(`  · ${r.trimmed} 场抽到预算就收手了，抽过的已写进库，剩下的轮次留在队列里`);
+      if (r.unfinished) log(`  · ${r.unfinished} 场没做完（超了单会话预算或抽取不完整），留在队列里下轮继续`);
+      if (r.dead) log(`  · ${r.dead} 个会话试到上限，已挪进 dead/（旁边有 .why 说明原因）`);
       if (!r.candidates && !r.sessions) log("  队列空，也没有新会话");
       event("round", {
         no: roundNo,
