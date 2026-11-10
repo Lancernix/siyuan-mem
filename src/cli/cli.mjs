@@ -1037,6 +1037,7 @@ async function cmdSearch(args, flags) {
   }
   if (!r.hits.length) {
     console.log(`没找到。检索词：${r.terms.join(" / ") || "（空）"}${r.remote ? `\n（查的是远端 ${r.remote}）` : ""}`);
+    if (r.hint) console.log(r.hint);
     return;
   }
   console.log(`找到 ${r.hits.length} 条（检索词：${r.terms.join(" / ")}）${r.remote ? `\n远端 ${r.remote}` : ""}\n`);

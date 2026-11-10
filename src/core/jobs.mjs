@@ -15,7 +15,7 @@ import { normalizeTurns, toExchanges, extractEntries, promptVersion } from "./ex
 import { pending, readSession, archive, drop, rewrite, bumpAttempt, clearAttempt, deadLetter } from "./inbox.mjs";
 import { readLog } from "../util/readers/index.mjs";
 import { event } from "../util/log.mjs";
-import { archive as archiveRaw } from "../util/raw.mjs";
+import { archive as archiveRaw, narrowAnchor } from "../util/raw.mjs";
 import { loadEntities, shotList, resolveEntities, convergeTopics, mergeEntities } from "./entities.mjs";
 import { judgeDuplicates, dedupeStats } from "./dedupe.mjs";
 import { dropPending, flushPending, notePending } from "./repair.mjs";
@@ -229,7 +229,7 @@ export async function processQueue({
   let broken = null;
   /** 把本轮撞停的那场会话是谁。熔断之后要靠它判断「是思源坏了还是这一场坏了」。 */
   let brokenSession = null;
-  const sum = { sessions: files.length, left: 0, written: 0, skipped: 0, replaced: 0, failed: 0, degraded: 0, raw: 0, entities: 0, pending: 0, dedupeCalls: 0, dedupeMs: 0, dead: 0, unfinished: 0, trimmed: 0, broken: false, tokens: { prompt: 0, completion: 0 } };
+  const sum = { sessions: files.length, left: 0, written: 0, skipped: 0, replaced: 0, failed: 0, degraded: 0, raw: 0, entities: 0, pending: 0, dedupeCalls: 0, dedupeMs: 0, dead: 0, unfinished: 0, trimmed: 0, narrowed: 0, broken: false, tokens: { prompt: 0, completion: 0 } };
 
   // 先补上一轮没标完的"过时"。这件事跟模型无关，也不该等队列里有活才干——
   // 偏偏最容易漏的就是"队列空了但账本还欠着"。
@@ -502,12 +502,36 @@ export async function processQueue({
       }
       const entity = entityMap.get(e.entity) ?? e.entity;
       const verdict = decisions.get(idx);
+      // 抽取是「一批一次模型调用」，那一批抽出来的 4–10 条结论共用同一个 from/to，
+      // 指针因此常常横跨几十轮、三万多字——点开等于没指。用结论里那些模型编不出来
+      // 的硬锚（文件名、参数、端口、报错串）落回原文行，把范围收窄到真正出处的
+      // 那几轮。原文就在本进程的 payload.turns 里，不用下载附件、不用再调模型。
+      //
+      // 收窄是保守的：跨轮归纳、锚点分散、证据掉太多，一律原样返回。宽了只是多读
+      // 几行，窄错了是把出处排除在外而且看不出来，两者代价不对称。
+      const anchor =
+        e.from != null && parts.length
+          ? narrowAnchor(e.text, payload.turns ?? payload.events ?? [], e.from, e.to)
+          : null;
+      const aFrom = anchor?.from ?? e.from;
+      const aTo = anchor?.to ?? e.to;
       const rawPtr =
-        e.from != null && parts.length ? ptrFor(parts, turnFrom + e.from, turnFrom + e.to) : "";
+        e.from != null && parts.length ? ptrFor(parts, turnFrom + aFrom, turnFrom + aTo) : "";
+      if (anchor?.narrowed && !dry) {
+        sum.narrowed++;
+        event("anchor.narrow", {
+          session: payload.session_id ?? "",
+          from: turnFrom + e.from,
+          to: turnFrom + e.to,
+          narrowedFrom: turnFrom + aFrom,
+          narrowedTo: turnFrom + aTo,
+          rows: anchor.rows,
+        });
+      }
       if (dry) {
         // 用条目自己的轮次范围，不是整个 part：dry 的意义就是看指针会精确到哪一段。
         const where =
-          e.from != null ? `  · 第 ${turnFrom + e.from}–${turnFrom + e.to} 轮` : parts[0]?.dry ? `  · 整段 ${parts[0].from}–${parts[0].to}` : "";
+          e.from != null ? `  · 第 ${turnFrom + aFrom}–${turnFrom + aTo} 轮${anchor?.narrowed ? `（收窄，原 ${turnFrom + e.from}–${turnFrom + e.to}）` : ""}` : parts[0]?.dry ? `  · 整段 ${parts[0].from}–${parts[0].to}` : "";
         onLine(`    [${entity || "-"}] ${e.text}${where}`);
         continue;
       }

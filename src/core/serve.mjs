@@ -437,6 +437,7 @@ export async function serve({ once = false, dry = false, useModel = true, interv
           `新投 ${r.enqueued} 个（${r.turns} 轮），写入 ${r.written} 条，跳过 ${r.skipped}，失败 ${r.failed}` +
             (r.tokens?.prompt ? `，tokens ${r.tokens.prompt}+${r.tokens.completion}` : "")
       );
+      if (r.narrowed) log(`  · ${r.narrowed} 条原文指针按锚点收窄了（点开不用再从几十轮里找）`);
       if (r.degraded) log(`  · ${r.degraded} 个会话抽取不完整，原文留在队列里等重试`);
       if (r.trimmed) log(`  · ${r.trimmed} 场抽到预算就收手了，抽过的已写进库，剩下的轮次留在队列里`);
       if (r.unfinished) log(`  · ${r.unfinished} 场没做完（超了单会话预算或抽取不完整），留在队列里下轮继续`);

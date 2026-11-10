@@ -316,3 +316,124 @@ export function stripRawLink(s, raw = "") {
   // 属性缺失时的兜底：条目链接的锚文本固定是「原文」。
   return t.replace(/\s*原文\s+assets\/\S+\s*$/, "").trim();
 }
+
+/* ---------------- 原文锚点收窄 ---------------- */
+
+/**
+ * 从一条结论里抽出「能跟原文对上」的词。
+ *
+ * 分两类，因为它们的证明力完全不同：
+ *   - 硬锚：文件名、参数名、端口、报错串、版本号这类 ASCII 串。模型可以改写句子，
+ *     但基本不会凭空造出 `maxCharsPerCall` 或 `20261110041950`。命中了就是强证据。
+ *   - 软锚：中文二字片段。结论是改写过的，原文里不会有整句；只能靠这些碎片判断
+ *     「这段话大体是从哪几行来的」。只能当排序信号，不能当通过线。
+ *
+ * 之所以不能照搬 live-compact 的「硬行逐字校验」：那边的卡片是逐字摘录，逐字比
+ * 是自洽的；我们这里存的是模型生成的结论，逐字比必然全灭。能机械验证的只有锚点。
+ */
+export function anchorsOf(text) {
+  const clean = String(text ?? "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/assets\/\S+/g, " ") // 指针本身不算证据，同一批条目都带着同一串路径
+    .replace(/\s*原文\s*$/, "");
+  const hard = [
+    ...new Set(
+      (clean.match(/[A-Za-z0-9_./\\-]{3,}/g) ?? [])
+        .map((s) => s.toLowerCase().replace(/^[-./]+|[-./]+$/g, ""))
+        .filter((s) => s.length >= 3 && /[a-z0-9]/.test(s))
+    ),
+  ];
+  const han = clean.replace(/[^\u4e00-\u9fa5]/g, "");
+  const soft = new Set();
+  for (let i = 0; i + 1 < han.length; i++) soft.add(han.slice(i, i + 2));
+  return { hard: [...hard], soft: [...soft] };
+}
+
+/**
+ * 把「整批共用的粗指针」收窄到真正出处的那几轮。
+ *
+ * @param {string} text   条目正文（模型生成的结论）
+ * @param {Array}  turns  会话原始 turns（**本地就有**，不用下载附件），下标与 e.from/e.to 同一坐标系
+ * @param {number} from   批范围起（局部下标，含）
+ * @param {number} to     批范围止（局部下标，含）
+ * @returns {{from:number,to:number,narrowed:boolean,reason:string,rows:number}}
+ *
+ * 保守是这儿的第一原则：**收窄错了比宽更糟**。宽了顶多多读几轮，窄了会把真正的
+ * 出处排除在外，而且看不出来。所以三条硬约束任一不满足就原样返回：
+ *   1. 所有「有区分度的硬锚」命中的行必须都在窗口内（跨轮归纳就自然不收窄）；
+ *   2. 窗口要保住原范围里 80% 以上的软锚证据；
+ *   3. 真的缩了 20% 以上，且原范围至少 4 行。
+ */
+export function narrowAnchor(text, turns, from, to) {
+  const keep = (reason) => ({ from, to, narrowed: false, reason, rows: to - from + 1 });
+  if (!Number.isInteger(from) || !Number.isInteger(to) || to <= from) return keep("bad-range");
+  if (to - from + 1 < 4) return keep("already-tight");
+
+  const { hard, soft } = anchorsOf(text);
+  if (!hard.length && !soft.length) return keep("no-anchor");
+
+  const rows = [];
+  for (let k = from; k <= to; k++) {
+    const t = String(turns?.[k]?.text ?? turns?.[k]?.content ?? "");
+    rows.push({ k, text: t, low: t.toLowerCase() });
+  }
+
+  // 自适应去噪：在这一批每一行都出现的 token 没有定位力（api / json / node 之类）。
+  // 硬编码停用词表换个项目就失效，用「文档频率」更稳。
+  const df = new Map();
+  for (const h of hard) df.set(h, rows.filter((r) => r.low.includes(h)).length);
+  const informative = hard.filter((h) => df.get(h) > 0 && df.get(h) < rows.length);
+
+  for (const r of rows) {
+    r.hardHits = informative.filter((h) => r.low.includes(h)).length;
+    r.softHits = soft.reduce((n, g) => n + (r.text.includes(g) ? 1 : 0), 0);
+    r.score = r.hardHits * 3 + (soft.length ? r.softHits / soft.length : 0);
+  }
+
+  const best = rows.reduce((a, b) => (b.score > a.score ? b : a), rows[0]);
+  if (!best || best.score <= 0) return keep("no-signal");
+
+  // 以峰值行为种子，向左右扩成一个**连续窗口**，直到装下 80% 的总得分。
+  //
+  // 不取「所有硬锚命中行的包络」：同一个词在同话题会话里会反复出现（`nginx`、
+  // `node:22-alpine` 之类），几十行里零散命中十几行，包络一撑就回到整批，等于没缩
+  // （实测 160 条里只缩了 7 条）。按得分密度扩，零散命中自然留在窗口外，代价由
+  // 下面「硬锚种类一个都不能少」兜住。
+  const totalScore = rows.reduce((n, r) => n + r.score, 0);
+  const at = (k) => rows[k - from];
+  let a = best.k;
+  let b = best.k;
+  let acc = best.score;
+  while (totalScore > 0 && acc / totalScore < 0.8 && (a > from || b < to)) {
+    const l = a > from ? at(a - 1).score : -1;
+    const r = b < to ? at(b + 1).score : -1;
+    if (l >= r && l >= 0) {
+      a--;
+      acc += l;
+    } else if (r >= 0) {
+      b++;
+      acc += r;
+    } else break;
+  }
+  // 再各扩一行，点开指针能看到一问一答的上下文，不至于只剩半句话。
+  a = Math.max(from, a - 1);
+  b = Math.min(to, b + 1);
+
+  // 约束 1：每种硬锚在窗口里至少还能找到一次。不要求「命中行全在窗口内」（那被
+  // 常见词撑爆了），但种类少了就说明有关键证据被切掉，必须原样返回。
+  const winText = rows.filter((r) => r.k >= a && r.k <= b).map((r) => r.low).join("\n");
+  if (informative.some((h) => rows.some((r) => r.low.includes(h)) && !winText.includes(h))) {
+    return keep("hard-outside");
+  }
+  // 约束 2：结论里 80% 的中文片段在窗口里还得找得到（防止把跨轮归纳的结论硬塞
+  // 进两行里）。按**种类**算，不按出现次数——「记忆」「判重」这种词在同话题会话里
+  // 几十行都有，用次数当分母会把分母撑爆，真正能收窄的条目全被判成 scattered-soft。
+  const fullText = rows.map((r) => r.text).join("\n");
+  const softTotal = soft.filter((g) => fullText.includes(g)).length;
+  const softKept = soft.filter((g) => winText.includes(g)).length;
+  if (softTotal > 0 && softKept / softTotal < 0.8) return keep("scattered-soft");
+  // 约束 3：没缩多少就别折腾。
+  if (b - a + 1 > (to - from + 1) * 0.8) return keep("no-gain");
+
+  return { from: a, to: b, narrowed: true, reason: "anchored", rows: b - a + 1 };
+}

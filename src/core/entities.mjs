@@ -166,6 +166,59 @@ export function lookup(table, name) {
   return null;
 }
 
+/**
+ * 把一个话题名解析成「该去匹配哪一串名字」。
+ *
+ * 为什么要这一层：条目上的 `custom-mem-entity` 是**写入当时**的名字，实体表才是
+ * 真相。合并过的旧名字会从条目上被回填掉，但人记住的往往是旧名字——2026-11-09
+ * dsh 实测就撞在这上面：`topic="CAMP CROSS X 通勤车"`（合并链的根）返回「没找到」，
+ * 因为条目上挂的是「通勤骑行」。更糟的是这个失败**长得像「库里没有」**：空结果不报错，
+ * 调用方只会以为这个话题没内容，然后换个说法瞎猜。
+ *
+ * 所以话题过滤必须走三条路：
+ *   1. 活实体的名字 / 别名 → 直接用
+ *   2. 已合并的旧名 → 顺着 mergedInto 爬到根
+ *   3. 反向闭包 → 所有最终归到这个根的名字（含它们的别名）
+ * 第 3 条不能省：条目上可能还挂着还没回填的旧名（合并过程中断、手改了表）。
+ *
+ * 返回 `{ found, canonical, names }`。found=false 时调用方应该把它当「没有这个话题」
+ * 而不是「这个话题没内容」——两件事的修法完全不同。
+ */
+export function topicNames(table, name) {
+  const want = norm(name);
+  if (!want || !Array.isArray(table) || !table.length) return { found: false, canonical: "", names: [] };
+
+  const matches = (e) => norm(e.name) === want || (e.aliases ?? []).some((a) => norm(a) === want);
+  let root = table.find((e) => e.status !== "merged" && matches(e));
+  if (!root) {
+    // 旧名：沿 mergedInto 往上爬。加步数上限——表被手改坏成环的时候不能挂死。
+    let cur = table.find((e) => e.status === "merged" && matches(e));
+    for (let i = 0; cur && i < 8 && cur.status === "merged"; i++) {
+      cur = table.find((e) => norm(e.name) === norm(cur.mergedInto));
+    }
+    if (cur && cur.status !== "merged") root = cur;
+  }
+  if (!root) return { found: false, canonical: "", names: [] };
+
+  // 反向闭包：根自己 + 别名 + 所有归到根名下的旧名（递归，含它们的别名）。
+  const names = new Set([root.name, ...(root.aliases ?? [])]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const e of table) {
+      const home = names.has(e.name) || (e.status === "merged" && names.has(e.mergedInto));
+      if (!home) continue;
+      for (const n of [e.name, ...(e.aliases ?? [])]) {
+        if (n && !names.has(n)) {
+          names.add(n);
+          grew = true;
+        }
+      }
+    }
+  }
+  return { found: true, canonical: root.name, names: [...names].filter(Boolean) };
+}
+
 /** 按相似度找候选，降序。只留过 WEAK 线的。 */
 export function findCandidates(name, table, { limit = 3 } = {}) {
   const out = [];

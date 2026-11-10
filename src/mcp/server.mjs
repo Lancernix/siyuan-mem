@@ -48,9 +48,12 @@ export const TOOL = {
 };
 
 /** 工具结果：条目原文 + 话题/日期/原文指针。截断是为了别把上下文塞满。 */
-export function formatHits(hits, terms = []) {
+export function formatHits(hits, terms = [], hint = "") {
   if (!hits?.length) {
-    return `没找到相关记忆${terms.length ? `（检索词：${terms.join(" / ")}）` : ""}。`;
+    // 话题没解析到的时候，光说「没找到」会让人以为库里没内容。把原因和候选一起给，
+    // 模型才知道是该换个话题名，还是这个话题真的空。
+    const tail = hint ? `\n${hint}` : "";
+    return `没找到相关记忆${terms.length ? `（检索词：${terms.join(" / ")}）` : ""}。${tail}`;
   }
   const lines = [`找到 ${hits.length} 条` + (terms.length ? `（检索词：${terms.join(" / ")}）` : "") + "："];
   hits.forEach((h, i) => {
@@ -125,7 +128,7 @@ export async function handleMessage(msg, { search } = {}) {
         // include_superseded → status=""（过时的也要）；否则交给默认的 current。
         status: a.include_superseded ? "" : undefined,
       });
-      return ok(id, { content: [{ type: "text", text: formatHits(r.hits, r.terms) }] });
+      return ok(id, { content: [{ type: "text", text: formatHits(r.hits, r.terms, r.hint) }] });
     } catch (e) {
       // 错误也走 result + isError：MCP 的 error 字段是协议层错误，
       // 检索失败属于工具执行失败，模型看到原因还能换个词再试。

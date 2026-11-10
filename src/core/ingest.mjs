@@ -174,8 +174,8 @@ export function startIngest({
         days: Number.isFinite(days) && days > 0 ? days : undefined,
         status,
       });
-      log(`  检索 ${JSON.stringify(q).slice(0, 40)} → ${r.hits.length} 条`);
-      return json(res, 200, { ok: true, q, terms: r.terms, count: r.hits.length, hits: r.hits });
+      log(`  检索 ${JSON.stringify(q).slice(0, 40)} → ${r.hits.length} 条${r.hint ? "（话题没对上）" : ""}`);
+      return json(res, 200, { ok: true, q, terms: r.terms, count: r.hits.length, hits: r.hits, hint: r.hint ?? "" });
     } catch (e) {
       // 500 但带原因：边缘那边要能分清「中心坏了」和「确实没有这条」。
       log(`  检索失败：${e.message}`);

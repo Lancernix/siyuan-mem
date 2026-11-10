@@ -19,6 +19,7 @@ import { loadConfig } from "../util/config.mjs";
 import { SiYuan, resolveNotebookId } from "../util/siyuan.mjs";
 import { event } from "../util/log.mjs";
 import { stripRawLink } from "../util/raw.mjs";
+import { loadEntities, topicNames, findCandidates } from "./entities.mjs";
 
 const ATTR = {
   hash: "custom-mem-hash",
@@ -145,7 +146,32 @@ export async function searchEntries(opts = {}) {
     throw new Error(`status 只能是 current / superseded / 空，收到「${String(status).slice(0, 30)}」`);
   }
   if (status) conds.push(`ial LIKE '%${ATTR.status}="${status}"%'`);
-  if (opts.topic) conds.push(`ial LIKE '%${ATTR.entity}="${likeEsc(opts.topic)}"%' ESCAPE '\\'`);
+  // 话题过滤要走实体表解析，不能拿用户写的字面量直接匹配。
+  //
+  // 条目上的 entity 是**写入当时**的名字；人记住的常是旧名或别名。原来这里用
+  // `ial LIKE '%custom-mem-entity="<原样>"%'`，于是写「骑行穿搭」（别名）或
+  // 「CAMP CROSS X 通勤车」（合并链的根）一律返回「没找到」——而空结果不报错，
+  // 看起来就是「这个话题没有内容」。2026-11-09 dsh 拿真实话题测过，撞的就是这个。
+  let topicNote = null;
+  if (opts.topic) {
+    let resolved = { found: false, canonical: "", names: [] };
+    try {
+      resolved = topicNames(loadEntities(), opts.topic);
+    } catch {
+      // 表读不出来（文件坏了、刚被清空）就退回字面匹配，别把检索整个搞挂。
+    }
+    const names = resolved.found ? resolved.names : [opts.topic];
+    const ors = names.map((n) => `ial LIKE '%${ATTR.entity}="${likeEsc(n)}"%' ESCAPE '\\'`);
+    conds.push(`(${ors.join(" OR ")})`);
+    if (!resolved.found) topicNote = { asked: String(opts.topic), canonical: "", matched: [], known: false };
+    else
+      topicNote = {
+        asked: String(opts.topic),
+        canonical: resolved.canonical,
+        matched: resolved.canonical === String(opts.topic) ? [] : [resolved.canonical],
+        known: true,
+      };
+  }
   if (opts.project) conds.push(`ial LIKE '%${ATTR.project}="${likeEsc(opts.project)}"%' ESCAPE '\\'`);
   if (opts.type) conds.push(`ial LIKE '%${ATTR.type}="${likeEsc(opts.type)}"%' ESCAPE '\\'`);
   // 日期不在 SQL 里比：ial 里是字符串，SQL 比大小要额外解析；
@@ -222,14 +248,18 @@ export async function searchEntries(opts = {}) {
 
   // 记一次命中，按话题去重（同一轮里同一话题只算一次）。
   // 这是"这条记忆还活着"的唯一真实信号：它被想起来过。
+  //
+  // `opts.silent` 给评测用：跑一次评测集是几百条查询，全记成 memory.hit 的话，
+  // 「这条记忆被人用过」这个信号就被评测自己灌满了——测完看起来像有人在用，其实没有。
   try {
-    const topics = [...new Set(hits.map((h) => h.entity).filter(Boolean))];
+    const topics = opts.silent ? [] : [...new Set(hits.map((h) => h.entity).filter(Boolean))];
     if (topics.length) event("memory.hit", { q: String(opts.q ?? "").slice(0, 60), topics, n: hits.length });
   } catch {
     /* 日志失败不影响检索 */
   }
 
   // 零结果的查询最值得记：召回不准的时候，"它到底查过什么、什么都没查到"是唯一线索。
+  let hint = "";
   if (!hits.length) {
     event("memory.miss", {
       q: String(opts.q ?? "").slice(0, 60),
@@ -237,8 +267,27 @@ export async function searchEntries(opts = {}) {
       topic: opts.topic ?? "",
       project: opts.project ?? "",
       rows: rows.length,
+      topicKnown: topicNote ? topicNote.known : undefined,
     });
+    // 话题名根本没解析到 = 「你写的话题不在库里」，不是「这个话题没内容」。
+    // 这两件事修法完全不同，不给提示的话，人只会觉得记忆库是空的然后瞎猜名字。
+    if (topicNote && !topicNote.known) {
+      let near = [];
+      try {
+        near = findCandidates(topicNote.asked, loadEntities(), { limit: 3 }).map((c) => c.entity.name);
+      } catch {
+        /* 表读不出来就不提示 */
+      }
+      hint = near.length
+        ? `没有「${topicNote.asked}」这个话题。最接近的是：${near.join(" / ")}`
+        : `没有「${topicNote.asked}」这个话题（一个字都对不上）。`;
+      event("search.topic_unknown", { topic: topicNote.asked, near });
+    } else if (topicNote?.canonical && topicNote.canonical !== topicNote.asked) {
+      // 话题对上了、只是被合并改名过：把真实名字说出来。否则人看到「没找到」，
+      // 会以为这个话题是空的，然后继续拿旧名换着试。
+      hint = `「${topicNote.asked}」已归到「${topicNote.canonical}」，它下面没有命中这几条。`;
+    }
   }
 
-  return { terms, hits, notebook };
+  return { terms, hits, notebook, hint, topic: topicNote ?? undefined };
 }
