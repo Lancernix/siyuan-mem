@@ -17,7 +17,7 @@ import { readLog } from "../util/readers/index.mjs";
 import { event } from "../util/log.mjs";
 import { archive as archiveRaw } from "../util/raw.mjs";
 import { loadEntities, shotList, resolveEntities, convergeTopics, mergeEntities } from "./entities.mjs";
-import { judgeDuplicates } from "./dedupe.mjs";
+import { judgeDuplicates, dedupeStats } from "./dedupe.mjs";
 import { dropPending, flushPending, notePending } from "./repair.mjs";
 
 /** 建连接。注入路径要能快速放弃，写路径慢一点没关系，但别无限等。 */
@@ -227,6 +227,8 @@ export async function processQueue({
   // 偶尔一条写不进去（块索引没准备好）不该把整轮停掉。
   let writeFails = 0;
   let broken = null;
+  /** 把本轮撞停的那场会话是谁。熔断之后要靠它判断「是思源坏了还是这一场坏了」。 */
+  let brokenSession = null;
   const sum = { sessions: files.length, left: 0, written: 0, skipped: 0, replaced: 0, failed: 0, degraded: 0, raw: 0, entities: 0, pending: 0, dedupeCalls: 0, dedupeMs: 0, dead: 0, unfinished: 0, trimmed: 0, broken: false, tokens: { prompt: 0, completion: 0 } };
 
   // 先补上一轮没标完的"过时"。这件事跟模型无关，也不该等队列里有活才干——
@@ -262,6 +264,22 @@ export async function processQueue({
    * 只有"这个会话本身有问题"的失败才计数（读不动、超预算、抽取不完整）。
    * 写库失败不在这里记——那是思源的毛病，记到会话头上会让一次故障把整队扫进 dead/。
    */
+  /**
+   * 思源还能不能读。
+   *
+   * 只读、无副作用、一条 SQL。用来在写失败之后区分「库整体坏了」和「这一条写不进去」——
+   * 这个区别决定了要不要给会话记一次失败：记错了，一次故障能把整队扫进 dead/；
+   * 不记，毒会话就永远压在队头。
+   */
+  const storeReadable = async () => {
+    try {
+      const rows = await sy.sql("SELECT id FROM blocks LIMIT 1");
+      return Array.isArray(rows);
+    } catch {
+      return false;
+    }
+  };
+
   const park = (file, reason) => {
     const n = bumpAttempt(file);
     if (n < maxAttempts) {
@@ -442,8 +460,11 @@ export async function processQueue({
       const pool = known;
       if (pool.length) {
         const t0 = Date.now();
+        const callsBefore = dedupeStats().calls;
         decisions = await judgeDuplicates({ cfg, news, existing: pool, deadline: sessionDeadline });
-        sum.dedupeCalls += decisions.size ? 1 : 0;
+        // 统计**真实模型调用次数**。原来记的是「有裁决的批次」——判 keep 的时候一条裁决
+        // 都没有，计数是 0，和 dedupeStats().calls 对不上，也看不出这一轮到底花了多少调用。
+        sum.dedupeCalls += dedupeStats().calls - callsBefore;
         sum.dedupeMs += Date.now() - t0;
         for (const [idx, d] of decisions) {
           event("dedupe.decision", {
@@ -572,6 +593,7 @@ export async function processQueue({
         // 继续写只会把 5 秒超时一条条叠起来，把内存和这一轮的时间一起耗掉。
         if (writeFails >= maxConsecutiveFailures) {
           broken = `连续 ${writeFails} 次写库失败：${err.message}`;
+          brokenSession = file;
           break;
         }
       }
@@ -616,10 +638,25 @@ export async function processQueue({
 
     // 抽取到预算就收手的那种：已经抽过的那几轮从队列里摘掉，剩下的下轮接着抽。
     // 放在写完条目之后做——先摘再写，万一写库挂了，那几轮的结论就再也没人抽了。
+    //
+    // 但「放在后面」还不够：**写失败了就不能摘**。原来只看 stoppedEarly，于是
+    // 「一条都没写进去」也会把前 N 轮从队列删掉，那几轮从此没人再抽，而日志上
+    // 还写着「前 N 轮已写进库」。抽出来没写进去 = 没抽，覆盖点不能算数。
+    // 先把「还剩多少轮没抽」算出来，它跟「写库干不干净」是两件事。
+    //
+    // 上一版把这两件事塞进同一个条件（wroteCleanly 里带 writtenHere > 0），于是
+    // 零写入时既不摘轮次、也不置 trimmed，complete 就成了 true——**直接归档**，
+    // 剩下的轮次跟着文件一起消失。而零写入很常见：全被 hash 判重跳过、或者模型
+    // 这批没抽出东西。抽到点收手 + 零写入 = 剩余轮次必须留在队列里。
+    const rawTurns = payload.turns ?? payload.events ?? [];
+    const restTurns = stoppedEarly && coveredThrough != null ? rawTurns.slice(coveredThrough + 1) : [];
+    const hasRest = restTurns.length > 0;
+    // 写库干净 = 没有失败、也没熔断。不含「写了几条」——那是下面摘轮次的额外前提。
+    const wroteCleanly = failedHere === 0 && !broken;
+
     let trimmed = false;
-    if (!dry && stoppedEarly && coveredThrough != null) {
-      const rawTurns = payload.turns ?? payload.events ?? [];
-      const rest = rawTurns.slice(coveredThrough + 1);
+    if (!dry && hasRest && wroteCleanly && writtenHere > 0) {
+      const rest = restTurns;
       if (rest.length) {
         try {
           rewrite(file, { ...payload, turns: rest, events: undefined, turnFrom: turnFrom + coveredThrough + 1 });
@@ -631,7 +668,7 @@ export async function processQueue({
             left: rest.length,
             batchesLeft: remainingBatches,
           });
-          onLine(`    · 抽到点了：前 ${coveredThrough + 1} 轮已写进库，还剩 ${rest.length} 轮，下轮接着抽`);
+          onLine(`    · 抽到点了：前 ${coveredThrough + 1} 轮已写进库（${writtenHere} 条），还剩 ${rest.length} 轮，下轮接着抽`);
         } catch (e) {
           onLine(`    ! 队列改写失败，这场下轮会从头重抽：${e.message}`);
         }
@@ -648,16 +685,27 @@ export async function processQueue({
       aborted,
       trimmed,
     });
-    const complete = !aborted && failedHere === 0 && !degraded && !trimmed;
+    // 「抽到点了但还有轮次没抽」不算做完。这条原来漏了，导致零写入时照样归档。
+    const complete = !aborted && failedHere === 0 && !degraded && !trimmed && !hasRest;
     // 没做完的场次要单独报出来：失败数是按"条"算的，超预算停手的那场一条都没失败，
     // 只看 failed 会以为一切正常。
     if (!complete && !trimmed) sum.unfinished++;
     if (!dry && complete) archive(file);
     else if (!dry && !trimmed) {
       if (degraded) onLine("    · 抽取没跑完整，原文留在队列里，下次重试");
+      if (failedHere > 0 && !degraded) {
+        onLine(`    · ${failedHere} 条没写进去，这场留在队列里（不摘轮次，否则那几轮就再没人抽了）`);
+      }
       // 抽不到东西和超预算是这个会话自己的毛病，记次数；纯粹写不进去是思源的问题，
       // 不记——否则一次思源抖动就能把整队会话挨个记满、集体挪进 dead/。
       if (aborted || degraded) park(file, aborted ? "单会话超预算" : "抽取不完整");
+      else if (hasRest) {
+        // 抽到点了，但这一轮一条都没落库（全被跳过 / 模型给的条目被截光），
+        // 而后面还有轮次没抽。留在队列重试，同时记一次——否则这场会在队头
+        // 无限空转，烧的是模型的钱。
+        onLine(`    · 抽到点了，但一条都没落库，还剩 ${restTurns.length} 轮；留在队列重试`);
+        park(file, "抽到点了但一条都没写进去");
+      }
     }
 
     // 写库熔断：本轮到此为止。剩下的会话原样留在队列，下一轮重来。
@@ -667,9 +715,24 @@ export async function processQueue({
   if (broken) {
     sum.broken = true;
     sum.left = Math.max(sum.left, files.length - done);
-    event("round.broken", { reason: broken, written: sum.written });
+    event("round.broken", { reason: broken, written: sum.written, session: brokenSession ?? "" });
     onLine(`  !! 本轮熔断：${broken}`);
     onLine("  !! 思源多半卡住了（内存/磁盘），先去看容器；队列原样保留，好了会自动接着跑");
+    // 光熔断不够：队列是 FIFO，撞停的那场还压在队头，下一轮原样重来，后面永远轮不到。
+    // 但也不能一律记账——思源整体卡住时，每条会话都会撞一次，连记三轮就把全队扫进 dead/。
+    //
+    // 判据要能区分「库坏了」和「这一条写不进去」。**不能只看本轮写了多少**：
+    // 毒会话排在队首时整轮 written 恒为 0，那样它永远攒不到次数、永远卡在队头，
+    // 死信机制形同虚设（上一版就是这么错的）。所以本轮零写入时补一次**读探针**：
+    // 读得动 = 库是好的，是这一场自己的毛病；连读都不行，那才是思源的事，不记账。
+    if (brokenSession) {
+      const alive = sum.written > 0 || (await storeReadable());
+      if (alive) {
+        park(brokenSession, `写库连续失败${sum.written > 0 ? "（同一轮别的会话写得进去）" : "（读探针正常，库没坏）"}：${broken}`);
+      } else {
+        onLine("  !! 思源连读都读不动，这次不记在任何会话头上（一次故障不该把整队扫进死信）");
+      }
+    }
   }
 
   // 一轮处理完再收敛，不是每个会话跑一次。

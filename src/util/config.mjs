@@ -212,6 +212,13 @@ export function ensureDirs() {
   // 原来 mkdir 用的是默认 0777 & ~umask（一般 0755），队列里的会话内容别人随手能看。
   for (const d of [HOME_DIR, INBOX_DIR, DONE_DIR, DEAD_DIR]) {
     if (!existsSync(d)) mkdirSync(d, { recursive: true, mode: 0o700 });
+    // 已经存在的目录也要收紧：mode 只在创建时生效，老机器的 0755 目录不会自己变。
+    // 队列里是会话原文，别人同机一个 ls 就看完了。
+    try {
+      if (statSync(d).mode & 0o077) chmodSync(d, 0o700);
+    } catch {
+      /* 改不动就算了，不该为了权限把主流程挂掉 */
+    }
   }
 }
 

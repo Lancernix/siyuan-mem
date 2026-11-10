@@ -105,3 +105,23 @@ test("时间在调用中途到点：算收手，不算失败——不能把整�
     { delay: 400 },
   );
 });
+
+test("长问答被拆段时，只看了前几段不能把整轮算成覆盖", async () => {
+  // 单条问答超过 maxCharsPerCall 会被按段落切成多段，这些段共用同一对 from/to。
+  // 覆盖点按「轮」推进，只处理了第 1 段就推整轮 -> 调用方把整轮从队列摘掉，
+  // 剩下几段再也没人抽，而日志上写着「前 N 轮已写进库」。
+  const huge = ("这是一段用来把单批预算占满的填充内容。" + "\n\n").repeat(200);
+  const one = [{ q: huge, a: "好", from: 1, to: 2 }];
+  await withFakeModel(async ({ cfg }) => {
+    const total = planBatches(one, 4000).length;
+    assert.ok(total >= 2, `前提：这一轮要被拆成两批以上，实际 ${total}`);
+    // 死线设成"立刻就过"：第一批照跑（这段长问答的前几段），之后收手。
+    const r = await extractEntries(cfg, one, { useModel: true, entityShot: [], deadline: Date.now() });
+    assert.equal(r.stoppedEarly, true);
+    assert.equal(
+      r.coveredThrough,
+      null,
+      "这一轮只看了前几段，整轮不能算覆盖——算成覆盖，剩下几段就永远没人抽了",
+    );
+  });
+});

@@ -253,6 +253,25 @@ export function resolveMatch(match, ids) {
  * 这里是踩过的坑：原来用全局下标（`p.i + 1`），分块之后第二块印出的是【新 9】…，
  * 而解析端按 1..块长 校验，整块决定被判成越界丢掉——模型全判了，库里一条没生效。
  */
+
+/**
+ * 判重的运行期计数。
+ *
+ * 存在的理由很具体：判重是一条**会静默降级**的路径——失败就当「没有重复」，
+ * 于是「判重一直坏着」和「库里本来就没重复」在日志里长得一模一样。2026-11-10
+ * 就因为这个藏了三十七分钟。有了这几个数，自检和 `mem status` 才能问出
+ * 「这一小时到底判过没有」。
+ */
+const stats = { calls: 0, answered: 0, decisions: 0, covered: 0, replace: 0, failed: 0, crashed: 0, lastError: "", lastAt: 0 };
+
+export function dedupeStats() {
+  return { ...stats };
+}
+
+export function resetDedupeStats() {
+  Object.assign(stats, { calls: 0, answered: 0, decisions: 0, covered: 0, replace: 0, failed: 0, crashed: 0, lastError: "", lastAt: 0 });
+}
+
 export function renderChunk(chunk) {
   const lines = [];
   chunk.forEach((p, k) => {
@@ -265,11 +284,41 @@ export function renderChunk(chunk) {
   return lines.join("\n");
 }
 
-async function judgeChunk({ cfg, chunk, out, depth = 0 }) {
+async function judgeChunk({ cfg, chunk, out, depth = 0, deadline = Number.POSITIVE_INFINITY }) {
   const lines = renderChunk(chunk).split("\n");
 
+  /**
+   * 记一次失败。
+   *
+   * 两个口径要说清：
+   *   - **只记在 depth === 0**：一次逻辑块算一次失败。拆半重试的子块不重复计，
+   *     否则一个 8 条的块炸一次，status 上会显示成 8 次，全是虚的。
+   *   - **程序错误单独记**：ReferenceError / TypeError 是我们自己的代码写错了，
+   *     跟「这次模型没成」不是一回事。混在一起，2026-11-10 那种事就会藏起来。
+   */
+  const recordFail = (e, reason, extra = {}) => {
+    const codeErr = e instanceof ReferenceError || e instanceof TypeError;
+    if (depth === 0) {
+      stats.lastError = String(e?.message ?? "").slice(0, 120) || reason;
+      if (codeErr) stats.crashed++;
+      else stats.failed++;
+    }
+    event(codeErr ? "dedupe.crash" : "dedupe.failed", {
+      size: chunk.length,
+      reason,
+      depth,
+      error: e ? String(e?.message ?? e).slice(0, 100) : undefined,
+      stack: codeErr ? String(e?.stack ?? "").split("\n").slice(1, 4).join(" | ").slice(0, 300) : undefined,
+      ...extra,
+    });
+  };
+
+  stats.calls++;
+  stats.lastAt = Date.now();
+
+  let r;
   try {
-    const r = await chat(cfg, {
+    r = await chat(cfg, {
       messages: [
         { role: "system", content: PROMPT },
         { role: "user", content: lines.join("\n") },
@@ -278,51 +327,86 @@ async function judgeChunk({ cfg, chunk, out, depth = 0 }) {
       tag: "dedupe",
       deadline,
     });
-    if (process.env.MEM_DEBUG) console.log("[dedupe 原文]", r.text);
-    const parsed = JSON.parse(String(r.text ?? "").replace(/^\s*```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim());
-    const decisions = Array.isArray(parsed?.decisions) ? parsed.decisions : [];
-    // 这两种「没抛错但也没结果」以前全是静默的：模型换了个键名、或者回了编号但一个都
-    // 对不上，整块就当没重复——日志上跟「库里本来就没重复」长得一样。
-    if (!decisions.length) {
-      event("dedupe.failed", {
-        size: chunk.length,
-        reason: "no-decisions",
-        keys: Object.keys(parsed ?? {}).slice(0, 3).join(","),
-      });
-    }
-    let accepted = 0;
-    for (const d of decisions) {
-      // 模型看到的是块内的局部编号，先落回全局下标。
-      const n = Number(d?.new);
-      if (!Number.isInteger(n) || n < 1 || n > chunk.length) continue;
-      const p = chunk[n - 1];
-      if (out.has(p.i)) continue;
-      const ids = p.cands.map((c) => c.e.id);
-      const match = resolveMatch(d?.match, ids);
-      // 只认这条新条目自己候选里的东西：模型编一个 id 出来不能当数。
-      if (!match) continue;
-      const action = d?.action === "covered" || d?.action === "replace" ? d.action : "keep";
-      if (action !== "keep") {
-        out.set(p.i, { action, id: match });
-        accepted++;
-      }
-    }
-    if (decisions.length && accepted === 0) {
-      event("dedupe.failed", { size: chunk.length, reason: "unresolved", decisions: decisions.length });
-    }
-    return out;
   } catch (e) {
-    if (depth < 2 && chunk.length > 1) {
-      const mid = Math.ceil(chunk.length / 2);
-      await judgeChunk({ cfg, chunk: chunk.slice(0, mid), out, depth: depth + 1 });
-      await judgeChunk({ cfg, chunk: chunk.slice(mid), out, depth: depth + 1 });
-      return out;
-    }
-    // 判重失败就当没有重复：重复一条是脏，丢一条是错。但要在日志里留一条，
-    // 不然「判重一直没生效」和「库里本来就没有重复」看起来一模一样。
-    event("dedupe.failed", { size: chunk.length, error: String(e?.message ?? e).slice(0, 100) });
+    // 调用本身就没成：超时、429、5xx、或者我们自己的代码抛了。
+    //
+    // 这一类**不拆半**。拆半的本意是「一次塞太多、模型挑不过来」——那是内容问题；
+    // 端点在挂或者代码写错了，拆几份都是同一个结果，只会把调用数乘上叶子数。
+    recordFail(e, "call");
     return out;
   }
+
+  let parsed;
+  try {
+    if (process.env.MEM_DEBUG) console.log("[dedupe 原文]", r.text);
+    parsed = JSON.parse(String(r.text ?? "").replace(/^\s*```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim());
+  } catch (e) {
+    // 解析不出来，才是「这批太大、模型开始胡说」的典型表现——拆半有意义。
+    if (depth < 2 && chunk.length > 1) {
+      const mid = Math.ceil(chunk.length / 2);
+      await judgeChunk({ cfg, chunk: chunk.slice(0, mid), out, depth: depth + 1, deadline });
+      await judgeChunk({ cfg, chunk: chunk.slice(mid), out, depth: depth + 1, deadline });
+      return out;
+    }
+    recordFail(e, "not-json");
+    return out;
+  }
+
+  const decisions = Array.isArray(parsed?.decisions) ? parsed.decisions : [];
+  // 模型答了但没给出可用的 decisions，跟「模型说没重复」是两回事：前者是链路失效。
+  if (depth === 0) {
+    if (decisions.length) stats.answered++;
+    else {
+      stats.failed++;
+      stats.lastError = "模型没有返回可解析的 decisions";
+    }
+  }
+  if (!decisions.length) {
+    event("dedupe.failed", {
+      size: chunk.length,
+      reason: "no-decisions",
+      keys: Object.keys(parsed ?? {}).slice(0, 3).join(","),
+    });
+  }
+
+  // 对上候选的条数（含 keep）。判 keep 是完全正常的结果，不能算「对不上」。
+  let matched = 0;
+  try {
+  for (const d of decisions) {
+    // 模型看到的是块内的局部编号，先落回全局下标。
+    const n = Number(d?.new);
+    if (!Number.isInteger(n) || n < 1 || n > chunk.length) continue;
+    const p = chunk[n - 1];
+    if (out.has(p.i)) continue;
+    const ids = p.cands.map((c) => c.e.id);
+    const match = resolveMatch(d?.match, ids);
+    // 只认这条新条目自己候选里的东西：模型编一个 id 出来不能当数。
+    if (!match) continue;
+    matched++;
+    const action = d?.action === "covered" || d?.action === "replace" ? d.action : "keep";
+    if (action !== "keep") {
+      out.set(p.i, { action, id: match });
+      stats.decisions++;
+      if (action === "replace") stats.replace++;
+      else stats.covered++;
+    }
+  }
+  } catch (e) {
+    // 裁决循环本身出错（模型给的字段形状离谱到 map 都炸）：已经落下的裁决保留，
+    // 记一笔就走。让它冒出去会把整轮判重带挂，代价远大于少判几条。
+    recordFail(e, "decide");
+    return out;
+  }
+  if (decisions.length && matched === 0) {
+    // 模型给了裁决、但一条都没落到候选上（编号越界、id 编的）。这同样是「判重没生效」，
+    // 不能因为「模型回了东西」就算通过。
+    if (depth === 0) {
+      stats.failed++;
+      stats.lastError = `裁决一条都对不上（模型给了 ${decisions.length} 条）`;
+    }
+    event("dedupe.failed", { size: chunk.length, reason: "unresolved", decisions: decisions.length });
+  }
+  return out;
 }
 
 export async function judgeDuplicates({ cfg, news, existing, chunkSize = MAX_NEWS_PER_CALL, deadline = Number.POSITIVE_INFINITY }) {
@@ -336,7 +420,7 @@ export async function judgeDuplicates({ cfg, news, existing, chunkSize = MAX_NEW
   // 分批才恢复正常。线上一个会话通常几条到十几条，8 条一块已经够用，
   // 也留了余量给「一轮里混进一个特别长的会话」。
   for (let s = 0; s < plan.length; s += chunkSize) {
-    await judgeChunk({ cfg, chunk: plan.slice(s, s + chunkSize), out });
+    await judgeChunk({ cfg, chunk: plan.slice(s, s + chunkSize), out, deadline });
   }
   return out;
 }

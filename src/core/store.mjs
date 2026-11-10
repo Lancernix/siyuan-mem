@@ -44,8 +44,14 @@ export class Store {
   #sy;
   #cfg;
   #ids = null;
-  /** 本进程内已写过的内容哈希。SQL 索引是异步的，刚写完查不到，靠它挡同批重复。 */
-  #recent = new Set();
+  /**
+   * 本进程内已写过的内容哈希 → 块 id。
+   *
+   * 存 id 不是存 true：命中时要能**答出是哪一条**。只返回 {id:""} 的话，上层
+   * 「补做取代」的判断（要求 verdict.id !== r.id 且 r.id 非空）会被跳过——
+   * 同一进程里重复文本的 replace 补做静默失效。
+   */
+  #recent = new Map();
   /** 验过确实还在的月文档。缓存 id 不能盲信：思源里那种「文档被删了」的情况查一次就够。 */
   #monthOk = new Set();
   /**
@@ -510,7 +516,8 @@ export class Store {
     if (!text) throw new Error("空条目");
 
     const h = hashOf(text);
-    if (this.#recent.has(h)) return { id: "", duplicate: true };
+    const seen = this.#recent.get(h);
+    if (seen) return { id: seen, duplicate: true };
     const dup = await this.findDuplicate(text);
     if (dup) return { id: dup, duplicate: true };
 
@@ -541,7 +548,7 @@ export class Store {
       await this.#sy.deleteBlock(blockId).catch(() => {});
       throw e;
     }
-    this.#recent.add(h);
+    this.#recent.set(h, blockId);
     if (this.#cfg.siyuan.logChanges !== false) {
       await this.#logChange(`+ [${entry.entity || "-"}] ${text.slice(0, 40)}`);
     }

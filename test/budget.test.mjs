@@ -37,6 +37,16 @@ function run(code) {
   return { ...JSON.parse(out.trim()), home };
 }
 
+/** 在指定的 HOME 里跑一段脚本：多轮场景要复用同一个队列和 attempts.json。 */
+function runIn(home, code) {
+  const out = execFileSync(process.execPath, ["--input-type=module", "-e", code], {
+    cwd: ROOT,
+    env: { ...process.env, HOME: home },
+    encoding: "utf8",
+  });
+  return JSON.parse(out.trim());
+}
+
 /** 造一个会话包：n 轮问答，heuristic 抽取会按轮出条目。 */
 function sessionJson(n, tag = "s1") {
   // 每轮的话都要不一样：规则抽取会按文本去重，同一句话重复十遍只会出一条，
@@ -210,4 +220,154 @@ test("时间全花在抽取上、一条还没写：不许收手，先把这批�
   // 到点收手的话这里会是 0 条，等于白抽一场，下轮从头再来；三趟之后还会被当成老赖。
   assert.equal(out.written, 4, "一条都还没写的时候不能收手");
   assert.equal(out.unfinished, 0);
+});
+
+test("写库全失败时不许摘轮次：摘了那几轮就再没人抽", () => {
+  // 原来只看 stoppedEarly 就改写队列。写失败（思源抖、内容建不出块）时照样摘，
+  // 于是「前 N 轮已写进库」是一句谎话，而那几轮的条目永久缺失。
+  const out = run(`
+    import { writeFileSync, readFileSync } from "node:fs";
+    import { join } from "node:path";
+    import { processQueue } from "./src/core/jobs.mjs";
+    import { INBOX_DIR } from "./src/util/config.mjs";
+
+    writeFileSync(join(INBOX_DIR, "sess-fail.json"), ${JSON.stringify(sessionJson(6))});
+    const store = {
+      listCurrent: async () => [],
+      docIds: async () => ({ notebook: "box", months: {}, entries: "e", entities: "n", pending: "p" }),
+      ensureGroupAnchor: async () => "",
+      supersede: async () => {},
+      writeEntry: async () => {
+        throw new Error("连不上思源：超时 5000ms");
+      },
+    };
+    const cfg = { raw: { enabled: false }, extract: { minTurnChars: 10, maxCharsPerCall: 16000, maxEntriesPerBatch: 8, maxEntriesPerSession: 200 } };
+    // 抽的时候说到点了，覆盖了前 4 轮；但一条都写不进去。
+    const extract = async () => ({
+      entries: [1, 2, 3].map((i) => ({ text: "第 " + i + " 条结论", entity: "proj", type: "fact", confidence: 2, from: 0, to: 1 })),
+      mode: "model", batches: 3, stoppedEarly: true, coveredThrough: 3, remainingBatches: 2,
+    });
+    const sum = await processQueue({ useModel: false, deps: { cfg, sy: {}, store, extract }, maxSessionMs: 60_000 });
+    const rest = JSON.parse(readFileSync(join(INBOX_DIR, "sess-fail.json"), "utf8"));
+    console.log(JSON.stringify({ written: sum.written, trimmed: sum.trimmed, turns: rest.turns.length, unfinished: sum.unfinished }));
+  `);
+  assert.equal(out.written, 0, "前提：一条都没写进去");
+  assert.equal(out.trimmed, 0, "一条都没写进去，就不能摘轮次");
+  assert.equal(out.turns, 12, "6 轮 = 12 条 turn，一条都不该少");
+  assert.ok(out.unfinished >= 1, "这场要算「没做完」，不能报成正常");
+});
+
+test("一个会话把本轮撞停、但别的会话写得进去：记它一次，别让它永远压在队头", () => {
+  const out = run(`
+    import { writeFileSync, readFileSync } from "node:fs";
+    import { join } from "node:path";
+    import { processQueue } from "./src/core/jobs.mjs";
+    import { INBOX_DIR, ATTEMPTS_PATH } from "./src/util/config.mjs";
+
+    writeFileSync(join(INBOX_DIR, "sess-a-ok.json"), ${JSON.stringify(sessionJson(4, "ok"))});
+    writeFileSync(join(INBOX_DIR, "sess-b-poison.json"), ${JSON.stringify(sessionJson(4, "poison"))});
+    // 前 4 条（第一场）写得进去，之后的全部失败——模拟「某一场的条目内容建不出块」。
+    let n = 0;
+    const store = {
+      listCurrent: async () => [],
+      docIds: async () => ({ notebook: "box", months: {}, entries: "e", entities: "n", pending: "p" }),
+      ensureGroupAnchor: async () => "",
+      supersede: async () => {},
+      writeEntry: async () => {
+        n++;
+        if (n > 4) throw new Error("在建块这一步被拒（内容级错误）");
+        return { id: "blk-" + n };
+      },
+    };
+    const cfg = { raw: { enabled: false }, extract: { minTurnChars: 10, maxCharsPerCall: 16000, maxEntriesPerBatch: 8, maxEntriesPerSession: 200 } };
+    const extract = async () => ({
+      entries: [1, 2, 3, 4].map((i) => ({ text: "第 " + i + " 条结论", entity: "proj", type: "fact", confidence: 2, from: 0, to: 1 })),
+      mode: "model", batches: 1,
+    });
+    const sum = await processQueue({ useModel: false, deps: { cfg, sy: {}, store, extract }, maxSessionMs: 60_000 });
+    const att = JSON.parse(readFileSync(ATTEMPTS_PATH, "utf8"));
+    console.log(JSON.stringify({ written: sum.written, broken: sum.broken, marked: Object.keys(att) }));
+  `);
+  assert.ok(out.written >= 4, "第一场要写成功——这是「思源没坏」的证据");
+  assert.equal(out.broken, true, "第二场连着三条失败，本轮熔断");
+  assert.ok(
+    out.marked.some((f) => f.includes("poison")),
+    "撞停的那场要被记一次，否则它永远排在队头、后面的会话轮不到",
+  );
+});
+
+test("抽到点了但一条都没写进去：不许归档，剩余轮次留在队列里", () => {
+  // 上一版把「写了几条」和「写库干不干净」塞进同一个条件，于是零写入时既不摘轮次、
+  // 也不置 trimmed，complete 就成了 true——直接归档，剩下的轮次跟着文件一起消失。
+  // 零写入很常见：全被 hash 判重跳过，或者模型这批没抽出东西。
+  const out = run(`
+    import { writeFileSync, readFileSync } from "node:fs";
+    import { join } from "node:path";
+    import { processQueue } from "./src/core/jobs.mjs";
+    import { INBOX_DIR } from "./src/util/config.mjs";
+
+    writeFileSync(join(INBOX_DIR, "sess-all-dup.json"), ${JSON.stringify(sessionJson(6))});
+    // 每条都写"成功"但其实全被判成重复：written=0、skipped=n、failed=0。
+    const store = {
+      listCurrent: async () => [],
+      docIds: async () => ({ notebook: "box", months: {}, entries: "e", entities: "n", pending: "p" }),
+      ensureGroupAnchor: async () => "",
+      supersede: async () => {},
+      writeEntry: async () => ({ id: "dup-1", duplicate: true }),
+    };
+    const cfg = { raw: { enabled: false }, extract: { minTurnChars: 10, maxCharsPerCall: 16000, maxEntriesPerBatch: 8, maxEntriesPerSession: 200 } };
+    const extract = async () => ({
+      entries: [1, 2].map((i) => ({ text: "第 " + i + " 条结论", entity: "proj", type: "fact", confidence: 2, from: 0, to: 1 })),
+      mode: "model", batches: 3, stoppedEarly: true, coveredThrough: 3, remainingBatches: 2,
+    });
+    const sum = await processQueue({ useModel: false, deps: { cfg, sy: { sql: async () => [] }, store, extract }, maxSessionMs: 60_000 });
+    const rest = JSON.parse(readFileSync(join(INBOX_DIR, "sess-all-dup.json"), "utf8"));
+    console.log(JSON.stringify({ written: sum.written, skipped: sum.skipped, trimmed: sum.trimmed, turns: rest.turns.length, dead: sum.dead }));
+  `);
+  assert.equal(out.written, 0, "前提：一条都没写进去");
+  assert.equal(out.trimmed, 0, "零写入不能摘轮次");
+  assert.equal(out.turns, 12, "文件必须还在队列里，12 条 turn 一条不少");
+  assert.equal(out.dead, 0, "第一次不该直接进死信");
+});
+
+test("毒会话排在队首：读探针正常时要累计次数，跑到上限必须进 dead/", () => {
+  // 这是「用本轮统计量推断全局健康」的经典翻车：毒会话在队首时整轮 written 恒为 0，
+  // 用 written>0 当判据，它永远攒不到次数、永远卡在队头。改用读探针区分。
+  const home = mkdtempSync(join(tmpdir(), "mem-poison-"));
+  mkdirSync(join(home, ".siyuan-mem", "inbox"), { recursive: true });
+  const code = `
+    import { writeFileSync } from "node:fs";
+    import { join } from "node:path";
+    import { processQueue } from "./src/core/jobs.mjs";
+    import { INBOX_DIR } from "./src/util/config.mjs";
+
+    writeFileSync(join(INBOX_DIR, "sess-0-poison.json"), ${JSON.stringify(sessionJson(4, "poison"))});
+    const store = {
+      listCurrent: async () => [],
+      docIds: async () => ({ notebook: "box", months: {}, entries: "e", entities: "n", pending: "p" }),
+      ensureGroupAnchor: async () => "",
+      supersede: async () => {},
+      writeEntry: async () => {
+        throw new Error("建块被拒（内容级错误）");
+      },
+    };
+    const cfg = { raw: { enabled: false }, extract: { minTurnChars: 10, maxCharsPerCall: 16000, maxEntriesPerBatch: 8, maxEntriesPerSession: 200 } };
+    const extract = async () => ({
+      entries: [1, 2, 3, 4].map((i) => ({ text: "第 " + i + " 条结论", entity: "proj", type: "fact", confidence: 2, from: 0, to: 1 })),
+      mode: "model", batches: 1,
+    });
+    // 读探针能通：说明库没坏，是这一场自己的毛病。
+    const sy = { sql: async () => [] };
+    const sum = await processQueue({ useModel: false, deps: { cfg, sy, store, extract }, maxSessionMs: 60_000 });
+    console.log(JSON.stringify({ written: sum.written, broken: sum.broken, dead: sum.dead }));
+  `;
+  const runs = [];
+  for (let i = 0; i < 3; i++) runs.push(runIn(home, code));
+  assert.equal(runs[0].broken, true, "第一轮就该熔断");
+  assert.equal(runs[0].dead, 0, "第一次只记账，不直接进死信");
+  assert.equal(runs[1].dead, 0, "第二次还在攒");
+  assert.equal(runs[2].dead, 1, "第三次到上限，必须进死信——否则它永远压在队头");
+  const deadFiles = readdirSync(join(home, ".siyuan-mem", "dead"));
+  assert.ok(deadFiles.some((f) => f.endsWith(".json")), "dead/ 里要有这个会话");
+  assert.ok(deadFiles.some((f) => f.endsWith(".why")), "旁边要有原因文件");
 });

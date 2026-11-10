@@ -48,6 +48,7 @@ export function likeEsc(s) {
   return String(s).replace(/[\\%_]/g, (c) => "\\" + c).replace(/'/g, "''");
 }
 
+
 /** 把一句话拆成检索词。中文不分词，按空格和标点切，去掉太短的。 */
 export function termsOf(q) {
   return String(q ?? "")
@@ -101,6 +102,25 @@ export function scoreOf(row, terms, entity) {
 }
 
 /**
+ * 只在进程内做一次的格式自检。
+ *
+ * bodyExpr 靠一个约定：思源把正文里的 `[原文](assets/…)` 渲染成纯文本 ` 原文 assets/…`。
+ * 这是实测出来的格式，思源哪天改了渲染方式，切分就静默失效——召回悄悄变差，不报错。
+ * 所以一旦看到「有路径但切不掉」的样本，留一条事件。不修数据，只让人知道。
+ */
+let formatChecked = false;
+function checkBodyFormat(rows) {
+  if (formatChecked || !rows?.length) return;
+  formatChecked = true;
+  const sample = rows.find((r) => String(r.content ?? "").includes("assets/mem-raw/"));
+  if (sample && !String(sample.content).includes(" 原文 assets/")) {
+    event("search.format_drift", {
+      tail: String(sample.content).slice(-140),
+    });
+  }
+}
+
+/**
  * 检索。返回按相关度排好的条目。
  *
  * @param {{q:string, limit?:number, topic?:string, type?:string, status?:string, days?:number}} opts
@@ -133,32 +153,40 @@ export async function searchEntries(opts = {}) {
   const since = opts.days
     ? new Date(Date.now() - Number(opts.days) * 86400000).toISOString().slice(0, 10)
     : "";
-  // 每个词都要出现（AND）。除了正文，只认「人写的那几个属性」：话题、摘要、项目、类型。
+  // 每个词都要出现（AND）。SQL 这层只做**粗筛**，精确性交给下面的 rel > 0。
   //
-  // 原来是在整个 ial 上 LIKE，于是 `custom-mem-raw` 里那串
-  // `assets/mem-raw/laptop/workbuddy/xxx.jsonl#120-180` 也算命中——查 `Mac`、查 `jsonl`、
-  // 查任何会话 id 片段，都能把大半个库翻出来，看着有结果其实一条都不相关。
+  // 先说清这件事的边界：ial 里是 `custom-mem-entity="…" custom-mem-raw="…"`
+  // 这样一串，LIKE 的 `%` 会跨过值的收尾引号，于是「查 Mac」也能匹配到 raw 路径。
+  // 试过用 GLOB 的 `[^"]` 把匹配卡在值内部——这个 SQLite 构建不认字符类取反，
+  // 直接返回 0 条。**宁可宽，不可漏**：宽了最多多捞些候选，漏了是真丢召回。
+  //
+  // 但 content 里的路径尾巴要切掉，这个能修：条目正文是「结论 原文 assets/…」，
+  // 不切的话查 `jsonl`、查机器名会把整库捞进来（实测 1507/1507）。
+  const bodyExpr =
+    "(CASE WHEN instr(content, ' 原文 assets/') > 0 " +
+    "THEN substr(content, 1, instr(content, ' 原文 assets/') - 1) ELSE content END)";
   for (const t of terms) {
     const esc = likeEsc(t);
     const fields = [ATTR.entity, ATTR.brief, ATTR.project, ATTR.type].map(
       (k) => `ial LIKE '%${k}="%${esc}%' ESCAPE '\\'`
     );
-    conds.push(`(content LIKE '%${esc}%' ESCAPE '\\' OR ${fields.join(" OR ")})`);
+    conds.push(`(${bodyExpr} LIKE '%${esc}%' ESCAPE '\\' OR ${fields.join(" OR ")})`);
   }
 
   // 这个 LIMIT 是**取候选**的上限，不是结果数。给得太小会静默漏召回：
   // 排序和日期过滤都在内存里做，先被 SQL 砍掉的那些再也回不来。
   const rows = await sy.sql(
     `SELECT id, content, ial FROM blocks WHERE ${conds.join(" AND ")}
-       ORDER BY updated DESC LIMIT 2000`
+       ORDER BY updated DESC LIMIT 5000`
   );
+  checkBodyFormat(rows);
   if (!Array.isArray(rows)) {
     event("memory.miss", { q: String(opts.q ?? "").slice(0, 60), terms, reason: "sql-not-array" });
     return { terms, hits: [] };
   }
   // 取候选的上限被撞到就说明可能有召回被截断：排序和日期过滤都在内存里做，
   // 被 SQL 砍掉的那些再也回不来。撞了要留痕，否则"查不到"永远查不出原因。
-  if (rows.length >= 2000) event("search.truncated", { q: String(opts.q ?? "").slice(0, 60), terms, rows: rows.length });
+  if (rows.length >= 5000) event("search.truncated", { q: String(opts.q ?? "").slice(0, 60), terms, rows: rows.length });
 
   const hits = rows
     .map((r) => {

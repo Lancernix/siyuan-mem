@@ -28,6 +28,8 @@ import { HOME_DIR, ensureDirs, loadConfig, loadOffsets, offsetsOf, machineId, LO
 import { listSessions } from "../util/harness.mjs";
 import { enqueueLog, processQueue, assertModel } from "./jobs.mjs";
 import { event } from "../util/log.mjs";
+import { hasModel } from "../util/llm.mjs";
+import { checkDedupe } from "./selfcheck.mjs";
 import { SiYuan } from "../util/siyuan.mjs";
 import { startUi } from "./ui.mjs";
 import { startIngest } from "./ingest.mjs";
@@ -309,6 +311,44 @@ export async function serve({ once = false, dry = false, useModel = true, interv
       `${dry ? "，--dry 不写思源" : ""}${useModel ? "" : "，--no-model 走规则抽取"}`
   );
 
+  /**
+   * 判重自检。
+   *
+   * 探一次「判重这条链路现在通不通」：拿一对固定样本走一遍真实调用。判重失败时
+   * 的策略是「当没有重复」，所以它坏起来是完全静默的——2026-11-10 藏了三十七
+   * 分钟才被发现。启动时先问一次，之后每 N 轮再问一次（默认 6 轮，约一小时）。
+   *
+   * --no-model / --dry 时不跑：那时候本来就不该调模型。
+   */
+  const everyRounds = cfg.serve?.selfCheckEveryRounds ?? 6;
+  const selfCheckOn = useModel && !dry && everyRounds > 0;
+  const runSelfCheck = async (when) => {
+    if (!selfCheckOn) return;
+    if (!hasModel(cfg)) return;
+    // 走同一把轮次锁。判重的计数是模块级的，面板那一轮如果正在判重，哨兵看到的
+    // 「answered 增量」就混进了别人的调用——那样哨兵会假通过（或者假报错）。
+    // 撞上就跳过本次，下一次再来，比串数据干净。
+    let r;
+    try {
+      r = await beginRound("自检", () => checkDedupe(cfg));
+    } catch (e) {
+      if (/有一轮正在跑/.test(e.message)) {
+        log(`  判重自检本次跳过：${e.message}`);
+        event("selfcheck.skip", { when });
+        return;
+      }
+      throw e;
+    }
+    if (r.ok) {
+      log(`  判重自检通过（${(r.ms / 1000).toFixed(1)}s，样本判成 ${r.action || "keep"}）`);
+      event("selfcheck.ok", { when, ms: r.ms, action: r.action });
+    } else {
+      // 这条要显眼：判重坏了不会报错，只会让重复慢慢堆起来。
+      log(`  ! 判重自检失败：${r.reason}`);
+      event("selfcheck.fail", { when, reason: r.reason, ms: r.ms });
+    }
+  };
+
   // 面板跟着常驻进程起：没有它就只能 tail 日志。绑定在 127.0.0.1，没有鉴权，
   // 所以绝不绑 0.0.0.0——局域网里任何设备都能读你的记忆库。
   let ui = null;
@@ -377,9 +417,14 @@ export async function serve({ once = false, dry = false, useModel = true, interv
   let failures = 0;
   let lastError = null;
 
+  await runSelfCheck("startup");
+
   while (!stop) {
     roundNo++;
     const t0 = Date.now();
+    // 每 N 轮再探一次：跑着跑着坏掉（换了模型、网关策略变了）也能抓到。
+    // 用 (roundNo-1) % N：写成 `% N === 1` 的话，N=1 时永远不成立，等于关掉了。
+    if (selfCheckOn && roundNo > 1 && (roundNo - 1) % everyRounds === 0) await runSelfCheck(`round-${roundNo}`);
     let wait = gap;
     try {
       heartbeat(roundNo);

@@ -326,15 +326,28 @@ function paragraphs(text, budget) {
 function splitExchange(e, budget) {
   // from/to 必须跟着走：丢了它，这一轮切出来的每条结论都算不出原文指针
   // （实测切成 4 段，4 段的 from/to 全是 undefined，条目全指不回原话）。
+  //
+  // seg/segTotal 也必须跟着走，而且比 from/to 更要紧：这些段共用同一个 from/to，
+  // 抽取到预算时调用方按 coveredThrough 把「整轮」从队列摘掉。只处理了第 1 段就把
+  // 整轮标成覆盖，剩下几段再也没人抽——而且是静默的，日志上写着「前 N 轮已写进库」。
+  const qSegs = paragraphs(e.q, budget);
+  const aSegs = e.a ? paragraphs(e.a, budget) : [];
+  const segTotal = qSegs.length + aSegs.length;
   const segs = [];
-  for (const seg of paragraphs(e.q, budget)) {
-    segs.push({ q: seg, a: "", from: e.from, to: e.to, note: "（这一轮的长提问，分段）" });
-  }
-  if (e.a) {
-    for (const seg of paragraphs(e.a, budget)) {
-      segs.push({ q: "（同一轮的长回复，接上段）", a: seg, from: e.from, to: e.to, note: "（按段读）" });
-    }
-  }
+  qSegs.forEach((seg, i) => {
+    segs.push({ q: seg, a: "", from: e.from, to: e.to, seg: i + 1, segTotal, note: "（这一轮的长提问，分段）" });
+  });
+  aSegs.forEach((seg, i) => {
+    segs.push({
+      q: "（同一轮的长回复，接上段）",
+      a: seg,
+      from: e.from,
+      to: e.to,
+      seg: qSegs.length + i + 1,
+      segTotal,
+      note: "（按段读）",
+    });
+  });
   return segs;
 }
 
@@ -625,6 +638,10 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
     // 否则一条结论只能指整个会话（几十万字），等于没有原文。
     const from = batch[0]?.from;
     const to = batch[batch.length - 1]?.to;
+    // 这一批的最后一轮是不是「整轮都看过了」。被拆段的长问答，只处理了前几段时
+    // 不能把整轮算成覆盖——剩下的段还在 plan 里，却会被调用方按覆盖点摘掉。
+    const lastSeg = batch[batch.length - 1];
+    const wholeExchange = lastSeg?.seg == null || lastSeg.seg === lastSeg.segTotal;
     try {
       const r = await callModel(cfg, batch, [...sessionEntities, ...(opts.entityShot ?? [])], {
         index: idx + 1,
@@ -644,10 +661,10 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
         drafted.push({ entity: name, brief: e.brief, text: e.text });
       }
       all.push(...kept.map((e) => ({ ...e, from, to })));
-      // 只有**抽出来了**才推进覆盖点。原来在 try 之前就推进，于是预算到点掐掉的那一批
-      // 也算「抽过了」，jobs 按这个点把轮次从队列里摘掉——那几轮就再也没人抽，
-      // 而且看不出来：日志上写的是「抽到点了」。
-      coveredThrough = to ?? coveredThrough;
+      // 只有**抽出来了、而且这一轮的所有分段都看过了**才推进覆盖点。
+      // 原来在 try 之前就推进，于是预算到点掐掉的那一批也算「抽过了」，
+      // jobs 按这个点把轮次从队列里摘掉——那几轮就再也没人抽，而且看不出来。
+      if (wholeExchange) coveredThrough = to ?? coveredThrough;
     } catch (e) {
       // 时间到点被我们自己掐掉的，不算失败。
       //
@@ -666,7 +683,7 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
       lastError = e.message;
       all.push(...heuristicEntries(batch, opts.fallbackEntity ?? "", 1));
       // 退回规则抽取也算这一批处理过了：至少从里面捞了一条，指针能落到这段。
-      coveredThrough = to ?? coveredThrough;
+      if (wholeExchange) coveredThrough = to ?? coveredThrough;
     }
   }
   // 先去重（字面），再收敛（语义），最后才截断——

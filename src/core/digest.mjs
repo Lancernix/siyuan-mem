@@ -109,8 +109,10 @@ export async function collect({ sy, ids }) {
         if (!first) return;
         try {
           const ptr = parsePtr(first.raw);
-          if (!seen.has(ptr.path)) seen.set(ptr.path, await sy.getAsset(ptr.path));
-          const text = seen.get(ptr.path);
+          // 缓存的是 Promise，不是结果：`has` 之后还有 `await`，同一附件的几个分组
+          // 会同时走到这里、各拉一次。缓存 Promise 才能真的只下一次。
+          if (!seen.has(ptr.path)) seen.set(ptr.path, Promise.resolve(sy.getAsset(ptr.path)));
+          const text = await seen.get(ptr.path);
           if (!text) return;
           const head = JSON.parse(text.slice(0, text.indexOf("\n")) || "{}");
           g.project = String(head.cwd ?? "").split("/").filter(Boolean).pop() ?? "";

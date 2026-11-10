@@ -4,6 +4,7 @@ import { randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { CONFIG_PATH, INBOX_DIR, loadConfig, LOG_PATH, machineId, saveConfig, offsetsOf, loadOffsets } from "../util/config.mjs";
 import { PROVIDERS, resolveModel, hasModel, probe as probeModel, saveModelChoice, maskKey, usageToday } from "../util/llm.mjs";
+import { dedupeHealthToday } from "../core/selfcheck.mjs";
 import { formatHits, ATTR } from "../core/store.mjs";
 import { parseArgs } from "../util/args.mjs";
 import { loadRawIndex, readRange, parsePtr } from "../util/raw.mjs";
@@ -124,6 +125,15 @@ async function cmdStatus() {
   if (u.calls) {
     const cache = u.cached ? `（缓存命中 ${u.cached}）` : "";
     console.log(`今日用量     ${u.calls} 次调用，输入 ${u.prompt}${cache} / 输出 ${u.completion} tokens${u.failed ? `，失败 ${u.failed}` : ""}`);
+  }
+  // 判重坏起来是完全静默的（失败就当「没重复」），所以把账摆出来：
+  // 崩溃是我们自己的 bug，出现一次就该当事故；失败是模型/网关的噪音。
+  const dh = dedupeHealthToday();
+  if (dh.decisions || dh.failed || dh.crashed) {
+    const bits = [`今天裁决 ${dh.decisions} 条（replace ${dh.replace} / covered ${dh.covered}）`];
+    if (dh.failed) bits.push(`失败 ${dh.failed}${dh.lastError ? `（最近：${dh.lastError}）` : ""}`);
+    if (dh.crashed) bits.push(`崩溃 ${dh.crashed} 次（程序错误，要查）${dh.lastError ? `：${dh.lastError}` : ""}`);
+    console.log(`判重         ${bits.join("，")}`);
   }
   console.log(`待处理       ${pending().length} 个会话在队列里`);
   console.log(`服务         ${svcLine}`);
@@ -664,10 +674,12 @@ async function cmdCenter(args, flags) {
     saveConfig({ ingest: { enabled: true, bind, port, token } });
     const host = bind === "0.0.0.0" ? lanAddresses()[0] ?? "<这台机器的地址>" : bind;
     console.log(`已写入 ${CONFIG_PATH}`);
-    console.log(`  接收端 ${bind}:${port}  token ${maskKey(token)}`);
+    console.log(`  接收端 ${bind}:${port}  token ${maskKey(token)}（完整值在 ${CONFIG_PATH}）`);
     console.log(`  重启 mem serve 生效：mem service install（或 kill 掉再起）`);
     console.log(`\n在边缘机器上：`);
-    console.log(`  mem push --to https://<你的域名> --token ${token} --once`);
+    // 不打印完整 token：终端记录、shell history、截图都会带走写入权限。
+    // 上一行已经给了脱敏值，要看全的就去看 config.json（0600）。
+    console.log(`  mem push --to https://<你的域名> --token <上面那个 token> --once`);
     console.log(`\n同一台机器上自测可以先写 http://${host}:${port}，但这是写入通道：`);
     console.log(`公网暴露必须走 HTTPS 反向代理（明文 HTTP 等于把 token 交出去），token 当密码对待。`);
     return;

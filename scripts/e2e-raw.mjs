@@ -4,7 +4,7 @@
  * 跑在独立的测试笔记本里，不碰正式库；结束删掉整本。
  * 不调模型（没 key），所以抽取用不到，条目是手写进去的。
  */
-import { loadConfig } from "../src/util/config.mjs";
+import { loadConfig, saveConfig, loadState, saveState } from "../src/util/config.mjs";
 import { SiYuan } from "../src/util/siyuan.mjs";
 import { Store, ATTR } from "../src/core/store.mjs";
 import { archive, readRange, knownParts, loadRawIndex, saveRawIndex } from "../src/util/raw.mjs";
@@ -49,6 +49,10 @@ console.log("1. 建测试笔记本");
 // 整段包一层 try/finally：中途任何一条断言抛错（比如思源突然连不上），
 // 测试笔记本也要删掉。原来清理写在最后一行，一抛错就跳过，于是每次失败都在
 // 思源里留一本"99-记忆测试"——下一次 init 会复用它，测试之间互相污染。
+// 备份正式库的 notebookId：store.init() 会把解析到的 id 持久化进 ~/.siyuan-mem/config.json，
+// 而这里用的是 99-记忆测试。不备份的话，跑完测试、笔记本被删，真实配置里就留了一个
+// 失效 id，下次正式运行直接报「笔记本 id 变了」——测试把生产配置改了。
+const notebookIdBefore = loadConfig().siyuan?.notebookId ?? "";
 let nbId = "";
 try {
 const ids = await store.init();
@@ -159,6 +163,23 @@ ok("原条目不受影响", after?.[ATTR.entity] === "风盾500");
   console.log("\n清理");
   if (nbId) {
     await sy.removeNotebook(nbId).catch((e) => console.log(`  删测试笔记本失败：${e.message}`));
+  }
+  // 把正式库的 id 写回去。哪怕测试中途炸了，也不能留下一个指向已删笔记本的配置。
+  try {
+    saveConfig({ siyuan: { notebookId: notebookIdBefore } });
+  } catch (e) {
+    console.log(`  恢复 notebookId 失败（手工改 ~/.siyuan-mem/config.json）：${e.message}`);
+  }
+  // state.json 里也会留一个 `<baseUrl>#99-记忆测试` 的键（文档 id 缓存）。不影响生产，
+  // 但重复跑会带着上一轮的陈旧 id，删掉更干净。
+  try {
+    const state = loadState();
+    for (const k of Object.keys(state)) {
+      if (k.endsWith(`#${NB}`)) delete state[k];
+    }
+    saveState(state);
+  } catch {
+    /* 清不掉不影响结论 */
   }
 }
 console.log(`\n通过 ${pass}，失败 ${fail}`);
