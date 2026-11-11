@@ -187,16 +187,45 @@ test("召回健康度按来源分开：agent 在用还是人在调试，不能�
     [
       { ev: "memory.hit", source: "mcp", n: 2 },
       { ev: "memory.hit", source: "cli", n: 1 },
-      { ev: "memory.miss", source: "mcp", q: "不存在的东西" },
-      { ev: "memory.miss", source: "api", q: "别的机器查的" },
+      { ev: "memory.miss", source: "mcp", q: "不存在的东西", reason: "no-match" },
+      { ev: "memory.miss", source: "api", q: "别的机器查的", reason: "no-match" },
+      // 旧的日志没有 reason：它们都是真查过且没命中的，归 miss。
+      { ev: "memory.miss", source: "api", q: "旧格式" },
     ]
       .map((e) => JSON.stringify(e))
       .join("\n") + "\n"
   );
   const h = recallHealthToday(day);
   assert.equal(h.hit, 2);
-  assert.equal(h.miss, 2);
-  assert.deepEqual(h.bySource.mcp, { hit: 1, miss: 1 });
-  assert.deepEqual(h.bySource.cli, { hit: 1, miss: 0 });
-  assert.deepEqual(h.bySource.api, { hit: 0, miss: 1 });
+  assert.equal(h.miss, 3);
+  assert.equal(h.failed, 0);
+  assert.equal(h.trivial, 0);
+  assert.deepEqual(h.bySource.mcp, { hit: 1, miss: 1, failed: 0, trivial: 0 });
+  assert.deepEqual(h.bySource.cli, { hit: 1, miss: 0, failed: 0, trivial: 0 });
+  assert.deepEqual(h.bySource.api, { hit: 0, miss: 2, failed: 0, trivial: 0 });
+});
+
+test("后端故障和「没问出词」不算空手：这个指标只该反映召回准不准", () => {
+  // 混进去的话，思源抖一次「空手率」就涨一次，人就会去调一个没坏的算法。
+  const day = "2099-01-06";
+  const dir = join(process.env.HOME, ".siyuan-mem", "logs");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, `${day}.jsonl`),
+    [
+      { ev: "memory.miss", source: "mcp", q: "部署计划", reason: "sql-not-array" },
+      { ev: "memory.miss", source: "cli", q: "部署计划", reason: "backend-error" },
+      { ev: "memory.miss", source: "cli", q: "怎么样", reason: "no-meaningful-terms" },
+      { ev: "memory.miss", source: "cli", q: "？？？", reason: "no-terms" },
+      { ev: "memory.miss", source: "mcp", q: "真的没有", reason: "no-match" },
+    ]
+      .map((e) => JSON.stringify(e))
+      .join("\n") + "\n"
+  );
+  const h = recallHealthToday(day);
+  assert.equal(h.miss, 1, "只有真查过没有的才算空手");
+  assert.equal(h.failed, 2);
+  assert.equal(h.trivial, 2);
+  assert.deepEqual(h.bySource.mcp, { hit: 0, miss: 1, failed: 1, trivial: 0 });
+  assert.deepEqual(h.bySource.cli, { hit: 0, miss: 0, failed: 1, trivial: 2 });
 });

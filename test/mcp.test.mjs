@@ -142,3 +142,26 @@ test("格式：长正文截断，摘要和正文相同时不重复两遍", () =>
   const same = formatHits([{ entity: "e", brief: "同一句", text: "同一句" }]);
   assert.equal(same.split("同一句").length - 1, 1);
 });
+
+test("检索层报 failed：回 isError，不能说「没找到」", async () => {
+  // 后端返回异常时 hits 是空的。要是走正常的 formatHits，模型会得到
+  // 「没找到相关记忆」，然后当成「库里没记过」去回答用户——这是比报错更糟的错。
+  const r = await handleMessage(
+    { jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "memory_search", arguments: { query: "部署计划" } } },
+    { search: async () => ({ hits: [], terms: ["部署", "计划"], failed: true, reason: "sql-not-array" }) }
+  );
+  assert.equal(r.result.isError, true);
+  assert.match(r.result.content[0].text, /检索失败/);
+  assert.match(r.result.content[0].text, /不代表没记过/);
+  assert.doesNotMatch(r.result.content[0].text, /没找到/);
+});
+
+test("没问出词：明说「换个说法」，别让人继续换近义词", async () => {
+  const r = await handleMessage(
+    { jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "memory_search", arguments: { query: "怎么样" } } },
+    { search: async () => ({ hits: [], terms: ["怎么", "么样"], reason: "no-meaningful-terms" }) }
+  );
+  const text = r.result.content[0].text;
+  assert.match(text, /没有能定位的词/);
+  assert.match(text, /换个具体的说法/);
+});

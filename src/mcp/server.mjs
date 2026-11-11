@@ -17,6 +17,7 @@
  *    就是一句人话，原样给就好。
  */
 import { createInterface } from "node:readline";
+import { emptyText, failureText } from "../core/search-reason.mjs";
 
 const PROTOCOL = "2024-11-05";
 const SERVER = { name: "siyuan-mem", version: "0.1.0" };
@@ -53,11 +54,15 @@ export const TOOL = {
 };
 
 /** 工具结果：条目原文 + 话题/日期/原文指针。截断是为了别把上下文塞满。 */
-export function formatHits(hits, terms = [], hint = "") {
+export function formatHits(hits, terms = [], hint = "", reason = "") {
   if (!hits?.length) {
     // 话题没解析到的时候，光说「没找到」会让人以为库里没内容。把原因和候选一起给，
     // 模型才知道是该换个话题名，还是这个话题真的空。
     const tail = hint ? `\n${hint}` : "";
+    // 「问了句废话」也单独说：模型看到「没找到」只会换个近义词再试，
+    // 告诉它「这几个词不承载信息」才能让它真的换说法。
+    const why = emptyText(reason, terms);
+    if (why) return `没找到相关记忆。${why}${tail}`;
     return `没找到相关记忆${terms.length ? `（检索词：${terms.join(" / ")}）` : ""}。${tail}`;
   }
   const lines = [`找到 ${hits.length} 条` + (terms.length ? `（检索词：${terms.join(" / ")}）` : "") + "："];
@@ -135,7 +140,15 @@ export async function handleMessage(msg, { search } = {}) {
         // 来源分开记：agent 真的在用，还是人在 CLI 里调试，看日志分得清。
         source: "mcp",
       });
-      return ok(id, { content: [{ type: "text", text: formatHits(r.hits, r.terms, r.hint) }] });
+      // 后端坏了不能回「没找到」：模型会把它当成「库里没记过」直接回答用户。
+      // isError 让客户端知道这是工具失败，值得重试或报警。
+      if (r.failed) {
+        return ok(id, {
+          content: [{ type: "text", text: `检索失败：${failureText(r.reason, r.detail)}。这不代表没记过，稍后重试。` }],
+          isError: true,
+        });
+      }
+      return ok(id, { content: [{ type: "text", text: formatHits(r.hits, r.terms, r.hint, r.reason) }] });
     } catch (e) {
       // 错误也走 result + isError：MCP 的 error 字段是协议层错误，
       // 检索失败属于工具执行失败，模型看到原因还能换个词再试。

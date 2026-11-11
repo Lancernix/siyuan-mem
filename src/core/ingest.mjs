@@ -16,6 +16,7 @@ import http from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { drop, ingestKey, pending } from "./inbox.mjs";
 import { searchEntries } from "./search.mjs";
+import { failureText } from "./search-reason.mjs";
 
 function json(res, code, body) {
   const s = JSON.stringify(body);
@@ -175,6 +176,12 @@ export function startIngest({
         status,
         source: "api",
       });
+      // 后端故障必须回 5xx：边缘那边才会显示「检索失败」并重试，而不是把
+      // 「中心坏了」当成「确实没有这条记忆」。
+      if (r.failed) {
+        log(`  检索失败：${r.reason}${r.detail ? `（${String(r.detail).slice(0, 80)}）` : ""}`);
+        return json(res, 503, { error: `检索失败：${failureText(r.reason, r.detail)}` });
+      }
       log(`  检索 ${JSON.stringify(q).slice(0, 40)} → ${r.hits.length} 条${r.hint ? "（话题没对上）" : ""}`);
       return json(res, 200, { ok: true, q, terms: r.terms, count: r.hits.length, hits: r.hits, hint: r.hint ?? "" });
     } catch (e) {

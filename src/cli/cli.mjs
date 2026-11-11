@@ -15,6 +15,7 @@ import { readDays, stats as logStats, dayOf } from "../util/log.mjs";
 import { normalizeTurns, promptState, toExchanges } from "../core/extract.mjs";
 import { drop, pending, readSession } from "../core/inbox.mjs";
 import { searchEntries } from "../core/search.mjs";
+import { emptyText, failureText } from "../core/search-reason.mjs";
 import { remoteSearch } from "../util/remote.mjs";
 import { readLog, readJsonLines, auditMessages, HARNESS_NAMES } from "../util/readers/index.mjs";
 import { listSessions, summarize } from "../util/harness.mjs";
@@ -139,11 +140,21 @@ async function cmdStatus() {
   // 召回被用了多少次、空手多少次，按来源分开摆出来。这是「记忆到底有没有
   // 被想起来」的唯一真实信号，也是判断「要不要继续调召回」的唯一依据。
   const rh = recallHealthToday();
-  if (rh.hit || rh.miss) {
+  if (rh.hit || rh.miss || rh.failed || rh.trivial) {
     const parts = Object.entries(rh.bySource)
-      .sort((a, b) => b[1].hit + b[1].miss - (a[1].hit + a[1].miss))
+      .sort((a, b) => {
+        const n = (v) => v.hit + v.miss + v.failed + v.trivial;
+        return n(b[1]) - n(a[1]);
+      })
       .map(([k, v]) => `${k} ${v.hit}${v.miss ? `（空手 ${v.miss}）` : ""}`);
-    console.log(`召回         ${rh.hit} 次命中，${rh.miss} 次空手 — ${parts.join("，")}`);
+    // 后两种**不计入空手**：一个该去修后端，一个该换说法，都不是召回不准。
+    // 把它们混进空手率，「要不要继续调召回」这个判断就被灌水了。
+    const other = [rh.failed ? `后端失败 ${rh.failed}` : "", rh.trivial ? `没问出词 ${rh.trivial}` : ""]
+      .filter(Boolean)
+      .join("，");
+    console.log(
+      `召回         ${rh.hit} 次命中，${rh.miss} 次空手${other ? `（另 ${other}，不计入空手）` : ""} — ${parts.join("，")}`
+    );
   }
   console.log(`待处理       ${pending().length} 个会话在队列里`);
   console.log(`服务         ${svcLine}`);
@@ -1042,12 +1053,29 @@ async function cmdSearch(args, flags) {
         status: flags.all ? "" : undefined,
         source: "cli",
       });
+  // 先看 failed 再看 --json：JSON 也要非零退出，`mem search … && …` 不能把
+  // 后端故障当成成功；脚本要的是「别静默继续」。
   if (flags.json) {
     console.log(JSON.stringify(r, null, 2));
+    if (r.failed) process.exitCode = 1;
+    return;
+  }
+  // **后端故障不是「没记过」**。渲染成「没找到」比报错更糟：它看起来像答案，
+  // 人不会去重试，只会以为这个库是空的。2026-11-11 第十三轮复审的 P2。
+  if (r.failed) {
+    console.error(`检索失败：${failureText(r.reason, r.detail)}。这不代表没记过——后端出错时一条也查不出来。`);
+    process.exitCode = 1;
     return;
   }
   if (!r.hits.length) {
-    console.log(`没找到。检索词：${r.terms.join(" / ") || "（空）"}${r.remote ? `\n（查的是远端 ${r.remote}）` : ""}`);
+    // 「查不到」和「问了句废话」要分开说：后者换个说法就有救。
+    const why = emptyText(r.reason, r.terms);
+    console.log(
+      why
+        ? `没找到。${why}`
+        : `没找到。检索词：${r.terms.join(" / ") || "（空）"}`
+    );
+    if (r.remote) console.log(`（查的是远端 ${r.remote}）`);
     if (r.hint) console.log(r.hint);
     return;
   }

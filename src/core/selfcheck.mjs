@@ -13,6 +13,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { judgeDuplicates, pickCandidates, dedupeStats } from "./dedupe.mjs";
+import { isBackendFailure, isTrivialQuery } from "./search-reason.mjs";
 import { dayOf, pathOf } from "../util/log.mjs";
 
 /**
@@ -97,9 +98,13 @@ export async function checkDedupe(cfg, { deadlineMs = 90_000 } = {}) {
  * 从数据上根本回答不了「这东西到底有没有被用起来」。
  *
  * 空手率比分档命中率更能反映真实体验：agent 查一次空手，它就只能当没记过。
+ *
+ * 但只有「真的查了、真的没有」才算空手。后端挂了和「问了句废话」分开数：
+ * 前面那个该去修后端，后面那个该换说法——混进空手率，这个指标就不能用来
+ * 判断「要不要继续调召回」了。
  */
 export function recallHealthToday(day = dayOf()) {
-  const out = { hit: 0, miss: 0, bySource: {} };
+  const out = { hit: 0, miss: 0, failed: 0, trivial: 0, bySource: {} };
   const file = pathOf(day);
   if (!existsSync(file)) return out;
   for (const line of readFileSync(file, "utf8").split("\n")) {
@@ -112,13 +117,16 @@ export function recallHealthToday(day = dayOf()) {
     }
     if (e.ev !== "memory.hit" && e.ev !== "memory.miss") continue;
     const src = e.source || "unknown";
-    if (!out.bySource[src]) out.bySource[src] = { hit: 0, miss: 0 };
+    if (!out.bySource[src]) out.bySource[src] = { hit: 0, miss: 0, failed: 0, trivial: 0 };
     if (e.ev === "memory.hit") {
       out.hit++;
       out.bySource[src].hit++;
     } else {
-      out.miss++;
-      out.bySource[src].miss++;
+      // 三分类：真的没查到 / 后端坏了 / 没问出东西。旧的日志没有 reason，
+      // 归到 miss——它们都是真查过且没命中的。
+      const kind = isBackendFailure(e.reason) ? "failed" : isTrivialQuery(e.reason) ? "trivial" : "miss";
+      out[kind]++;
+      out.bySource[src][kind]++;
     }
   }
   return out;

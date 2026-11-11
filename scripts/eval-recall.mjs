@@ -55,6 +55,10 @@ async function rankOf(question, expect, kind) {
   const t0 = Date.now();
   // silent：评测不能往 memory.hit 里灌数，否则「这条记忆被人用过」的信号就假了。
   const r = await searchEntries({ q: question, limit, silent: true });
+  // **后端坏了不能产出基线表**。故障时每条查询都空手，跑出来是一张 0% 的表，
+  // 看起来像「算法全面回归」——然后人就去调一个没坏的算法（第十四轮复审 P2）。
+  // 宁可中止：没有数字，比有一张假的数字好。
+  if (r.failed) throw new Error(`检索层报故障：${r.reason}${r.detail ? `（${String(r.detail).slice(0, 120)}）` : ""}`);
   const hits = (r.hits ?? []).map((h) => h.id);
   const ms = Date.now() - t0;
   if (kind === "negative") return { rank: hits.length === 0 ? 1 : -1, hits, ms, n: hits.length };
@@ -65,7 +69,7 @@ async function rankOf(question, expect, kind) {
   return { rank: 0, hits, ms };
 }
 
-for (const c of cases) {
+async function runCase(c) {
   const kind = c.kind ?? "medium";
   if (!byKind.has(kind)) byKind.set(kind, { n: 0, plain: 0, keyed: 0, mrrPlain: 0, mrrKeyed: 0 });
   const s = byKind.get(kind);
@@ -86,6 +90,15 @@ for (const c of cases) {
     s.mrrKeyed += 1 / keyed.rank;
   }
   rows.push({ ...c, kind, plain, keyed, ms: plain.ms });
+}
+
+// 后端故障直接中止（见 rankOf）：宁可没有数字，也不要一张 0% 的假基线。
+try {
+  for (const c of cases) await runCase(c);
+} catch (e) {
+  console.error(`\n评测中止：${e.message}`);
+  console.error("这不是召回变差——后端出了问题时，任何查询都会返回空。修好后重跑。");
+  process.exit(2);
 }
 
 const pct = (a, b) => (b ? `${((a / b) * 100).toFixed(0)}%` : "-");

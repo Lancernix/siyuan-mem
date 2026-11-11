@@ -158,17 +158,95 @@ export function queryPlan(q) {
   // 带内部标点（NO.9 / node:22-alpine / burn_tokens / step-image-edit）、
   // 大小写混排（PostgreSQL / MiniWMS）、或全大写（WMS / SSH / LLM）。
   const anchors = terms.filter(isAnchorTerm);
+  // 日期（年 / 年月 / 完整日期）是**范围限定**，不是主题词：正文里不一定写日期
+  // （条目靠 date 属性记着），而且把它算进门槛，任何一条 2026 年记下的条目都能靠
+  // 「2026」过闸——查「2026 年的部署计划」会捞回一堆只在当年记过、跟部署无关的东西。
+  // 所以门槛只数非日期的词，日期单独当过滤器（见 searchEntries 里的 dateOk）。
+  const dates = strong.filter(isDateTerm);
+  const words = strong.filter((t) => !isDateTerm(t));
   // 门槛按「有没有标识符」分档：
   //   有标识符 → 只要 1 个词，因为标识符本身已经是硬约束（anchorsHit 会验它必须在）；
   //   没标识符 → 2 个词，靠词共现挡虚词灌水。
   //
   // 原来一律 min(2, strong.length)，两个词的短查询（"Vite 8 升级"）就等于 AND：
   // 「升级」在正文里写成「成套升」，一个词对不上就整条空手。有锚时不该这么卡。
-  const minShould = anchors.length ? 1 : Math.min(2, Math.max(1, strong.length));
+  const minShould = words.length ? (anchors.length ? 1 : Math.min(2, Math.max(1, words.length))) : 1;
   // 一个实词都没有（「怎么样」「我的的」这类）：不许退回虚词 + 门槛 1，
   // 那等于把闸门整个关掉，任何提到这些虚词的条目都能进来。交给调用方判低置信。
   const meaningful = strong.length > 0 || anchors.length > 0;
-  return { terms, strong, anchors, minShould, meaningful };
+  return { terms, strong, anchors, dates, words, minShould, meaningful };
+}
+
+/**
+ * 日期形态的检索词：年 / 年月 / 完整日期（`2026`、`2026-11`、`2026-11-06`）。
+ *
+ * 为什么要整段认：这些词唯一可能落的地方是 `date` 属性，正文里通常不重复写。
+ * 上一版只认四位年份，于是 `2026-11-06` 被当成普通锚——是锚但不查 date，
+ * 候选池直接空（2026-11-11 第十四轮复审实测 0 条）。
+ *
+ * 只认 19xx / 20xx 开头且整词匹配：`NO.2026` 是型号（termsOf 会整体保留成
+ * `NO.2026`，不匹配），`2026-11-06T10:00` 这类时间戳也不匹配——宁可当普通词，
+ * 也别把型号误当日期去查 date。
+ */
+export function isDateTerm(t) {
+  return /^(19|20)\d{2}([-/]\d{1,2}([-/]\d{1,2})?)?$/.test(String(t ?? ""));
+}
+
+/** 日期统一成 `2026-11-06` 再比：库里存的是短横线，用户可能写 `2026/11/06`。 */
+const dateNorm = (t) => String(t).replace(/[/.]/g, "-");
+
+/**
+ * 条目日期是否落在查询日期范围内：`2026` 管全年、`2026-11` 管整月、`2026-11-06` 管当天。
+ *
+ * **不能拿字符串 startsWith 比**：库里补零存 `2026-01-15`，`"2026-01-15".startsWith("2026-1")`
+ * 是 false，而 `"2026-11-06".startsWith("2026-1")` 是 true——查 1 月会返回 11、12 月，
+ * 真正 1 月的反而漏掉（第十五轮复审 P3）。按段比数值，`01` 和 `1` 就是同一个月。
+ */
+/**
+ * 日期 → 数字段。**日期比较的唯一入口**：内存比较、SQL 拼串、正文兜底都从这里走，
+ * 免得一处补零一处不补（连续三轮同一形状的 bug 就是这么来的）。
+ */
+export function dateSegments(v) {
+  const parts = dateNorm(v).split("-").filter(Boolean).map(Number);
+  return parts.length && parts.every((n) => Number.isFinite(n)) ? parts : [];
+}
+
+export function dateMatches(date, term) {
+  const d = dateSegments(date);
+  const t = dateSegments(term);
+  if (!d.length || !t.length) return false;
+  return t.every((n, i) => i < d.length && d[i] === n);
+}
+
+/**
+ * 日期词 → SQL LIKE 用的写法。库里的 `date` 是 `toISOString().slice(0,10)`，月日补零，
+ * 所以 `2026-1` 必须变 `2026-01` 才匹配得上；不补零会「测试绿、线上空手」。
+ *
+ * 同时给出不补零的写法：条目日期要是模型给的、没补零，补零那份就漏了。
+ * 多出来的候选由内存里的 `dateMatches` 收，符合「宁可宽，不可漏」。
+ */
+export function dateLikePatterns(term) {
+  const t = dateSegments(term);
+  if (!t.length) return [];
+  const pad = (n) => String(n).padStart(2, "0");
+  const padded = [t[0], t[1] == null ? null : pad(t[1]), t[2] == null ? null : pad(t[2])]
+    .filter((v) => v !== null)
+    .join("-");
+  const raw = t.join("-");
+  return padded === raw ? [padded] : [padded, raw];
+}
+
+/**
+ * 日期是不是真的写在正文里（少数条目会重复写一遍）。
+ *
+ * 不能直接 `includes`：正文里的 `2026-11-11` 包含子串 `2026-1`，查「2026 年 1 月」
+ * 会命中一堆 11 月的条目——和 date 属性那边同一个前缀坑。要求匹配两侧都不是数字。
+ */
+export function dateInText(hay, term) {
+  // 先把正文里的日期串抓出来，再逐段按数值比：`2026-01-05` 和 `2026-1` 是同一个月，
+  // 而 `2026-11-11` 只是**包含** `2026-1` 这个子串，不该算命中。
+  const tokens = dateNorm(hay).match(/(?<!\d)(?:19|20)\d{2}(?:-\d{1,2}){0,2}/g) ?? [];
+  return tokens.some((t) => dateMatches(t, term));
 }
 
 /**
@@ -190,12 +268,17 @@ export function isAnchorTerm(t) {
 /**
  * 一条候选是否满足「标识符必须在」这道闸。
  *
- * 单独抽出来是因为**日期也算**：`2026` 当锚是对的（用户就是想按年份找），
- * 但日期不在正文里，只用 text/brief/entity 比对会让年份查询必然空手。
- * 抽成函数才能把这条钉进测试——写在 map 里的话，改回 `hay` 测试也发现不了。
+ * **日期锚不参加这道闸。** 它曾经参加，后果是 `亚狮龙 NO.9 2026 价格` 里那个
+ * `2026` 单独就满足了 `.some()`——「NO.9 必须在」静默失效，NO.5 的条目照样能进来。
+ * 日期已经由 `dateOk` 单独管（它比的是 date 属性，还带月份/日级的范围），
+ * 在这里再算一次只会稀释真正起区分作用的标识符（第十五轮复审 P2）。
+ *
+ * 锚全被剔掉（纯日期查询）时返回 true：没有标识符就不设约束，日期由 dateOk 负责。
  */
-export function entryMatchesAnchors({ text, brief, entity, date }, anchors) {
-  return anchorsHit(`${text} ${brief} ${entity} ${date ?? ""}`, anchors);
+export function entryMatchesAnchors({ text, brief, entity }, anchors) {
+  const real = (anchors ?? []).filter((a) => !isDateTerm(a));
+  if (!real.length) return true;
+  return anchorsHit(`${text} ${brief} ${entity}`, real);
 }
 
 /** 查询里有标识符时，必须至少命中一个；没有标识符就不设这条约束。 */
@@ -285,20 +368,39 @@ function checkBodyFormat(rows) {
  * @param {{q:string, limit?:number, topic?:string, type?:string, status?:string, days?:number}} opts
  */
 export async function searchEntries(opts = {}) {
+  const { terms, strong, anchors, dates, minShould, meaningful } = queryPlan(opts.q);
+  const limit = Math.min(Math.max(Number(opts.limit) || 8, 1), 50);
+  // 「没问出词」也要留一条事件。不然 selfcheck 的三分类永远见到 0：指标上看起来
+  // 「没人问过废话」，实际上只是没人记（2026-11-11 第十四轮复审实测 0 条）。
+  const earlyExit = (reason, shown) => {
+    if (!opts.silent)
+      event("memory.miss", {
+        q: String(opts.q ?? "").slice(0, 60),
+        terms: shown,
+        source: opts.source ?? "unknown",
+        reason,
+      });
+    return { terms: shown, hits: [], reason };
+  };
+  // 早退放在碰后端**之前**：没有可检索的东西时，思源是不是活着都不影响答案，
+  // 先连一遍只会在后端故障时把「你问了句废话」伪装成「检索失败」。
+  // 全是标点/空白时没有检索词。这时候不能往下走：SQL 里没有任何 LIKE 条件，
+  // 结果会变成"按更新时间排序的最新 N 条"，看着有结果，其实一条都不相关。
+  if (!terms.length) return earlyExit("no-terms", []);
+  // 整句全是虚词（「怎么样」「我的」这类）：没有任何可定位的证据。
+  // 这时候返回任何东西都是瞎猜——「查不到」和「问了句废话」是两件事，说清楚。
+  // terms 留着：调用方要把「你问的这几个词都不承载信息」说给人看，清空就只剩
+  // 一句「（检空）」，等于什么也没解释。
+  if (!meaningful) return earlyExit("no-meaningful-terms", terms);
+
   const cfg = loadConfig();
   const sy = new SiYuan({ baseUrl: cfg.siyuan.baseUrl, token: cfg.siyuan.token, timeoutMs: 8000 });
   const notebook = await resolveNotebookId(sy, cfg);
-  const { terms, strong, anchors, minShould, meaningful } = queryPlan(opts.q);
-  const limit = Math.min(Math.max(Number(opts.limit) || 8, 1), 50);
-  // 全是标点/空白时没有检索词。这时候不能往下走：SQL 里没有任何 LIKE 条件，
-  // 结果会变成"按更新时间排序的最新 N 条"，看着有结果，其实一条都不相关。
-  if (!terms.length) return { terms: [], hits: [], reason: "no-terms" };
-  // 整句全是虚词（「怎么样」「我的」这类）：没有任何可定位的证据。
-  // 这时候返回任何东西都是瞎猜——「查不到」和「问了句废话」是两件事，说清楚。
-  if (!meaningful) return { terms: [], hits: [], reason: "no-meaningful-terms" };
   // SQL 层用哪组词做 OR 粗筛。走到这里一定至少有一组可用：要么有强词，
   // 要么有标识符（有锚时 gate 用锚，锚本身就是区分度）。
   const gate = strong.length ? strong : anchors;
+  // 参与正文匹配的词。日期被摘出去：它只对 date 生效，见下面的 dateOk。
+  const wordGate = dates.length ? gate.filter((t) => !isDateTerm(t)) : gate;
 
   const conds = [`box='${notebook}'`, "type='p'", `ial LIKE '%${ATTR.hash}="%'`];
   // status 传空串表示"过时的也要"（`mem search --all`）。
@@ -378,27 +480,60 @@ export async function searchEntries(opts = {}) {
     const fields = [ATTR.entity, ATTR.brief, ATTR.project, ATTR.type].map(
       (k) => `ial LIKE '%${k}="%${esc}%' ESCAPE '\\'`
     );
+    // 日期是唯一一类「正文里通常不写」的词：2026 年 11 月 6 日记下的条目，正文
+    // 不会重复写一遍日期，只在 date 属性里。只抄那四个字段的话，纯日期查询的候选
+    // 池里根本没有那些条目——内存层的 dateOk 再对也没机会跑。
+    // 只给日期词加 date，不给所有词加：否则查「11」会命中所有 11 月记的条目。
+    if (isDateTerm(t)) {
+      // 补零后再比：库里存 `2026-11-06`，用户写 `2026-1` 得按 `2026-01` 去找，
+      // 否则 SQL 层就把候选漏光了，内存里那个正确的 dateMatches 根本没机会跑。
+      const pats = dateLikePatterns(t).map(
+        (x) => `ial LIKE '%${ATTR.date}="%${likeEsc(x)}%' ESCAPE '\\'`
+      );
+      fields.push(`(${pats.join(" OR ")})`);
+    }
     return `(${bodyExpr} LIKE '%${esc}%' ESCAPE '\\' OR ${fields.join(" OR ")})`;
   });
   conds.push(`(${ors.join(" OR ")})`);
 
   // 这个 LIMIT 是**取候选**的上限，不是结果数。给得太小会静默漏召回：
   // 排序和日期过滤都在内存里做，先被 SQL 砍掉的那些再也回不来。
-  const rows = await sy.sql(
-    `SELECT id, content, ial FROM blocks WHERE ${conds.join(" AND ")}
-       ORDER BY updated DESC LIMIT 5000`
-  );
+  let rows;
+  try {
+    rows = await sy.sql(
+      `SELECT id, content, ial FROM blocks WHERE ${conds.join(" AND ")}
+         ORDER BY updated DESC LIMIT 5000`
+    );
+  } catch (e) {
+    // **后端坏了不是「没记过」**。返回 failed 让调用方能说「检索失败」——
+    // 把故障渲染成一句「没找到」比报错更糟：它看起来像答案。
+    if (!opts.silent)
+      event("memory.miss", {
+        q: String(opts.q ?? "").slice(0, 60),
+        terms: gate,
+        source: opts.source ?? "unknown",
+        reason: "backend-error",
+        error: String(e?.message ?? e).slice(0, 120),
+      });
+    return {
+      terms: gate,
+      hits: [],
+      failed: true,
+      reason: "backend-error",
+      detail: String(e?.message ?? e).slice(0, 200),
+    };
+  }
   checkBodyFormat(rows);
   if (!Array.isArray(rows)) {
     // 口径要和主路径一致：评测（silent）不能灌假空手，来源要带上。
     if (!opts.silent)
       event("memory.miss", {
         q: String(opts.q ?? "").slice(0, 60),
-        terms,
+        terms: gate,
         source: opts.source ?? "unknown",
         reason: "sql-not-array",
       });
-    return { terms, hits: [], reason: "sql-not-array" };
+    return { terms: gate, hits: [], failed: true, reason: "sql-not-array" };
   }
   // 取候选的上限被撞到就说明可能有召回被截断：排序和日期过滤都在内存里做，
   // 被 SQL 砍掉的那些再也回不来。撞了要留痕，否则"查不到"永远查不出原因。
@@ -414,10 +549,14 @@ export async function searchEntries(opts = {}) {
       // 路径而互相「像」，排序就变成了「同一场会话的条目聚在一起」。
       const text = plain(r.content, raw);
       const hay = `${text} ${brief} ${entity}`;
-      const strongHit = strongHits(hay, gate);
-      // 锚校验把 date 也算进去（见 entryMatchesAnchors）。
-      // 强词命中仍用不含日期的 hay：让「2026」给所有当年的条目加分是错的。
-      const anchorOk = entryMatchesAnchors({ text, brief, entity, date }, anchors);
+      // 日期的证据在 date 上，不在正文里。混合查询（「2026 年的部署计划」）里
+      // 它是**过滤器**：日期不对的条目直接不要，不能靠它凑门槛。
+      const dateOk = !dates.length || dates.some((d) => dateMatches(date, d) || dateInText(hay, d));
+      const strongHit = wordGate.length ? strongHits(hay, wordGate) : dateOk ? 1 : 0;
+      // 锚校验**不看** date：日期由上面的 dateOk 单独管，混进锚闸会稀释型号约束。
+      // 强词命中同样用不含日期的 hay：让「2026」给所有当年的条目加分是错的。
+      const anchorOk = entryMatchesAnchors({ text, brief, entity }, anchors);
+      const rel = relevanceOf({ text, brief }, wordGate, entity);
       return {
         id: r.id,
         entity,
@@ -433,17 +572,21 @@ export async function searchEntries(opts = {}) {
         // 打分只用强词：权重公式一个字没动（这是 Qoder 说的「先别动排序」），
         // 但输入词集换成去虚词后的那些，否则「我的」「是多」这类到处都有的
         // 2-gram 会给每条都加分，把真正的排序信号淹掉。
-        score: scoreOf({ text, brief, date }, gate, entity),
-        rel: relevanceOf({ text, brief }, gate, entity),
+        score: scoreOf({ text, brief, date }, wordGate, entity),
+        rel,
+        // 纯日期查询（"2026" / "2026-11-06"）：正文里不写日期，rel 天然是 0。
+        // 这时证据只在 date 上，不能拿 rel>0 去卡，改由 dateOk 说话。
+        relOk: wordGate.length ? rel > 0 : dateOk,
         strongHit,
         anchorOk,
+        dateOk,
       };
     })
     // relatedness 0 = 只是候选，不是命中（词落在了原文路径之类的地方）。留着它
     // 只会让「查不到」看起来像「查到了但都不太对」。
     // 三道闸：相关度 > 0、强词够数、查询里点名的标识符确实在。最后一条挡住
     // 「问 NO.9 却拿 NO.5 来答」——那种结果比空手更糟，因为它看起来是答案。
-    .filter((h) => h.rel > 0 && h.strongHit >= minShould && h.anchorOk)
+    .filter((h) => h.relOk && h.strongHit >= minShould && h.anchorOk && h.dateOk)
     .filter((h) => !since || (h.date && h.date >= since))
     .sort((a, b) => b.score - a.score || String(b.date ?? "").localeCompare(String(a.date ?? "")))
     .slice(0, limit);
@@ -489,6 +632,8 @@ export async function searchEntries(opts = {}) {
       // 四态分明：null = 没传话题；true/false = 表正常；"unavailable" = 表读不出来。
       // 原来拿 undefined 同时表示「没传」和「表读不出」，日志里根本分不开。
       topicKnown: topicNote ? (topicNote.known === undefined ? "unavailable" : topicNote.known) : null,
+      // 明确写出来：自检/状态页按 reason 分桶，缺省值不能再背「后端故障」的锅。
+      reason: "no-match",
     });
     // 话题名根本没解析到 = 「你写的话题不在库里」，不是「这个话题没内容」。
     // 这两件事修法完全不同，不给提示的话，人只会觉得记忆库是空的然后瞎猜名字。

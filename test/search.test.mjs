@@ -38,7 +38,7 @@ test("连续汉字长串切 2-gram，不再整句当成一个词", () => {
   assert.ok(t.includes("羽毛") && t.includes("用球"));
 });
 
-const { strongTerms, queryPlan, strongHits, anchorsHit, entryMatchesAnchors } = await import("../src/core/search.mjs");
+const { strongTerms, queryPlan, strongHits, anchorsHit, entryMatchesAnchors, isDateTerm, dateMatches, dateInText } = await import("../src/core/search.mjs");
 
 test("虚词 2-gram 不算强词：否则负例会被「我的」「是多」灌进来", () => {
   const t = termsOf("我的护照号码是多少");
@@ -181,10 +181,62 @@ test("提问框架词不进强词：一次 / 需要 / 大概 / 多少 在正文�
   assert.ok(strong.some((x) => x.includes("咖啡")), "咖啡是实词，要留下");
 });
 
-test("锚校验把 date 算进去：年份查询不该必然空手", () => {
-  // 变异验证过：改回只传 hay 这条会红。2026 是硬锚，但日期不在正文里，
-  // 只比正文的话，所有 2026 年写的条目都会被过滤掉。
-  const anchors = ["2026"];
-  assert.equal(entryMatchesAnchors({ text: "部署计划改用 compose 编排", brief: "", entity: "轻量云服务器", date: "2026-11-06" }, anchors), true);
-  assert.equal(entryMatchesAnchors({ text: "部署计划改用 compose 编排", brief: "", entity: "轻量云服务器", date: "2025-11-06" }, anchors), false);
+test("日期锚不参加标识符闸：加个年份不能把型号约束稀释掉", () => {
+  // 曾经日期锚也走 .some()，于是「亚狮龙 NO.9 2026 价格」里 2026 单独就过闸，
+  // NO.5 的条目照样进来——「问 NO.9 却拿 NO.5 来答」这个老问题又回来了。
+  // 现在日期只归 dateOk 管，锚闸只认真正的标识符。
+  const day = "2026-11-06";
+  assert.equal(entryMatchesAnchors({ text: "亚狮龙 NO.5 的价格是 120", brief: "", entity: "羽毛球", date: day }, ["NO.9", "2026"]), false);
+  assert.equal(entryMatchesAnchors({ text: "亚狮龙 NO.9 的价格是 210", brief: "", entity: "羽毛球", date: day }, ["NO.9", "2026"]), true);
+  // 纯日期查询没有别的锚：不设约束，交给 dateOk。
+  assert.equal(entryMatchesAnchors({ text: "部署计划改用 compose 编排", brief: "", entity: "轻量云服务器", date: day }, ["2026"]), true);
+});
+
+test("日期不进门槛：否则任何当年记的条目都能靠年份过闸", () => {
+  // 「2026 年的部署计划」里 2026 是范围，不是主题。算进 minShould 的话，
+  // minShould=1 会被它一个人满足——「部署时间改到凌晨」这种只沾一个词的
+  // 条目也能进来（第十三轮 CR 的观察项）。
+  const p = queryPlan("2026 年的部署计划");
+  assert.deepEqual(p.dates, ["2026"]);
+  assert.ok(!p.words.includes("2026"), "参与门槛的词里不该有年份");
+  assert.equal(p.minShould, 1);
+});
+
+test("纯年份也是一次有意义的查询：证据只在 date 上", () => {
+  const p = queryPlan("2026");
+  assert.deepEqual(p.dates, ["2026"]);
+  assert.equal(p.words.length, 0);
+  assert.equal(p.meaningful, true, "只问年份是能找到东西的，不能当「没问出词」早退");
+});
+
+test("整词是日期才算日期词：年 / 年月 / 完整日期都认，型号和时间戳不认", () => {
+  // 只认四位年份时，`2026-11-06` 会被当成普通锚：是锚但不查 date，候选池直接空
+  // （第十四轮复审实测 0 条）。年月同理。
+  for (const t of ["2026", "1999", "2026-11", "2026-11-06", "2026/11/06"]) assert.equal(isDateTerm(t), true, t);
+  for (const t of ["NO.2026", "12026", "26", "2026年", "2026-11-06T10:00"]) assert.equal(isDateTerm(t), false, t);
+});
+
+test("日期按段比数值：查 1 月不能返回 11、12 月", () => {
+  // 字符串 startsWith 的反例：库里补零存 2026-01-15，而 "2026-11-06" 反而以 "2026-1" 开头。
+  assert.equal(dateMatches("2026-01-15", "2026-1"), true);
+  assert.equal(dateMatches("2026-11-06", "2026-1"), false);
+  assert.equal(dateMatches("2026-12-02", "2026-1"), false);
+  // 年月 / 完整日期 / 斜杠写法
+  assert.equal(dateMatches("2026-11-06", "2026-11"), true);
+  assert.equal(dateMatches("2026-11-06", "2026-11-06"), true);
+  assert.equal(dateMatches("2026-11-06", "2026/11/06"), true);
+  assert.equal(dateMatches("2026-11-06", "2026-11-07"), false);
+  // 年
+  assert.equal(dateMatches("2026-11-06", "2026"), true);
+  assert.equal(dateMatches("2025-11-06", "2026"), false);
+  // 空值不炸
+  assert.equal(dateMatches("", "2026"), false);
+});
+
+test("正文里的日期也按段比：2026-11-11 不能被当成 2026 年 1 月", () => {
+  // 正文里写了日期时走 text 兜底，这里同样不能拿子串比——
+  // `2026-11-11` 包含 `2026-1`，查 1 月会把它捞出来。
+  assert.equal(dateInText("排期看 2026-11-11 这天的会", "2026-1"), false);
+  assert.equal(dateInText("2026/01/05 的事", "2026-1"), true);
+  assert.equal(dateInText("没有任何日期的一句话", "2026"), false);
 });

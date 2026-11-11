@@ -15,6 +15,7 @@ import { pending } from "./inbox.mjs";
 import { usageToday, resolveModel, hasModel } from "../util/llm.mjs";
 import { lockInfo, roundStatus } from "./serve.mjs";
 import { searchEntries } from "./search.mjs";
+import { failureText } from "./search-reason.mjs";
 
 /** 队列项只读头部：完整会话可能有几 MB，面板不需要。 */
 function queueItem(file) {
@@ -140,7 +141,9 @@ function draw(s) {
   }
 
   const rows = s._hits ?? s.entries;
-  $("list").innerHTML = rows.length
+  $("list").innerHTML = s._error
+    ? '<li class="empty">' + esc(s._error) + "</li>"
+    : rows.length
     ? rows.map((e) => '<li><span class="tag ' + (e.status === "superseded" ? "sup" : "") + '">' + esc(e.entity || e.type || "-") +
         '</span><div class="txt">' + esc(e.text) + '<div class="meta">' + esc([e.type, e.status, e.date, e.source, e.id].filter(Boolean).join(" · ")) + "</div></div></li>").join("")
     : '<li class="empty">' + (s._hits ? "没有命中" : "还没有条目") + "</li>";
@@ -156,7 +159,11 @@ let last = null;
 async function refresh() {
   try {
     const r = await fetch("/api/state");
-    last = await r.json();
+    const s = await r.json();
+    // **合并，不是替换**：_hits / _error 是搜索的临时状态，整份 state 覆盖掉
+    // 就等于「搜完 5 秒后自己变回最近条目」——搜索结果和错误提示都活不过一轮刷新。
+    // 原来那句「要写回 last」的注释写对了意图，但 refresh 覆盖的就是 last 本身。
+    last = { ...last, ...s };
     if (!document.activeElement || document.activeElement.id !== "q") draw(last);
     else $("chips") && draw(last);
   } catch (e) {
@@ -186,12 +193,22 @@ $("run").onclick = async () => {
 $("q").onkeydown = async (ev) => {
   if (ev.key !== "Enter") return;
   const q = $("q").value.trim();
-  if (!q) { delete last._hits; return draw(last); }
+  if (!q) {
+    delete last._hits;
+    delete last._error;
+    return draw(last);
+  }
   const r = await fetch("/api/search?q=" + encodeURIComponent(q));
-  const j = await r.json();
+  const j = await r.json().catch(() => ({}));
+  // 「后端坏了」和「没有命中」在面板上必须长得不一样：前者要人去看后端。
+  if (!r.ok) {
+    delete last._hits;
+    last = { ...last, _error: j.error ?? "检索失败（HTTP " + r.status + "）" };
+    return draw(last);
+  }
   // 要写回 last：refresh() 每 5 秒用 /api/state 整体覆盖一次，只放在临时对象里
   // 的话，搜索结果活不到 5 秒就被"最近条目"顶掉。
-  last = { ...last, _hits: j.hits ?? [] };
+  last = { ...last, _error: "", _hits: j.hits ?? [] };
   draw(last);
 };
 
@@ -272,7 +289,13 @@ export function startUi({ port = 7787, host = "127.0.0.1", runRound } = {}) {
         const q = url.searchParams.get("q") ?? "";
         // 和 CLI 走同一个函数：面板搜到的跟 `mem search` 搜到的必须是一回事，
         // 而且命中要记进 memory.hit，那是「这条记忆还活着」的唯一真实信号。
-        return json(200, await searchEntries({ q, limit: 30 }));
+        // source 必须写 ui：面板是第四个真实来源，混进 unknown 会让「谁在查」失真。
+        const r = await searchEntries({ q, limit: 30, source: "ui" });
+        // 后端故障不能回 200 + 空 hits：前端只会渲染「没有命中」，
+        // 又把「坏了」说成「没有」（第十四轮复审）。
+        if (r.failed)
+          return json(503, { error: `检索失败：${failureText(r.reason, r.detail)}`, reason: r.reason });
+        return json(200, r);
       }
       if (req.method === "POST" && url.pathname === "/api/run") {
         if (!fromThisPage(req)) {
