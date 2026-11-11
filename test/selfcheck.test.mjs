@@ -16,7 +16,7 @@ import { createServer } from "node:http";
 
 process.env.HOME = mkdtempSync(join(tmpdir(), "mem-selfcheck-"));
 
-const { checkDedupe, dedupeHealthToday } = await import("../src/core/selfcheck.mjs");
+const { checkDedupe, dedupeHealthToday , recallHealthToday } = await import("../src/core/selfcheck.mjs");
 const { dedupeStats, resetDedupeStats } = await import("../src/core/dedupe.mjs");
 
 function cfgFor(port, over = {}) {
@@ -174,4 +174,29 @@ test("模型返回空裁决：哨兵必须报错，这就是它要抓的「静�
     "keep",
     { decisions: [] },
   );
+});
+
+test("召回健康度按来源分开：agent 在用还是人在调试，不能混成一个数", () => {
+  // 2026-11-11 查全部日志，58 次命中里大半是排查时手敲的 CLI 命令。
+  // 不区分来源，「这套东西到底有没有被用起来」永远答不了。
+  const day = "2099-01-05";
+  const dir = join(process.env.HOME, ".siyuan-mem", "logs");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, `${day}.jsonl`),
+    [
+      { ev: "memory.hit", source: "mcp", n: 2 },
+      { ev: "memory.hit", source: "cli", n: 1 },
+      { ev: "memory.miss", source: "mcp", q: "不存在的东西" },
+      { ev: "memory.miss", source: "api", q: "别的机器查的" },
+    ]
+      .map((e) => JSON.stringify(e))
+      .join("\n") + "\n"
+  );
+  const h = recallHealthToday(day);
+  assert.equal(h.hit, 2);
+  assert.equal(h.miss, 2);
+  assert.deepEqual(h.bySource.mcp, { hit: 1, miss: 1 });
+  assert.deepEqual(h.bySource.cli, { hit: 1, miss: 0 });
+  assert.deepEqual(h.bySource.api, { hit: 0, miss: 1 });
 });

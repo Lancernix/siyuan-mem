@@ -32,7 +32,12 @@ export const TOOL = {
     properties: {
       query: {
         type: "string",
-        description: "关键词，空格分隔。中文不用分词，直接写词；多个词是「都要出现」。",
+        // 不能再说「多个词都要出现」：查询理解改成 OR 粗筛 + 强词门槛之后，
+        // 多写几个词是「越多越容易命中、相关性由排序决定」，不是 AND。
+        // 描述写错会让 agent 只敢写一个词，白白丢掉区分度。
+        description:
+          "关键词，空格分隔。中文不用分词，直接写词；多写几个词更容易命中，相关性由排序决定。" +
+          "型号、文件名、参数名这类标识符照原样写（NO.2 / burn_tokens），会被当成硬约束。",
       },
       limit: { type: "integer", minimum: 1, maximum: 20, description: "最多返回几条，默认 8。" },
       topic: { type: "string", description: "只查某个话题（实体名）下的条目。" },
@@ -127,6 +132,8 @@ export async function handleMessage(msg, { search } = {}) {
         days: a.days,
         // include_superseded → status=""（过时的也要）；否则交给默认的 current。
         status: a.include_superseded ? "" : undefined,
+        // 来源分开记：agent 真的在用，还是人在 CLI 里调试，看日志分得清。
+        source: "mcp",
       });
       return ok(id, { content: [{ type: "text", text: formatHits(r.hits, r.terms, r.hint) }] });
     } catch (e) {

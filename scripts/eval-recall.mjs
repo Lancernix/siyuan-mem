@@ -97,13 +97,16 @@ console.log("档位".padEnd(16), "题数".padStart(4), "整句".padStart(7), "�
 for (const k of ORDER) {
   const s = byKind.get(k);
   if (!s) continue;
+  // 负例只有一种问法（库里没有，理应返回空），没有「关键词」这一列，
+  // 也不谈 MRR。打 0% / 1.00 会让人误以为负例在关键词问法上全军覆没。
   const keyedN = rows.filter((r) => r.kind === k && r.keyed).length || s.n;
+  const isNeg = k === "negative";
   console.log(
     label[k].padEnd(16),
     String(s.n).padStart(5),
     pct(s.plain, s.n).padStart(8),
-    pct(s.keyed, keyedN).padStart(8),
-    (s.mrrPlain / s.n).toFixed(2).padStart(9),
+    (isNeg ? "-" : pct(s.keyed, keyedN)).padStart(8),
+    (isNeg ? "-" : (s.mrrPlain / s.n).toFixed(2)).padStart(9),
   );
 }
 

@@ -173,6 +173,7 @@ export function startIngest({
         type: p.type || undefined,
         days: Number.isFinite(days) && days > 0 ? days : undefined,
         status,
+        source: "api",
       });
       log(`  检索 ${JSON.stringify(q).slice(0, 40)} → ${r.hits.length} 条${r.hint ? "（话题没对上）" : ""}`);
       return json(res, 200, { ok: true, q, terms: r.terms, count: r.hits.length, hits: r.hits, hint: r.hint ?? "" });

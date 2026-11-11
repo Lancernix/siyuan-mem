@@ -50,17 +50,172 @@ export function likeEsc(s) {
 }
 
 
-/** 把一句话拆成检索词。中文不分词，按空格和标点切，去掉太短的。 */
+/**
+ * 把一句话拆成检索词。两阶段，顺序不能反：
+ *
+ *  1) 先把 **ASCII 标识符整体抠出来**（`NO.2` / `node:22-alpine` / `192.168.1.10`
+ *     / `etc/nginx.conf`）。原来 `.` `:` `/` `-` 都在分隔符里，`NO.5` 会碎成
+ *     `["NO","5"]`；而 util/raw.mjs 的 anchorsOf 特意把这串当「模型编不出来的
+ *     硬锚」整体保留。同一批 token，收窄那边当宝、检索这边切碎，说不过去。
+ *  2) 剩下的**连续汉字串 ≥3 字切 2-gram**。原来中文不分词，整句 14 个字就是
+ *     **一个词**，SQL 又要求整句作为子串出现，于是「羽毛球训练级用球的号段
+ *     怎么排」必然 0 命中。2-gram 不需要分词器，中文子串匹配本来就够用。
+ *
+ * 返回的是「所有词」，其中虚词 2-gram（我的 / 是多 / 什么）到处都是，不能参与
+ * 「必须命中」的门槛——见 strongTerms()。单个汉字仍有意义（车/书/钱），保留。
+ */
 export function termsOf(q) {
-  return String(q ?? "")
-    .split(/[\s，。、；：？！,.;:?!()（）\[\]【】"'“”‘’/|]+/)
-    .map((t) => t.trim())
-    // 英文虚词和单字母没意义，但**单个汉字是有意义的**（"车""书""钱"）。
-    // 原来一律要求 ≥2 字，于是 `mem search 车` 拆出空数组，SQL 里没有任何检索条件，
-    // 退化成"按更新时间返回最新几十条"——召回全错，还看不出来。
-    .filter((t) => (/^[a-z]+$/i.test(t) ? t.length >= 2 : t.length >= 1))
-    .filter((t) => !/^(the|and|for|with|that|this)$/i.test(t))
-    .slice(0, 6);
+  const s = String(q ?? "");
+  const out = [];
+  const push = (t) => {
+    if (t && !out.includes(t)) out.push(t);
+  };
+  const rest = s.replace(/[A-Za-z0-9_][A-Za-z0-9_./:\-]*/g, (m) => {
+    const t = m.replace(/^[-./:]+|[-./:]+$/g, "");
+    if (t.length >= 2 && !/^(the|and|for|with|that|this)$/i.test(t)) push(t);
+    return " ";
+  });
+  for (const p of rest.split(/[\s，。、；：？！,.;:?!()（）\[\]【】"'“”‘’/|]+/).map((x) => x.trim())) {
+    if (!p) continue;
+    if (/^[\u4e00-\u9fa5]+$/.test(p) && p.length >= 3) {
+      for (let i = 0; i + 2 <= p.length; i++) push(p.slice(i, i + 2));
+    } else if (!/^\d$/.test(p) && !/^[a-z]$/i.test(p)) {
+      push(p);
+    }
+  }
+  // 16 是 2-gram 之后的上限：整句十几个字会切成十几个词，原来 6 个的帽子会
+  // 把后半句截掉。SQL 是 OR 宽筛，多几个词只多几个 LIKE，代价可忽略。
+  return out.slice(0, 16);
+}
+
+/**
+ * 虚字。用来判定「这串汉字是不是虚词组合」。
+ *
+ * 判定规则是**全部字都虚才算虚**，不是「沾一个就算」。原来用单字连坐，
+ * 把「性能 / 功能 / 智能 / 时间 / 会议 / 能力 / 上限 / 下游」整批误杀成虚词
+ * （只因为它们含「能 / 时 / 会 / 上 / 下」）——强词集一空，闸门就退回全部
+ * 虚词 2-gram 且门槛降到 1，等于把闸门整个绕开。这是 2026-11-11 第十二轮
+ * CR 实证出来的漏洞：`会议时间` 能命中任何提到「时间」的条目。
+ *
+ * 虚词组合的本质就是「两个字都不承载信息」：我的 / 是多 / 什么 / 怎么 / 这个。
+ * 而「会议」「时间」「性能」有一个字是实的，就够当证据了。
+ */
+const WEAK_HAN = new Set(
+  "的我你他她它们这那其之是了在有着就都也还很不太没要把被给从向对与和或而但如若因为所以什怎哪多些个上下来去时会能可又再已曾经最更只才什么样呢吗啊吧让使并等几第每各另某该此".split("")
+);
+
+const HAN_ONLY = /^[\u4e00-\u9fa5]+$/;
+
+/**
+ * 提问框架词：它们描述「怎么问」，不承载「找什么」。
+ *
+ * 靠「全部字都虚」挡不住它们——`一次`、`需要`、`大概`、`多少` 里都有实字，
+ * 但它们在任何一条记忆的正文里都俯拾皆是。2026-11-11 实测两条负例就是这样漏的：
+ *
+ *   咖啡机多久需要除一次垢 → 命中「需要 + 一次」→ 返回读书笔记、投影仪、SolidJS
+ *   钢琴调音一次大概多少钱 → 命中「一次 + 多少」→ 返回抽取批大小的那条
+ *
+ * 三行命中里没有一条跟咖啡或钢琴有关。这不是虚词表没覆盖全的问题，是这类词
+ * 压根不该参与「必须命中」的判定：它们不区分主题。
+ *
+ * 只列高频的，不追求穷尽——漏一个只是多一分噪声，多列一个实词会真丢召回。
+ */
+const WEAK_GRAMS = new Set(
+  ("一次 一下 一些 一点 一个 一直 一般 一样 一起 一共 " +
+    "需要 可以 可能 应该 必须 不要 不用 不能 不会 不是 不过 不同 不行 " +
+    "多少 多久 多大 多长 几个 几天 几次 哪些 哪个 哪里 " +
+    "大概 大约 也许 或者 还是 而是 而且 但是 因为 所以 如果 虽然 然后 " +
+    "这个 那个 这些 那些 这样 那样 什么 怎么 怎样 如何 为什么 " +
+    "现在 已经 正在 曾经 刚才 之后 之前 以后 以前 时候 当时 " +
+    "还有 没有 只是 就是 也是 都是 会有 要有 才能 就会 时候").split(/\s+/).filter(Boolean)
+);
+
+/** 强词 = ASCII 标识符，或不是「全部字都虚」的中文片段。 */
+export function strongTerms(terms) {
+  return terms.filter((t) => {
+    if (/^[a-z0-9_./:\-]+$/i.test(t)) return t.length >= 3;
+    if (!HAN_ONLY.test(t)) return false;
+    if (WEAK_GRAMS.has(t)) return false;            // 提问框架词：不区分主题
+    return ![...t].every((ch) => WEAK_HAN.has(ch)); // 全虚才弱
+  });
+}
+
+/**
+ * 查询计划。minShould 是「至少命中几个不同的强词」：
+ * 关键词问法（2 个强词）要求全中，等价于原来的 AND；整句问法切成 8–10 个
+ * 2-gram 后只要求 2 个，从「全 AND 必然 0 命中」放宽到「沾边就进候选」。
+ * 排序一律还是 scoreOf，见下面的说明——这一步只修查询理解，不动权重。
+ */
+export function queryPlan(q) {
+  const terms = termsOf(q);
+  const strong = strongTerms(terms);
+  // 查询里点名的 ASCII 标识符是**硬约束**：模型编不出 `NO.9`，用户写它就是为了找它。
+  // 只靠「命中 2 个强词」不够——「亚狮龙 NO.9 价格」会被 NO.5 的条目用「亚狮龙 + 价格」
+  // 凑够两个词蒙过去，看起来像命中，其实答的是另一个型号。
+  //
+  // 但「标识符」不能按「是英文」来算：`skill` / `vite` / `docker` 是普通词，硬卡它们
+  // 会把「讲容器但没写 docker」的相关条目全挡掉。只认模型编不出来的形态——
+  // 带内部标点（NO.9 / node:22-alpine / burn_tokens / step-image-edit）、
+  // 大小写混排（PostgreSQL / MiniWMS）、或全大写（WMS / SSH / LLM）。
+  const anchors = terms.filter(isAnchorTerm);
+  // 门槛按「有没有标识符」分档：
+  //   有标识符 → 只要 1 个词，因为标识符本身已经是硬约束（anchorsHit 会验它必须在）；
+  //   没标识符 → 2 个词，靠词共现挡虚词灌水。
+  //
+  // 原来一律 min(2, strong.length)，两个词的短查询（"Vite 8 升级"）就等于 AND：
+  // 「升级」在正文里写成「成套升」，一个词对不上就整条空手。有锚时不该这么卡。
+  const minShould = anchors.length ? 1 : Math.min(2, Math.max(1, strong.length));
+  // 一个实词都没有（「怎么样」「我的的」这类）：不许退回虚词 + 门槛 1，
+  // 那等于把闸门整个关掉，任何提到这些虚词的条目都能进来。交给调用方判低置信。
+  const meaningful = strong.length > 0 || anchors.length > 0;
+  return { terms, strong, anchors, minShould, meaningful };
+}
+
+/**
+ * 这个词像不像「模型编不出来」的标识符。
+ *
+ * 判据是形态，不是「是不是英文」：纯小写普通词（skill / vite / jsonl）随便就能写出来，
+ * 而当锚会把召回卡死；带点、下划线、连字符、大小写混排、全大写的，才是真标识符。
+ */
+export function isAnchorTerm(t) {
+  const x = String(t ?? "");
+  if (!/^[A-Za-z0-9_./:\-]+$/.test(x)) return false;
+  if (x.length < 3) return false;
+  if (/[._/:\-]/.test(x.slice(1))) return true;      // 内部有标点（首字符的 - 不算）
+  if (/[A-Z]/.test(x) && /[a-z]/.test(x)) return true; // 大小写混排
+  if (/^[A-Z0-9]+$/.test(x)) return true;            // 全大写 / 大写+数字
+  return false;
+}
+
+/**
+ * 一条候选是否满足「标识符必须在」这道闸。
+ *
+ * 单独抽出来是因为**日期也算**：`2026` 当锚是对的（用户就是想按年份找），
+ * 但日期不在正文里，只用 text/brief/entity 比对会让年份查询必然空手。
+ * 抽成函数才能把这条钉进测试——写在 map 里的话，改回 `hay` 测试也发现不了。
+ */
+export function entryMatchesAnchors({ text, brief, entity, date }, anchors) {
+  return anchorsHit(`${text} ${brief} ${entity} ${date ?? ""}`, anchors);
+}
+
+/** 查询里有标识符时，必须至少命中一个；没有标识符就不设这条约束。 */
+export function anchorsHit(hay, anchors) {
+  if (!anchors?.length) return true;
+  const low = String(hay ?? "").toLowerCase();
+  return anchors.some((a) => low.includes(String(a).toLowerCase()));
+}
+
+/**
+ * 数一条候选命中了几个不同的强词。口径和 relevanceOf 一致：只看正文、摘要、
+ * 话题，不看 ial 里那串原文路径。
+ *
+ * 抽成纯函数是为了能测：2026-11-11 用真实库探过，只放宽 AND、不加这道门槛，
+ * 三道负例（护照号码 / 年假 / 血脂）全被「我的」「是多」「公司」这类虚词
+ * 2-gram 误召回。这个函数就是那道闸，别把它内联回去。
+ */
+export function strongHits(hay, gate) {
+  const low = String(hay ?? "").toLowerCase();
+  return gate.reduce((n, t) => n + (low.includes(String(t).toLowerCase()) ? 1 : 0), 0);
 }
 
 /**
@@ -133,11 +288,17 @@ export async function searchEntries(opts = {}) {
   const cfg = loadConfig();
   const sy = new SiYuan({ baseUrl: cfg.siyuan.baseUrl, token: cfg.siyuan.token, timeoutMs: 8000 });
   const notebook = await resolveNotebookId(sy, cfg);
-  const terms = termsOf(opts.q);
+  const { terms, strong, anchors, minShould, meaningful } = queryPlan(opts.q);
   const limit = Math.min(Math.max(Number(opts.limit) || 8, 1), 50);
   // 全是标点/空白时没有检索词。这时候不能往下走：SQL 里没有任何 LIKE 条件，
   // 结果会变成"按更新时间排序的最新 N 条"，看着有结果，其实一条都不相关。
   if (!terms.length) return { terms: [], hits: [], reason: "no-terms" };
+  // 整句全是虚词（「怎么样」「我的」这类）：没有任何可定位的证据。
+  // 这时候返回任何东西都是瞎猜——「查不到」和「问了句废话」是两件事，说清楚。
+  if (!meaningful) return { terms: [], hits: [], reason: "no-meaningful-terms" };
+  // SQL 层用哪组词做 OR 粗筛。走到这里一定至少有一组可用：要么有强词，
+  // 要么有标识符（有锚时 gate 用锚，锚本身就是区分度）。
+  const gate = strong.length ? strong : anchors;
 
   const conds = [`box='${notebook}'`, "type='p'", `ial LIKE '%${ATTR.hash}="%'`];
   // status 传空串表示"过时的也要"（`mem search --all`）。
@@ -194,25 +355,32 @@ export async function searchEntries(opts = {}) {
   const since = opts.days
     ? new Date(Date.now() - Number(opts.days) * 86400000).toISOString().slice(0, 10)
     : "";
-  // 每个词都要出现（AND）。SQL 这层只做**粗筛**，精确性交给下面的 rel > 0。
+  // SQL 这层只做 **OR 粗筛**：命中任何一个强词就进候选。
   //
-  // 先说清这件事的边界：ial 里是 `custom-mem-entity="…" custom-mem-raw="…"`
-  // 这样一串，LIKE 的 `%` 会跨过值的收尾引号，于是「查 Mac」也能匹配到 raw 路径。
-  // 试过用 GLOB 的 `[^"]` 把匹配卡在值内部——这个 SQLite 构建不认字符类取反，
-  // 直接返回 0 条。**宁可宽，不可漏**：宽了最多多捞些候选，漏了是真丢召回。
+  // 原来是「每个词都要出现（AND）」，中文整句拆完十几个 2-gram 必然 0 命中——
+  // 2026-11-10 的召回评测里整句问法 18/18 全灭，就是这个。放宽到 OR 之后，
+  // 精确性交给下面内存里的两道闸：`rel > 0`（词真的落在正文/摘要/话题里）和
+  // `strongHit >= minShould`（至少命中 K 个实词，挡住「我的」「是多」这类虚词灌水）。
+  // 真实库实测：只有 OR 没有强词门槛时，三道负例全被误召回。
   //
-  // 但 content 里的路径尾巴要切掉，这个能修：条目正文是「结论 原文 assets/…」，
-  // 不切的话查 `jsonl`、查机器名会把整库捞进来（实测 1507/1507）。
+  // 边界仍是老问题：ial 是 `custom-mem-entity="…" custom-mem-raw="…"` 一串，
+  // LIKE 的 `%` 会跨过值的收尾引号，于是「查 Mac」也能匹配到 raw 路径。试过用
+  // GLOB 的 `[^"]` 卡在值内部——这个 SQLite 构建不认字符类取反，直接返回 0 条。
+  // **宁可宽，不可漏**：宽了最多多捞候选，漏了是真丢召回，精确性在内存里收。
+  //
+  // content 里的路径尾巴要切掉：条目正文是「结论 原文 assets/…」，不切的话查
+  // `jsonl`、查机器名会把整库捞进来（实测 1507/1507）。
   const bodyExpr =
     "(CASE WHEN instr(content, ' 原文 assets/') > 0 " +
     "THEN substr(content, 1, instr(content, ' 原文 assets/') - 1) ELSE content END)";
-  for (const t of terms) {
+  const ors = gate.map((t) => {
     const esc = likeEsc(t);
     const fields = [ATTR.entity, ATTR.brief, ATTR.project, ATTR.type].map(
       (k) => `ial LIKE '%${k}="%${esc}%' ESCAPE '\\'`
     );
-    conds.push(`(${bodyExpr} LIKE '%${esc}%' ESCAPE '\\' OR ${fields.join(" OR ")})`);
-  }
+    return `(${bodyExpr} LIKE '%${esc}%' ESCAPE '\\' OR ${fields.join(" OR ")})`;
+  });
+  conds.push(`(${ors.join(" OR ")})`);
 
   // 这个 LIMIT 是**取候选**的上限，不是结果数。给得太小会静默漏召回：
   // 排序和日期过滤都在内存里做，先被 SQL 砍掉的那些再也回不来。
@@ -222,8 +390,15 @@ export async function searchEntries(opts = {}) {
   );
   checkBodyFormat(rows);
   if (!Array.isArray(rows)) {
-    event("memory.miss", { q: String(opts.q ?? "").slice(0, 60), terms, reason: "sql-not-array" });
-    return { terms, hits: [] };
+    // 口径要和主路径一致：评测（silent）不能灌假空手，来源要带上。
+    if (!opts.silent)
+      event("memory.miss", {
+        q: String(opts.q ?? "").slice(0, 60),
+        terms,
+        source: opts.source ?? "unknown",
+        reason: "sql-not-array",
+      });
+    return { terms, hits: [], reason: "sql-not-array" };
   }
   // 取候选的上限被撞到就说明可能有召回被截断：排序和日期过滤都在内存里做，
   // 被 SQL 砍掉的那些再也回不来。撞了要留痕，否则"查不到"永远查不出原因。
@@ -238,6 +413,11 @@ export async function searchEntries(opts = {}) {
       // 先切掉原文路径再算分：不切的话，同一场会话的条目会因为共用同一串
       // 路径而互相「像」，排序就变成了「同一场会话的条目聚在一起」。
       const text = plain(r.content, raw);
+      const hay = `${text} ${brief} ${entity}`;
+      const strongHit = strongHits(hay, gate);
+      // 锚校验把 date 也算进去（见 entryMatchesAnchors）。
+      // 强词命中仍用不含日期的 hay：让「2026」给所有当年的条目加分是错的。
+      const anchorOk = entryMatchesAnchors({ text, brief, entity, date }, anchors);
       return {
         id: r.id,
         entity,
@@ -250,13 +430,20 @@ export async function searchEntries(opts = {}) {
         session: attr(r.ial, ATTR.session),
         source: attr(r.ial, ATTR.source),
         project: attr(r.ial, ATTR.project),
-        score: scoreOf({ text, brief, date }, terms, entity),
-        rel: relevanceOf({ text, brief }, terms, entity),
+        // 打分只用强词：权重公式一个字没动（这是 Qoder 说的「先别动排序」），
+        // 但输入词集换成去虚词后的那些，否则「我的」「是多」这类到处都有的
+        // 2-gram 会给每条都加分，把真正的排序信号淹掉。
+        score: scoreOf({ text, brief, date }, gate, entity),
+        rel: relevanceOf({ text, brief }, gate, entity),
+        strongHit,
+        anchorOk,
       };
     })
-    // 相关度为 0 = 只是候选，不是命中（词落在了原文路径之类的地方）。留着它
+    // relatedness 0 = 只是候选，不是命中（词落在了原文路径之类的地方）。留着它
     // 只会让「查不到」看起来像「查到了但都不太对」。
-    .filter((h) => h.rel > 0)
+    // 三道闸：相关度 > 0、强词够数、查询里点名的标识符确实在。最后一条挡住
+    // 「问 NO.9 却拿 NO.5 来答」——那种结果比空手更糟，因为它看起来是答案。
+    .filter((h) => h.rel > 0 && h.strongHit >= minShould && h.anchorOk)
     .filter((h) => !since || (h.date && h.date >= since))
     .sort((a, b) => b.score - a.score || String(b.date ?? "").localeCompare(String(a.date ?? "")))
     .slice(0, limit);
@@ -268,17 +455,34 @@ export async function searchEntries(opts = {}) {
   // 「这条记忆被人用过」这个信号就被评测自己灌满了——测完看起来像有人在用，其实没有。
   try {
     const topics = opts.silent ? [] : [...new Set(hits.map((h) => h.entity).filter(Boolean))];
-    if (topics.length) event("memory.hit", { q: String(opts.q ?? "").slice(0, 60), topics, n: hits.length });
+    // 命中就记，条件是 hits.length，不是 topics.length。原来要求至少一个话题，
+    // 于是没打 entity 的条目命中时完全不计数——「召回被用过几次」这个数会偏低，
+    // 而它正是判断「要不要继续投入召回」的唯一依据。
+    if (hits.length && !opts.silent)
+      event("memory.hit", {
+        q: String(opts.q ?? "").slice(0, 60),
+        topics,
+        n: hits.length,
+        // 来源必须分开记：CLI 是人在调试，MCP 是 agent 真的在用，api 是别的机器。
+        // 混在一起的话，「这套东西到底有没有被用起来」永远答不了——2026-11-11 那
+        // 58 次命中里大半是我自己敲的，从日志上根本看不出来。
+        source: opts.source ?? "unknown",
+      });
   } catch {
     /* 日志失败不影响检索 */
   }
 
   // 零结果的查询最值得记：召回不准的时候，"它到底查过什么、什么都没查到"是唯一线索。
+  //
+  // 但评测不能记：`silent` 原来只压住了 hit，76 条题库跑一遍会灌进几十条假空手，
+  // 把「真实空手率」这唯一一个能反映用户体验的指标搞脏。评测是造出来的，
+  // 它属于离线评估，不该混进生产统计。
   let hint = "";
-  if (!hits.length) {
+  if (!hits.length && !opts.silent) {
     event("memory.miss", {
       q: String(opts.q ?? "").slice(0, 60),
       terms,
+      source: opts.source ?? "unknown",
       topic: opts.topic ?? "",
       project: opts.project ?? "",
       rows: rows.length,
@@ -310,5 +514,16 @@ export async function searchEntries(opts = {}) {
     }
   }
 
-  return { terms, hits, notebook, hint, topic: topicNote ?? undefined };
+  // 展示给别人看的「检索词」只给强词。全部词里有十几个虚词 2-gram，
+  // 原样打出来既难读又占 token；完整词表留给 allTerms 做诊断。
+  return {
+    terms: gate,
+    allTerms: terms,
+    anchors,
+    minShould,
+    hits,
+    notebook,
+    hint,
+    topic: topicNote ?? undefined,
+  };
 }

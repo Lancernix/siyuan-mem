@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { CONFIG_PATH, INBOX_DIR, loadConfig, LOG_PATH, machineId, saveConfig, offsetsOf, loadOffsets } from "../util/config.mjs";
 import { PROVIDERS, resolveModel, hasModel, probe as probeModel, saveModelChoice, maskKey, usageToday } from "../util/llm.mjs";
-import { dedupeHealthToday } from "../core/selfcheck.mjs";
+import { dedupeHealthToday, recallHealthToday } from "../core/selfcheck.mjs";
 import { formatHits, ATTR } from "../core/store.mjs";
 import { parseArgs } from "../util/args.mjs";
 import { loadRawIndex, readRange, parsePtr } from "../util/raw.mjs";
@@ -135,6 +135,15 @@ async function cmdStatus() {
     if (dh.crashed) bits.push(`崩溃 ${dh.crashed} 次（程序错误，要查）${dh.lastError ? `：${dh.lastError}` : ""}`);
     if (dh.leafFailed) bits.push(`子块失败 ${dh.leafFailed}（拆半重试没成）`);
     console.log(`判重         ${bits.join("，")}`);
+  }
+  // 召回被用了多少次、空手多少次，按来源分开摆出来。这是「记忆到底有没有
+  // 被想起来」的唯一真实信号，也是判断「要不要继续调召回」的唯一依据。
+  const rh = recallHealthToday();
+  if (rh.hit || rh.miss) {
+    const parts = Object.entries(rh.bySource)
+      .sort((a, b) => b[1].hit + b[1].miss - (a[1].hit + a[1].miss))
+      .map(([k, v]) => `${k} ${v.hit}${v.miss ? `（空手 ${v.miss}）` : ""}`);
+    console.log(`召回         ${rh.hit} 次命中，${rh.miss} 次空手 — ${parts.join("，")}`);
   }
   console.log(`待处理       ${pending().length} 个会话在队列里`);
   console.log(`服务         ${svcLine}`);
@@ -1031,6 +1040,7 @@ async function cmdSearch(args, flags) {
         days: flags.days,
         // --all 连过时的也一起看：查"当初为什么改"时需要，默认只给在用的。
         status: flags.all ? "" : undefined,
+        source: "cli",
       });
   if (flags.json) {
     console.log(JSON.stringify(r, null, 2));

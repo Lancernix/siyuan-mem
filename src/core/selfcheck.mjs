@@ -89,6 +89,41 @@ export async function checkDedupe(cfg, { deadlineMs = 90_000 } = {}) {
  * 崩溃（ReferenceError 这类程序错误）和失败（模型超时、429）要分开数：
  * 前者是我们自己的 bug，出现一次就该当事故处理；后者是环境噪音。
  */
+/**
+ * 今天的召回健康度，按调用来源分开。
+ *
+ * 为什么必须分来源：`memory.hit` 原来只有一个计数，CLI 里人调试敲的命令和 agent
+ * 真的调用混在一起。2026-11-11 查全部日志，58 次命中里大半是排查时手敲的，
+ * 从数据上根本回答不了「这东西到底有没有被用起来」。
+ *
+ * 空手率比分档命中率更能反映真实体验：agent 查一次空手，它就只能当没记过。
+ */
+export function recallHealthToday(day = dayOf()) {
+  const out = { hit: 0, miss: 0, bySource: {} };
+  const file = pathOf(day);
+  if (!existsSync(file)) return out;
+  for (const line of readFileSync(file, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    let e;
+    try {
+      e = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (e.ev !== "memory.hit" && e.ev !== "memory.miss") continue;
+    const src = e.source || "unknown";
+    if (!out.bySource[src]) out.bySource[src] = { hit: 0, miss: 0 };
+    if (e.ev === "memory.hit") {
+      out.hit++;
+      out.bySource[src].hit++;
+    } else {
+      out.miss++;
+      out.bySource[src].miss++;
+    }
+  }
+  return out;
+}
+
 export function dedupeHealthToday(day = dayOf()) {
   const out = { decisions: 0, replace: 0, covered: 0, failed: 0, crashed: 0, leafFailed: 0, lastError: "" };
   const file = pathOf(day);
