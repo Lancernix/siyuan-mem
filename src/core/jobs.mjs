@@ -509,25 +509,21 @@ export async function processQueue({
       //
       // 收窄是保守的：跨轮归纳、锚点分散、证据掉太多，一律原样返回。宽了只是多读
       // 几行，窄错了是把出处排除在外而且看不出来，两者代价不对称。
+      // 锚点收窄默认关闭。
+      //
+      // 2026-11-11 抽检：随机 20 条已收窄条目里 3–4 条指偏或存疑（结论讲冲锋衣、
+      // 窗口落在坐垫讨论），极端样本里更到 40%。硬锚/中文片段的「保留率」是算法
+      // 自己的通过条件，证明不了「指对了」——第五轮 CR 说得对。收窄错了比宽更糟：
+      // 宽了只是多读几行，指偏是给人一条看似精确、实则无关的出处，而且看不出来。
+      // 想开就显式配 `raw.narrow: true`，并且先跑 dry + 人工抽检。
       const anchor =
-        e.from != null && parts.length
+        e.from != null && parts.length && cfg.raw?.narrow === true
           ? narrowAnchor(e.text, payload.turns ?? payload.events ?? [], e.from, e.to)
           : null;
       const aFrom = anchor?.from ?? e.from;
       const aTo = anchor?.to ?? e.to;
       const rawPtr =
         e.from != null && parts.length ? ptrFor(parts, turnFrom + aFrom, turnFrom + aTo) : "";
-      if (anchor?.narrowed && !dry) {
-        sum.narrowed++;
-        event("anchor.narrow", {
-          session: payload.session_id ?? "",
-          from: turnFrom + e.from,
-          to: turnFrom + e.to,
-          narrowedFrom: turnFrom + aFrom,
-          narrowedTo: turnFrom + aTo,
-          rows: anchor.rows,
-        });
-      }
       if (dry) {
         // 用条目自己的轮次范围，不是整个 part：dry 的意义就是看指针会精确到哪一段。
         const where =
@@ -582,6 +578,19 @@ export async function processQueue({
         } else {
           sum.written++;
           writtenHere++;
+          // 只有真写进库了才算「原文指针收窄」。放在 covered / hash-duplicate
+          // 之前计数的话，被跳过的条目也报收窄，serve 日志上的数字是虚的。
+          if (anchor?.narrowed) {
+            sum.narrowed++;
+            event("anchor.narrow", {
+              session: payload.session_id ?? "",
+              from: turnFrom + e.from,
+              to: turnFrom + e.to,
+              narrowedFrom: turnFrom + aFrom,
+              narrowedTo: turnFrom + aTo,
+              rows: anchor.rows,
+            });
+          }
           event("entry.write", {
             session: payload.session_id ?? "",
             id: r.id,
@@ -677,9 +686,17 @@ export async function processQueue({
     const hasRest = restTurns.length > 0;
     // 写库干净 = 没有失败、也没熔断。不含「写了几条」——那是下面摘轮次的额外前提。
     const wroteCleanly = failedHere === 0 && !broken;
+    // 模型正常返回零条目 = 它看过这几轮、判定没什么可记，这几轮就是**处理完了**，
+    // 可以安全摘掉继续抽后半段。跟「抽出来没写进去」是两回事。只有抽取降级、
+    // 报错、条目被 dropped 截光、或超预算中断，才是真的没处理完，该留在队列。
+    const cleanEmpty =
+      entries.length === 0 && !degraded && !error && !dropped && !aborted && failedHere === 0 && writtenHere === 0 && skippedHere === 0;
 
     let trimmed = false;
-    if (!dry && hasRest && wroteCleanly && writtenHere > 0) {
+    // 全被判重跳过（skippedHere > 0）也是「这几轮处理完了」：内容已经在库里，
+    // 不是故障。允许摘轮次，否则重叠区间每轮重抽、重抽又全跳过，攒满三次就被
+    // 当成老赖挪进 dead/，而剩下那 20 轮从此没人抽。
+    if (!dry && hasRest && wroteCleanly && (writtenHere > 0 || skippedHere > 0 || cleanEmpty)) {
       const rest = restTurns;
       if (rest.length) {
         try {
@@ -692,7 +709,7 @@ export async function processQueue({
             left: rest.length,
             batchesLeft: remainingBatches,
           });
-          onLine(`    · 抽到点了：前 ${coveredThrough + 1} 轮已写进库（${writtenHere} 条），还剩 ${rest.length} 轮，下轮接着抽`);
+          onLine(`    · 抽到点了：前 ${coveredThrough + 1} 轮已处理（写 ${writtenHere} 条 / 跳过 ${skippedHere} 条${cleanEmpty ? " / 模型判定无可记内容" : ""}），还剩 ${rest.length} 轮，下轮接着抽`);
         } catch (e) {
           onLine(`    ! 队列改写失败，这场下轮会从头重抽：${e.message}`);
         }
@@ -723,12 +740,12 @@ export async function processQueue({
       // 抽不到东西和超预算是这个会话自己的毛病，记次数；纯粹写不进去是思源的问题，
       // 不记——否则一次思源抖动就能把整队会话挨个记满、集体挪进 dead/。
       if (aborted || degraded) park(file, aborted ? "单会话超预算" : "抽取不完整");
-      else if (hasRest) {
-        // 抽到点了，但这一轮一条都没落库（全被跳过 / 模型给的条目被截光），
-        // 而后面还有轮次没抽。留在队列重试，同时记一次——否则这场会在队头
-        // 无限空转，烧的是模型的钱。
-        onLine(`    · 抽到点了，但一条都没落库，还剩 ${restTurns.length} 轮；留在队列重试`);
-        park(file, "抽到点了但一条都没写进去");
+      else if (hasRest && failedHere === 0 && writtenHere === 0 && skippedHere === 0 && !cleanEmpty) {
+        // 走到这里说明抽取本身没跑完整：降级、报错、或条目被 dropped 截光。
+        // 另外三种零写入都不记账：模型正常判空（上面已摘轮次）、全被判重跳过
+        // （正常）、写库失败（思源的问题，不记在会话头上）。
+        onLine(`    · 抽到点了，但抽取没完整跑完，还剩 ${restTurns.length} 轮；留在队列重试`);
+        park(file, "抽到点了但抽取不完整、零产出");
       }
     }
 

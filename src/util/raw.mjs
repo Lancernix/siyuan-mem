@@ -374,24 +374,53 @@ export function narrowAnchor(text, turns, from, to) {
 
   const rows = [];
   for (let k = from; k <= to; k++) {
-    const t = String(turns?.[k]?.text ?? turns?.[k]?.content ?? "");
-    rows.push({ k, text: t, low: t.toLowerCase() });
+    const rec = turns?.[k] ?? {};
+    const kind = String(rec.source?.kind ?? "");
+    // 对齐 normalizeTurns：注入块（plugin: 前缀）和非 user/assistant 行不参与打分，
+    // 但**下标必须保留**，否则后面的轮次号会整体错位。
+    //
+    // 注入块里装的是「以前抽出来的结论」，跟这次的新结论天然同词，分数虚高——
+    // 峰值会落在注入行上，指针指向插件注入而不是真实对话，窗口也会被拽宽。
+    const usable =
+      !kind.startsWith("plugin:") &&
+      (rec.role === "user" || rec.role === "assistant" || rec.role == null);
+    const t = usable ? String(rec.text ?? rec.content ?? "") : "";
+    rows.push({ k, text: t, low: t.toLowerCase(), usable });
   }
+  const usableCount = rows.filter((r) => r.usable).length;
+  if (!usableCount) return keep("no-signal");
 
-  // 自适应去噪：在这一批每一行都出现的 token 没有定位力（api / json / node 之类）。
-  // 硬编码停用词表换个项目就失效，用「文档频率」更稳。
+  // 自适应去噪：在这一批几乎每行都出现的词没有定位力（api / json / node，以及
+  // 「记忆」「判重」这类话题词）。硬编码停用词表换个项目就失效，用文档频率更稳。
+  // 软锚也要去噪，否则话题词均匀分布时每行都接近满分，密度窗口会一路扩到 47 行，
+  // 算法报「收窄成功」却根本没指向证据所在行。
   const df = new Map();
-  for (const h of hard) df.set(h, rows.filter((r) => r.low.includes(h)).length);
-  const informative = hard.filter((h) => df.get(h) > 0 && df.get(h) < rows.length);
+  for (const h of hard) df.set(h, rows.filter((r) => r.usable && r.low.includes(h)).length);
+  const informative = hard.filter((h) => df.get(h) > 0 && df.get(h) < usableCount);
+  const softDf = new Map();
+  for (const g of soft) softDf.set(g, rows.filter((r) => r.usable && r.text.includes(g)).length);
+  const informativeSoft = soft.filter((g) => softDf.get(g) > 0 && softDf.get(g) < usableCount * 0.8);
+
+  // 没有任何硬锚能在原文里落地时，别猜。
+  //
+  // 这时打分只剩中文二字片段，而模型改写过的结论跟同话题的任意一段对话都有大量
+  // 重合词，峰值常常落在最长的那条回复、或干脆是会话尾部——抽检里指偏的条目
+  // 大半属于这种：「结论讲 .gitignore / dist.mjs，窗口却落在『线上中心无响应』」。
+  // 硬锚是唯一不依赖语义判断的定位证据，没有它就宁可保留粗范围。
+  if (!informative.length) return keep("no-usable-hard");
 
   for (const r of rows) {
-    r.hardHits = informative.filter((h) => r.low.includes(h)).length;
-    r.softHits = soft.reduce((n, g) => n + (r.text.includes(g) ? 1 : 0), 0);
-    r.score = r.hardHits * 3 + (soft.length ? r.softHits / soft.length : 0);
+    r.hardHits = r.usable ? informative.filter((h) => r.low.includes(h)).length : 0;
+    r.softHits = r.usable ? informativeSoft.reduce((n, g) => n + (r.text.includes(g) ? 1 : 0), 0) : 0;
+    r.score = r.hardHits * 3 + (informativeSoft.length ? r.softHits / informativeSoft.length : 0);
   }
 
   const best = rows.reduce((a, b) => (b.score > a.score ? b : a), rows[0]);
   if (!best || best.score <= 0) return keep("no-signal");
+  // 得分太均匀就别收窄：这时「峰值」只是噪声，窗口扩出来既没指向证据也省不了几行。
+  const sorted = rows.filter((r) => r.usable).map((r) => r.score).sort((x, y) => x - y);
+  const median = sorted[Math.floor(sorted.length / 2)] ?? 0;
+  if (median > 0 && best.score < median * 1.5) return keep("flat-score");
 
   // 以峰值行为种子，向左右扩成一个**连续窗口**，直到装下 80% 的总得分。
   //
@@ -405,9 +434,23 @@ export function narrowAnchor(text, turns, from, to) {
   let b = best.k;
   let acc = best.score;
   while (totalScore > 0 && acc / totalScore < 0.8 && (a > from || b < to)) {
-    const l = a > from ? at(a - 1).score : -1;
-    const r = b < to ? at(b + 1).score : -1;
-    if (l >= r && l >= 0) {
+    // 两侧得分相等时**对称扩**。原来写成 `l >= r` 一律先扩左，均匀得分的批次
+    // 窗口会整个偏向左侧，证据在右边时反而被排除。
+    const canL = a > from;
+    const canR = b < to;
+    const l = canL ? at(a - 1).score : -1;
+    const r = canR ? at(b + 1).score : -1;
+    if (l > r && l >= 0) {
+      a--;
+      acc += l;
+    } else if (r > l && r >= 0) {
+      b++;
+      acc += r;
+    } else if (l >= 0 && r >= 0) {
+      a--;
+      b++;
+      acc += l + r;
+    } else if (l >= 0) {
       a--;
       acc += l;
     } else if (r >= 0) {
@@ -428,9 +471,11 @@ export function narrowAnchor(text, turns, from, to) {
   // 约束 2：结论里 80% 的中文片段在窗口里还得找得到（防止把跨轮归纳的结论硬塞
   // 进两行里）。按**种类**算，不按出现次数——「记忆」「判重」这种词在同话题会话里
   // 几十行都有，用次数当分母会把分母撑爆，真正能收窄的条目全被判成 scattered-soft。
+  // 与打分一致，都用 informativeSoft。用全部 soft 的话，话题词在整批里到处都有，
+  // 窗口里随便留几行就能凑满 80%，这个守卫几乎恒过，等于没收紧。
   const fullText = rows.map((r) => r.text).join("\n");
-  const softTotal = soft.filter((g) => fullText.includes(g)).length;
-  const softKept = soft.filter((g) => winText.includes(g)).length;
+  const softTotal = informativeSoft.filter((g) => fullText.includes(g)).length;
+  const softKept = informativeSoft.filter((g) => winText.includes(g)).length;
   if (softTotal > 0 && softKept / softTotal < 0.8) return keep("scattered-soft");
   // 约束 3：没缩多少就别折腾。
   if (b - a + 1 > (to - from + 1) * 0.8) return keep("no-gain");

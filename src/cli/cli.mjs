@@ -133,6 +133,7 @@ async function cmdStatus() {
     const bits = [`今天裁决 ${dh.decisions} 条（replace ${dh.replace} / covered ${dh.covered}）`];
     if (dh.failed) bits.push(`失败 ${dh.failed}${dh.lastError ? `（最近：${dh.lastError}）` : ""}`);
     if (dh.crashed) bits.push(`崩溃 ${dh.crashed} 次（程序错误，要查）${dh.lastError ? `：${dh.lastError}` : ""}`);
+    if (dh.leafFailed) bits.push(`子块失败 ${dh.leafFailed}（拆半重试没成）`);
     console.log(`判重         ${bits.join("，")}`);
   }
   console.log(`待处理       ${pending().length} 个会话在队列里`);

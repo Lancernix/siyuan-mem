@@ -75,3 +75,16 @@ test("空表 / 空名字不炸", () => {
   // lookup 保持原语义：只认活实体
   assert.equal(lookup(TABLE, "骑行背包背部出汗"), null);
 });
+
+test("反向闭包也走 norm()：手改表在 mergedInto 里加了空格，旧名不能漏", () => {
+  // 正向爬升用 norm() 比 mergedInto，反向闭包原来用原始串 names.has()，
+  // 两条路不一致时「手改了表」的旧名会被漏掉——而那正是走爬升路径的理由。
+  const t = [
+    { name: "项目甲", aliases: [], status: "active", mergedInto: "" },
+    { name: "项目乙", aliases: ["乙别称"], status: "merged", mergedInto: " 项目甲 " },
+  ];
+  const r = topicNames(t, "项目甲");
+  assert.equal(r.found, true);
+  assert.ok(r.names.includes("项目乙"), `旧名要回到闭包里，实际 ${r.names.join(",")}`);
+  assert.ok(r.names.includes("乙别称"), "旧名的别名也要一起带上");
+});

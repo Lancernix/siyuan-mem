@@ -296,18 +296,20 @@ test("一个会话把本轮撞停、但别的会话写得进去：记它一次�
   );
 });
 
-test("抽到点了但一条都没写进去：不许归档，剩余轮次留在队列里", () => {
-  // 上一版把「写了几条」和「写库干不干净」塞进同一个条件，于是零写入时既不摘轮次、
-  // 也不置 trimmed，complete 就成了 true——直接归档，剩下的轮次跟着文件一起消失。
-  // 零写入很常见：全被 hash 判重跳过，或者模型这批没抽出东西。
-  const out = run(`
-    import { writeFileSync, readFileSync } from "node:fs";
+test("全被判重跳过是正常，不是故障：允许摘轮次，三轮也不进死信", () => {
+  // 第五轮 CR：上一版 hasRest 分支一律 park，把「内容已在库里」记成会话故障，
+  // 三轮后把还剩 20 轮没抽的会话扫进 dead/，而没有任何一条写入失败。
+  // 全跳过 = 这几轮已经处理完了，可以安全摘掉；只有模型零产出才该记账。
+  const home = mkdtempSync(join(tmpdir(), "mem-alldup-"));
+  mkdirSync(join(home, ".siyuan-mem", "inbox"), { recursive: true });
+  const code = `
+    import { existsSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
     import { join } from "node:path";
     import { processQueue } from "./src/core/jobs.mjs";
-    import { INBOX_DIR } from "./src/util/config.mjs";
+    import { INBOX_DIR, DEAD_DIR } from "./src/util/config.mjs";
 
-    writeFileSync(join(INBOX_DIR, "sess-all-dup.json"), ${JSON.stringify(sessionJson(6))});
-    // 每条都写"成功"但其实全被判成重复：written=0、skipped=n、failed=0。
+    const f = join(INBOX_DIR, "sess-alldup.json");
+    if (!existsSync(f)) writeFileSync(f, ${JSON.stringify(sessionJson(6))});
     const store = {
       listCurrent: async () => [],
       docIds: async () => ({ notebook: "box", months: {}, entries: "e", entities: "n", pending: "p" }),
@@ -321,13 +323,96 @@ test("抽到点了但一条都没写进去：不许归档，剩余轮次留在�
       mode: "model", batches: 3, stoppedEarly: true, coveredThrough: 3, remainingBatches: 2,
     });
     const sum = await processQueue({ useModel: false, deps: { cfg, sy: { sql: async () => [] }, store, extract }, maxSessionMs: 60_000 });
-    const rest = JSON.parse(readFileSync(join(INBOX_DIR, "sess-all-dup.json"), "utf8"));
-    console.log(JSON.stringify({ written: sum.written, skipped: sum.skipped, trimmed: sum.trimmed, turns: rest.turns.length, dead: sum.dead }));
-  `);
-  assert.equal(out.written, 0, "前提：一条都没写进去");
-  assert.equal(out.trimmed, 0, "零写入不能摘轮次");
-  assert.equal(out.turns, 12, "文件必须还在队列里，12 条 turn 一条不少");
-  assert.equal(out.dead, 0, "第一次不该直接进死信");
+    const rest = existsSync(f) ? JSON.parse(readFileSync(f, "utf8")) : { turns: [] };
+    console.log(JSON.stringify({
+      written: sum.written, skipped: sum.skipped, trimmed: sum.trimmed,
+      turns: rest.turns.length, dead: sum.dead,
+      deadFiles: existsSync(DEAD_DIR) ? readdirSync(DEAD_DIR).filter((x) => x.endsWith(".json")) : [],
+    }));
+  `;
+  const runs = [];
+  for (let i = 0; i < 3; i++) runs.push(runIn(home, code));
+  assert.equal(runs[0].written, 0, "前提：一条都没写进去");
+  assert.equal(runs[0].skipped, 2, "两条全被判重跳过");
+  assert.equal(runs[0].trimmed, 1, "全跳过也是处理完了，可以摘轮次");
+  assert.equal(runs[0].turns, 8, "12 条 turn 摘掉前 4 条，剩 8 条");
+  for (const r of runs) assert.equal(r.dead, 0, "任何一轮都不该进死信");
+  assert.equal(runs[2].deadFiles.length, 0, "三轮后 dead/ 里必须什么都没有");
+});
+
+test("模型正常判空 = 处理完了：摘轮次继续抽后半段，三轮也不进死信", () => {
+  // 第六轮 CR：模型调用成功、判定这几轮没什么可记，这不是会话故障。
+  // 上一版一律 park，三轮后把还剩 20 轮的会话扫进 dead/。
+  const home = mkdtempSync(join(tmpdir(), "mem-cleanempty-"));
+  mkdirSync(join(home, ".siyuan-mem", "inbox"), { recursive: true });
+  const code = `
+    import { existsSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
+    import { join } from "node:path";
+    import { processQueue } from "./src/core/jobs.mjs";
+    import { INBOX_DIR, DEAD_DIR } from "./src/util/config.mjs";
+
+    const f = join(INBOX_DIR, "sess-cleanempty.json");
+    if (!existsSync(f)) writeFileSync(f, ${JSON.stringify(sessionJson(6))});
+    const store = {
+      listCurrent: async () => [],
+      docIds: async () => ({ notebook: "box", months: {}, entries: "e", entities: "n", pending: "p" }),
+      ensureGroupAnchor: async () => "",
+      supersede: async () => {},
+      writeEntry: async () => ({ id: "blk" }),
+    };
+    const cfg = { raw: { enabled: false }, extract: { minTurnChars: 10, maxCharsPerCall: 16000, maxEntriesPerBatch: 8, maxEntriesPerSession: 200 } };
+    const extract = async () => ({ entries: [], mode: "model", batches: 3, stoppedEarly: true, coveredThrough: 3, remainingBatches: 2 });
+    const sum = await processQueue({ useModel: false, deps: { cfg, sy: { sql: async () => [] }, store, extract }, maxSessionMs: 60_000 });
+    const rest = existsSync(f) ? JSON.parse(readFileSync(f, "utf8")) : { turns: [] };
+    console.log(JSON.stringify({
+      trimmed: sum.trimmed, dead: sum.dead, turns: rest.turns.length,
+      deadFiles: existsSync(DEAD_DIR) ? readdirSync(DEAD_DIR).filter((x) => x.endsWith(".json")) : [],
+    }));
+  `;
+  const runs = [];
+  for (let i = 0; i < 3; i++) runs.push(runIn(home, code));
+  assert.equal(runs[0].trimmed, 1, "正常判空也算处理完，可以摘轮次");
+  assert.equal(runs[0].turns, 8, "12 条 turn 摘掉前 4 条，剩 8 条继续抽");
+  for (const r of runs) assert.equal(r.dead, 0, "任何一轮都不该进死信");
+  assert.equal(runs[2].deadFiles.length, 0, "三轮后 dead/ 必须空的");
+});
+
+test("抽取不完整的零产出才记账：报错或截光的会话，试满上限进死信", () => {
+  // 与上面区分开：模型报错 / 条目被 dropped 截光，是真没处理完，不能摘轮次。
+  const home = mkdtempSync(join(tmpdir(), "mem-dirtyempty-"));
+  mkdirSync(join(home, ".siyuan-mem", "inbox"), { recursive: true });
+  const code = `
+    import { existsSync, writeFileSync, readdirSync } from "node:fs";
+    import { join } from "node:path";
+    import { processQueue } from "./src/core/jobs.mjs";
+    import { INBOX_DIR, DEAD_DIR } from "./src/util/config.mjs";
+
+    const f = join(INBOX_DIR, "sess-dirtyempty.json");
+    if (!existsSync(f)) writeFileSync(f, ${JSON.stringify(sessionJson(6))});
+    const store = {
+      listCurrent: async () => [],
+      docIds: async () => ({ notebook: "box", months: {}, entries: "e", entities: "n", pending: "p" }),
+      ensureGroupAnchor: async () => "",
+      supersede: async () => {},
+      writeEntry: async () => ({ id: "blk" }),
+    };
+    const cfg = { raw: { enabled: false }, extract: { minTurnChars: 10, maxCharsPerCall: 16000, maxEntriesPerBatch: 8, maxEntriesPerSession: 200 } };
+    const extract = async () => ({
+      entries: [], mode: "model", error: "1/3 批失败：超时", batches: 3,
+      stoppedEarly: true, coveredThrough: 3, remainingBatches: 2,
+    });
+    const sum = await processQueue({ useModel: false, deps: { cfg, sy: { sql: async () => [] }, store, extract }, maxSessionMs: 60_000 });
+    console.log(JSON.stringify({
+      trimmed: sum.trimmed, dead: sum.dead,
+      deadFiles: existsSync(DEAD_DIR) ? readdirSync(DEAD_DIR).filter((x) => x.endsWith(".json")) : [],
+    }));
+  `;
+  const runs = [];
+  for (let i = 0; i < 3; i++) runs.push(runIn(home, code));
+  assert.equal(runs[0].trimmed, 0, "抽取报错了就不能摘轮次");
+  assert.equal(runs[0].dead, 0, "第一次只记账");
+  assert.equal(runs[2].dead, 1, "一直抽不完整，第三次该进死信");
+  assert.equal(runs[2].deadFiles.length, 1);
 });
 
 test("毒会话排在队首：读探针正常时要累计次数，跑到上限必须进 dead/", () => {
@@ -370,4 +455,49 @@ test("毒会话排在队首：读探针正常时要累计次数，跑到上限�
   const deadFiles = readdirSync(join(home, ".siyuan-mem", "dead"));
   assert.ok(deadFiles.some((f) => f.endsWith(".json")), "dead/ 里要有这个会话");
   assert.ok(deadFiles.some((f) => f.endsWith(".why")), "旁边要有原因文件");
+});
+
+test("思源连读都读不动：一次故障不该把整队扫进死信", () => {
+  // 第八轮 CR：读探针正常那一半有护栏，返回 false 的这一半没有。
+  // 设计意图是「库整体卡住时不记在任何会话头上」，否则一次抖动能把全队扫进 dead/。
+  const home = mkdtempSync(join(tmpdir(), "mem-probe-down-"));
+  mkdirSync(join(home, ".siyuan-mem", "inbox"), { recursive: true });
+  const code = `
+    import { existsSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
+    import { join } from "node:path";
+    import { processQueue } from "./src/core/jobs.mjs";
+    import { INBOX_DIR, DEAD_DIR, ATTEMPTS_PATH } from "./src/util/config.mjs";
+
+    const f = join(INBOX_DIR, "sess-dbdown.json");
+    if (!existsSync(f)) writeFileSync(f, ${JSON.stringify(sessionJson(4, "dbdown"))});
+    const store = {
+      listCurrent: async () => [],
+      docIds: async () => ({ notebook: "box", months: {}, entries: "e", entities: "n", pending: "p" }),
+      ensureGroupAnchor: async () => "",
+      supersede: async () => {},
+      writeEntry: async () => { throw new Error("连不上思源：超时 5000ms"); },
+    };
+    const cfg = { raw: { enabled: false }, extract: { minTurnChars: 10, maxCharsPerCall: 16000, maxEntriesPerBatch: 8, maxEntriesPerSession: 200 } };
+    const extract = async () => ({
+      entries: [1, 2, 3, 4].map((i) => ({ text: "第 " + i + " 条结论", entity: "proj", type: "fact", confidence: 2, from: 0, to: 1 })),
+      mode: "model", batches: 1,
+    });
+    // 写和读都挂：这正是「思源整体卡住」，不是某一场会话自己的毛病。
+    const sy = { sql: async () => { throw new Error("SELECT timeout 5000ms"); } };
+    const sum = await processQueue({ useModel: false, deps: { cfg, sy, store, extract }, maxSessionMs: 60_000 });
+    console.log(JSON.stringify({
+      broken: sum.broken, dead: sum.dead, inbox: existsSync(f),
+      deadFiles: existsSync(DEAD_DIR) ? readdirSync(DEAD_DIR).filter((x) => x.endsWith(".json")) : [],
+      attempts: existsSync(ATTEMPTS_PATH) ? JSON.parse(readFileSync(ATTEMPTS_PATH, "utf8")) : {},
+    }));
+  `;
+  const runs = [];
+  for (let i = 0; i < 4; i++) runs.push(runIn(home, code));
+  for (const r of runs) {
+    assert.equal(r.broken, true, "前提：本轮熔断了");
+    assert.equal(r.dead, 0, "库坏了不能记在会话头上");
+    assert.equal(r.inbox, true, "会话必须留在队列里等思源恢复");
+    assert.equal(r.deadFiles.length, 0, "dead/ 里不该有任何文件");
+  }
+  assert.deepEqual(runs[3].attempts, {}, "四轮都不该产生失败计数");
 });

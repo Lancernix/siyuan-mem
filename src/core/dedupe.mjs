@@ -262,14 +262,14 @@ export function resolveMatch(match, ids) {
  * 就因为这个藏了三十七分钟。有了这几个数，自检和 `mem status` 才能问出
  * 「这一小时到底判过没有」。
  */
-const stats = { calls: 0, answered: 0, decisions: 0, covered: 0, replace: 0, failed: 0, crashed: 0, lastError: "", lastAt: 0 };
+const stats = { calls: 0, answered: 0, decisions: 0, covered: 0, replace: 0, failed: 0, crashed: 0, leafFailed: 0, lastError: "", lastAt: 0 };
 
 export function dedupeStats() {
   return { ...stats };
 }
 
 export function resetDedupeStats() {
-  Object.assign(stats, { calls: 0, answered: 0, decisions: 0, covered: 0, replace: 0, failed: 0, crashed: 0, lastError: "", lastAt: 0 });
+  Object.assign(stats, { calls: 0, answered: 0, decisions: 0, covered: 0, replace: 0, failed: 0, crashed: 0, leafFailed: 0, lastError: "", lastAt: 0 });
 }
 
 export function renderChunk(chunk) {
@@ -302,6 +302,10 @@ async function judgeChunk({ cfg, chunk, out, depth = 0, deadline = Number.POSITI
       stats.lastError = String(e?.message ?? "").slice(0, 120) || reason;
       if (codeErr) stats.crashed++;
       else stats.failed++;
+    } else {
+      // 拆半重试的子块失败不会冒到父层（子块自己 return out 了），只报事件的话
+      // status 上完全看不见。单独记一个数，不混进 failed/crashed 的口径。
+      stats.leafFailed++;
     }
     event(codeErr ? "dedupe.crash" : "dedupe.failed", {
       size: chunk.length,

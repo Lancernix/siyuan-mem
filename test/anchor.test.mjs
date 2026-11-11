@@ -55,7 +55,7 @@ test("一点信号都没有：原样返回，说清原因", () => {
   assert.equal(r.narrowed, false);
   assert.equal(r.from, 0);
   assert.equal(r.to, 11);
-  assert.equal(r.reason, "no-signal");
+  assert.ok(["no-signal", "no-usable-hard"].includes(r.reason), `没信号就没法定位，实际 ${r.reason}`);
 });
 
 test("本来就很窄（<4 行）不动：收窄没有意义，还有风险", () => {
@@ -71,12 +71,14 @@ test("指针路径本身不算锚点：同一批条目都带着它，没有区�
   assert.ok(!hard.some((h) => h.includes("jsonl")), `后缀不该进锚点：${hard.join(",")}`);
 });
 
-test("结论是模型改写过的，不是逐字摘录：只靠中文片段也能收窄", () => {
+test("没有能在原文落地的硬锚：宁可不收窄，也不靠中文片段猜", () => {
+  // 存量抽检里指偏的大半是这种：结论讲 .gitignore / dist.mjs，窗口却落在
+  // 「线上中心无响应」的排查长回复上——纯中文片段在同话题对话里到处都重合。
   const turns = turnsOf(12);
   turns[7] = { role: "assistant", text: "亚狮龙 NO.2 属于竞赛级用球，鹅毛，适合比赛；训练用鸭毛的就够。" };
   const r = narrowAnchor("羽毛球比赛用球选亚狮龙竞赛级，训练用鸭毛款即可", turns, 0, 11);
-  assert.equal(r.narrowed, true, `没有 ASCII 硬锚时中文片段也要能定位：${r.reason}`);
-  assert.ok(r.from <= 7 && r.to >= 7);
+  assert.equal(r.narrowed, false);
+  assert.equal(r.reason, "no-usable-hard");
 });
 
 test("常见中文词在窗口外反复出现：按次数算会把分母撑爆，必须按种类算", () => {
@@ -90,4 +92,37 @@ test("常见中文词在窗口外反复出现：按次数算会把分母撑爆�
   const r = narrowAnchor("判重规则改了：抽取按字符分批，maxCharsPerCall 调到 8000", turns, 0, 11);
   assert.equal(r.narrowed, true, `常见词不该挡住收窄：${r.reason}`);
   assert.ok(r.from <= 6 && r.to >= 6);
+});
+
+test("plugin: 注入块不参与打分：同一份原文，注入行有没有内容结果必须一样", () => {
+  const text = "抽取按字符分批，maxCharsPerCall 调到 8000";
+  const turns = turnsOf(12);
+  turns[4] = {
+    role: "user",
+    source: { kind: "plugin:memory" },
+    text: "历史结论：maxCharsPerCall 默认 16000，抽取按字符分批，实测一批约一万 token。",
+  };
+  turns[6] = { role: "assistant", text: "maxCharsPerCall 调到 8000，抽取按字符分批。" };
+  const withInjected = narrowAnchor(text, turns, 0, 11);
+  const blanked = turns.map((t, i) => (i === 4 ? { ...t, text: "" } : t));
+  const without = narrowAnchor(text, blanked, 0, 11);
+  assert.deepEqual(
+    [withInjected.from, withInjected.to, withInjected.narrowed],
+    [without.from, without.to, without.narrowed],
+    "注入行（装的是以前抽出的结论）不该影响窗口，否则指针会指向插件注入"
+  );
+  assert.ok(withInjected.from <= 6 && withInjected.to >= 6, "峰值应落在真实对话那行");
+});
+
+test("话题词均匀铺满 60 行、硬锚只在第 7 行：不许报收窄却指偏", () => {
+  const turns = turnsOf(60, (i) => `判重规则抽取分批字符模型结论配置，第 ${i} 轮`);
+  turns[7] = {
+    role: "assistant",
+    text: "alpha-7 和 maxCharsPerCall-7 只在这一行出现，判重规则抽取分批字符模型结论配置。",
+  };
+  const r = narrowAnchor("alpha-7 与 maxCharsPerCall-7 的配置，判重规则抽取分批字符模型结论", turns, 0, 59);
+  if (r.narrowed) {
+    assert.ok(r.from <= 7 && r.to >= 7, `窗口要盖住证据行，实际 ${r.from}-${r.to}`);
+    assert.ok(r.rows <= 12, `不能再跨几十行还叫收窄，实际 ${r.rows} 行（${r.reason}）`);
+  }
 });

@@ -140,12 +140,29 @@ export function similarity(a, b) {
  *
  * 想改实体名走 `mem entity add/merge`，改完回填条目属性；表本身随时可重建。
  */
-export function loadEntities() {
+/**
+ * 读实体表。
+ *
+ * `strict: true` 时区分三种状态：数组 = 正常（空数组 = 全新安装/真空表）、
+ * `null` = 读失败或内容坏了。默认仍返回 []，调用方不受影响。
+ *
+ * 为什么必须分开：检索拿这张表解析别名和合并旧名，读失败却当成「空表」时，
+ * `topicNames` 一律 found:false，界面就会说「没有这个话题（一个字都对不上）」——
+ * 表坏了被说成库里没东西，正是这套系统最难查的那类静默降级。
+ */
+export function loadEntities({ strict = false } = {}) {
+  let text;
   try {
-    const list = JSON.parse(readFileSync(ENTITIES_PATH, "utf8"));
-    return Array.isArray(list) ? list : [];
+    text = readFileSync(ENTITIES_PATH, "utf8");
+  } catch (e) {
+    if (e?.code === "ENOENT") return [];
+    return strict ? null : [];
+  }
+  try {
+    const list = JSON.parse(text);
+    return Array.isArray(list) ? list : strict ? null : [];
   } catch {
-    return [];
+    return strict ? null : [];
   }
 }
 
@@ -205,8 +222,14 @@ export function topicNames(table, name) {
   let grew = true;
   while (grew) {
     grew = false;
+    // 正向爬升用 norm() 比 mergedInto，反向闭包也得用 norm()，否则表被手改过
+    // （大小写、空格差异）时两条路对不上，旧名会漏掉——而「手改了表」正是走
+    // 这条爬升路径的理由。names 本身保留原始拼写，SQL 要按原样匹配。
+    const normNames = new Set([...names].map(norm));
     for (const e of table) {
-      const home = names.has(e.name) || (e.status === "merged" && names.has(e.mergedInto));
+      const home =
+        normNames.has(norm(e.name)) ||
+        (e.status === "merged" && normNames.has(norm(e.mergedInto ?? "")));
       if (!home) continue;
       for (const n of [e.name, ...(e.aliases ?? [])]) {
         if (n && !names.has(n)) {

@@ -138,6 +138,28 @@ test("今天的账：裁决、失败、崩溃分开数", () => {
   assert.equal(h.lastError, "deadline is not defined", "最后一条错误留给人看");
 });
 
+test("子块失败按 depth 分流：两个视图里的数字要一致", () => {
+  // dedupeStats() 里 depth>0 计 leafFailed，事件日志这边也得一样，否则同一次
+  // 失败在 status 和日志里是不同数字。
+  const day = "2099-01-03";
+  const dir = join(process.env.HOME, ".siyuan-mem", "logs");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, `${day}.jsonl`),
+    [
+      { ev: "dedupe.failed", depth: 1, error: "timeout" },
+      { ev: "dedupe.crash", depth: 2, error: "TypeError" },
+      { ev: "dedupe.crash", error: "deadline is not defined" },
+    ]
+      .map((e) => JSON.stringify(e))
+      .join("\n") + "\n"
+  );
+  const h = dedupeHealthToday(day);
+  assert.equal(h.leafFailed, 2, "两个子块失败都算叶子");
+  assert.equal(h.crashed, 1, "只有逻辑层的程序错误算崩溃");
+  assert.equal(h.failed, 0);
+});
+
 test("模型返回空裁决：哨兵必须报错，这就是它要抓的「静默失效」", async () => {
   // {"decisions":[]} 是模型换了个键名、或者没按格式回的典型样子。它不抛错、
   // 不产生裁决，如果只看 failed 计数，哨兵会报「通过」——正是最该抓的那种坏。

@@ -90,7 +90,7 @@ export async function checkDedupe(cfg, { deadlineMs = 90_000 } = {}) {
  * 前者是我们自己的 bug，出现一次就该当事故处理；后者是环境噪音。
  */
 export function dedupeHealthToday(day = dayOf()) {
-  const out = { decisions: 0, replace: 0, covered: 0, failed: 0, crashed: 0, lastError: "" };
+  const out = { decisions: 0, replace: 0, covered: 0, failed: 0, crashed: 0, leafFailed: 0, lastError: "" };
   const file = pathOf(day);
   if (!existsSync(file)) return out;
   for (const line of readFileSync(file, "utf8").split("\n")) {
@@ -106,11 +106,21 @@ export function dedupeHealthToday(day = dayOf()) {
       if (e.action === "replace") out.replace++;
       else if (e.action === "covered") out.covered++;
     } else if (e.ev === "dedupe.failed") {
-      out.failed++;
-      out.lastError = String(e.error ?? e.reason ?? "").slice(0, 60);
+      // 拆半重试的子块失败单独算：它不会冒到逻辑层，混进 failed 会把一次失败
+      // 记成八次；完全不记又看不见。
+      if (Number(e.depth) > 0) out.leafFailed++;
+      else {
+        out.failed++;
+        out.lastError = String(e.error ?? e.reason ?? "").slice(0, 60);
+      }
     } else if (e.ev === "dedupe.crash") {
-      out.crashed++;
-      out.lastError = String(e.error ?? "").slice(0, 60);
+      // 与 dedupeStats() 的内存口径一致：子块（depth>0）的程序错误计 leafFailed，
+      // 不计 crashed。否则同一次失败在两个视图里是两个数字。
+      if (Number(e.depth) > 0) out.leafFailed++;
+      else {
+        out.crashed++;
+        out.lastError = String(e.error ?? "").slice(0, 60);
+      }
     }
   }
   return out;

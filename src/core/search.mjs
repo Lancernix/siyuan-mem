@@ -112,9 +112,12 @@ export function scoreOf(row, terms, entity) {
 let formatChecked = false;
 function checkBodyFormat(rows) {
   if (formatChecked || !rows?.length) return;
-  formatChecked = true;
   const sample = rows.find((r) => String(r.content ?? "").includes("assets/mem-raw/"));
-  if (sample && !String(sample.content).includes(" 原文 assets/")) {
+  // 这次候选里没样本不代表以后也没有。先置位的话，第一次查询（常常是空结果）
+  // 就把自检永久消耗掉了，格式漂移再也不会被发现。
+  if (!sample) return;
+  formatChecked = true;
+  if (!String(sample.content).includes(" 原文 assets/")) {
     event("search.format_drift", {
       tail: String(sample.content).slice(-140),
     });
@@ -155,15 +158,27 @@ export async function searchEntries(opts = {}) {
   let topicNote = null;
   if (opts.topic) {
     let resolved = { found: false, canonical: "", names: [] };
+    let tableUnavailable = false;
     try {
-      resolved = topicNames(loadEntities(), opts.topic);
+      const table = loadEntities({ strict: true });
+      if (table === null) tableUnavailable = true;
+      else resolved = topicNames(table, opts.topic);
     } catch {
-      // 表读不出来（文件坏了、刚被清空）就退回字面匹配，别把检索整个搞挂。
+      // topicNames 也能因为表里字段形状不对而抛，同样算「表不可用」。
+      tableUnavailable = true;
     }
     const names = resolved.found ? resolved.names : [opts.topic];
     const ors = names.map((n) => `ial LIKE '%${ATTR.entity}="${likeEsc(n)}"%' ESCAPE '\\'`);
     conds.push(`(${ors.join(" OR ")})`);
-    if (!resolved.found) topicNote = { asked: String(opts.topic), canonical: "", matched: [], known: false };
+    // known 是三态：false = 表正常但没这个话题；undefined = 表读不出来，
+    // 这次只做了字面匹配。后者不能说「没有这个话题」，那是在报假消息。
+    if (!resolved.found)
+      topicNote = {
+        asked: String(opts.topic),
+        canonical: "",
+        matched: [],
+        known: tableUnavailable ? undefined : false,
+      };
     else
       topicNote = {
         asked: String(opts.topic),
@@ -267,11 +282,17 @@ export async function searchEntries(opts = {}) {
       topic: opts.topic ?? "",
       project: opts.project ?? "",
       rows: rows.length,
-      topicKnown: topicNote ? topicNote.known : undefined,
+      // 四态分明：null = 没传话题；true/false = 表正常；"unavailable" = 表读不出来。
+      // 原来拿 undefined 同时表示「没传」和「表读不出」，日志里根本分不开。
+      topicKnown: topicNote ? (topicNote.known === undefined ? "unavailable" : topicNote.known) : null,
     });
     // 话题名根本没解析到 = 「你写的话题不在库里」，不是「这个话题没内容」。
     // 这两件事修法完全不同，不给提示的话，人只会觉得记忆库是空的然后瞎猜名字。
-    if (topicNote && !topicNote.known) {
+    if (topicNote && topicNote.known === undefined) {
+      // 表坏了/丢了：按字面查了，但别名和合并旧名都没展开，别说成「库里没有」。
+      hint = `实体表读不出来，这次按字面匹配「${topicNote.asked}」；别名和已合并的旧名可能查不到。`;
+      event("search.entities_unavailable", { topic: topicNote.asked });
+    } else if (topicNote && !topicNote.known) {
       let near = [];
       try {
         near = findCandidates(topicNote.asked, loadEntities(), { limit: 3 }).map((c) => c.entity.name);
