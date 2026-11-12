@@ -40,11 +40,26 @@ test("通知不回：回了客户端会当成孤儿响应", async () => {
   assert.equal(r, null);
 });
 
-test("工具清单只有 memory_search，query 是必填", async () => {
+test("工具清单是「一个主入口 + 两个导航工具」，各自说清互相的路由", async () => {
   const r = await handleMessage({ jsonrpc: "2.0", id: 2, method: "tools/list" });
-  assert.equal(r.result.tools.length, 1);
+  assert.deepEqual(
+    r.result.tools.map((t) => t.name),
+    ["memory_search", "memory_topics", "memory_entries"]
+  );
   assert.equal(r.result.tools[0].name, TOOL.name);
   assert.deepEqual(r.result.tools[0].inputSchema.required, ["query"]);
+  assert.deepEqual(r.result.tools[2].inputSchema.required, ["topic"]);
+  // 路由必须写在 description 里：不依赖 harness 的系统提示词，每个客户端自带。
+  // 少一条就等于没给工具——模型不知道什么时候该换一个。
+  for (const [i, others] of [
+    [0, ["memory_topics", "memory_entries"]],
+    [1, ["memory_search", "memory_entries"]],
+    [2, ["memory_search", "memory_topics"]],
+  ]) {
+    for (const other of others) {
+      assert.ok(r.result.tools[i].description.includes(other), `工具 ${i} 的描述该提到 ${other}`);
+    }
+  }
 });
 
 test("调用：参数翻译对了，结果是人读文本带原文指针", async () => {

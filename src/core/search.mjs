@@ -18,6 +18,7 @@
 import { loadConfig } from "../util/config.mjs";
 import { SiYuan, resolveNotebookId } from "../util/siyuan.mjs";
 import { event } from "../util/log.mjs";
+import { normalizeSource } from "../util/source.mjs";
 import { stripRawLink } from "../util/raw.mjs";
 import { loadEntities, topicNames, findCandidates } from "./entities.mjs";
 
@@ -396,10 +397,12 @@ export async function searchEntries(opts = {}) {
       event("memory.miss", {
         q: String(opts.q ?? "").slice(0, 60),
         terms: shown,
-        source: opts.source ?? "unknown",
+        source: normalizeSource(opts.source),
         reason,
       });
-    return { terms: shown, hits: [], reason };
+    // 早退没跑打分，scoreTerms 给空数组：下游（eval-rank）要能无条件读它，
+    // 不能拿到 undefined 之后在 for-of 里崩。
+    return { terms: shown, scoreTerms: [], hits: [], reason };
   };
   // 早退放在碰后端**之前**：没有可检索的东西时，思源是不是活着都不影响答案，
   // 先连一遍只会在后端故障时把「你问了句废话」伪装成「检索失败」。
@@ -530,12 +533,13 @@ export async function searchEntries(opts = {}) {
       event("memory.miss", {
         q: String(opts.q ?? "").slice(0, 60),
         terms: gate,
-        source: opts.source ?? "unknown",
+        source: normalizeSource(opts.source),
         reason: "backend-error",
         error: String(e?.message ?? e).slice(0, 120),
       });
     return {
       terms: gate,
+      scoreTerms: wordGate,
       hits: [],
       failed: true,
       reason: "backend-error",
@@ -549,10 +553,10 @@ export async function searchEntries(opts = {}) {
       event("memory.miss", {
         q: String(opts.q ?? "").slice(0, 60),
         terms: gate,
-        source: opts.source ?? "unknown",
+        source: normalizeSource(opts.source),
         reason: "sql-not-array",
       });
-    return { terms: gate, hits: [], failed: true, reason: "sql-not-array" };
+    return { terms: gate, scoreTerms: wordGate, hits: [], failed: true, reason: "sql-not-array" };
   }
   // 取候选的上限被撞到就说明可能有召回被截断：排序和日期过滤都在内存里做，
   // 被 SQL 砍掉的那些再也回不来。撞了要留痕，否则"查不到"永远查不出原因。
@@ -628,7 +632,7 @@ export async function searchEntries(opts = {}) {
         // 来源必须分开记：CLI 是人在调试，MCP 是 agent 真的在用，api 是别的机器。
         // 混在一起的话，「这套东西到底有没有被用起来」永远答不了——2026-11-11 那
         // 58 次命中里大半是我自己敲的，从日志上根本看不出来。
-        source: opts.source ?? "unknown",
+        source: normalizeSource(opts.source),
       });
   } catch {
     /* 日志失败不影响检索 */
@@ -644,7 +648,7 @@ export async function searchEntries(opts = {}) {
     event("memory.miss", {
       q: String(opts.q ?? "").slice(0, 60),
       terms,
-      source: opts.source ?? "unknown",
+      source: normalizeSource(opts.source),
       topic: opts.topic ?? "",
       project: opts.project ?? "",
       rows: rows.length,
@@ -682,6 +686,12 @@ export async function searchEntries(opts = {}) {
   // 原样打出来既难读又占 token；完整词表留给 allTerms 做诊断。
   return {
     terms: gate,
+    // **真正参与打分的词集**，和 terms 不是一回事：日期词只对 date 生效，
+    // 不参与正文/话题/摘要的相关度与排序。scripts/eval-rank.mjs 必须拿这份
+    // 去离线重排，否则含日期的查询会算出线上从没算过的分数、连顺序都不同
+    // （第十八轮复审 P2-1 实测「2026 部署计划」生产 r1,r2,r3 / 离线 r3,r1,r2）。
+    // 别在 eval-rank 里自己 filter(isDateTerm)——那就是日期那次「两处各一套」。
+    scoreTerms: wordGate,
     allTerms: terms,
     anchors,
     minShould,

@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { CONFIG_PATH, INBOX_DIR, loadConfig, LOG_PATH, machineId, saveConfig, offsetsOf, loadOffsets } from "../util/config.mjs";
 import { PROVIDERS, resolveModel, hasModel, probe as probeModel, saveModelChoice, maskKey, usageToday } from "../util/llm.mjs";
-import { dedupeHealthToday, recallHealthToday } from "../core/selfcheck.mjs";
+import { dedupeHealthToday, recallHealthToday, browseHealthToday } from "../core/selfcheck.mjs";
 import { formatHits, ATTR } from "../core/store.mjs";
 import { parseArgs } from "../util/args.mjs";
 import { loadRawIndex, readRange, parsePtr } from "../util/raw.mjs";
@@ -15,8 +15,9 @@ import { readDays, stats as logStats, dayOf } from "../util/log.mjs";
 import { normalizeTurns, promptState, toExchanges } from "../core/extract.mjs";
 import { drop, pending, readSession } from "../core/inbox.mjs";
 import { searchEntries } from "../core/search.mjs";
+import { listTopics, listEntries } from "../core/browse.mjs";
 import { emptyText, failureText } from "../core/search-reason.mjs";
-import { remoteSearch } from "../util/remote.mjs";
+import { remoteSearch, remoteTopics, remoteEntries } from "../util/remote.mjs";
 import { readLog, readJsonLines, auditMessages, HARNESS_NAMES } from "../util/readers/index.mjs";
 import { listSessions, summarize } from "../util/harness.mjs";
 import { open, enqueueLog, processQueue } from "../core/jobs.mjs";
@@ -155,6 +156,15 @@ async function cmdStatus() {
     console.log(
       `召回         ${rh.hit} 次命中，${rh.miss} 次空手${other ? `（另 ${other}，不计入空手）` : ""} — ${parts.join("，")}`
     );
+  }
+  // 导航单独一行：它是「agent 会不会先发现命名空间」的唯一信号，也是判断
+  // 新加的两个 MCP 工具到底有没有被用起来的依据。
+  const bh = browseHealthToday();
+  if (bh.topics || bh.entries) {
+    const parts = Object.entries(bh.bySource)
+      .sort((a, b) => b[1].topics + b[1].entries - (a[1].topics + a[1].entries))
+      .map(([k, v]) => `${k} 目录 ${v.topics} / 条目 ${v.entries}`);
+    console.log(`导航         ${bh.topics} 次列话题，${bh.entries} 次翻条目 — ${parts.join("，")}`);
   }
   console.log(`待处理       ${pending().length} 个会话在队列里`);
   console.log(`服务         ${svcLine}`);
@@ -1041,6 +1051,8 @@ async function cmdSearch(args, flags) {
         type: flags.type,
         days: flags.days,
         status: flags.all ? "" : undefined,
+        // 人在边缘机器上敲 `mem search --to` 也是 cli，别被中心记成 api（P2-2）。
+        source: "cli",
       })
     : await searchEntries({
         q,
@@ -1096,14 +1108,20 @@ async function cmdMcp(flags) {
 
   // 有中心地址就走中心：边缘机器上没有思源，直连必然超时，
   // 而超时的表现是「每次都查不到」，看起来像记忆库是空的。
-  const search = to
-    ? (opts) => remoteSearch({ ...opts, to, token })
-    : (opts) => searchEntries(opts);
+  // 三个工具**一起切换**：只给 search 接远端、导航留在本地的话，边缘机器上
+  // memory_topics 会去连一个不存在的思源，比没有这个工具还糟。
+  const io = to
+    ? {
+        search: (o) => remoteSearch({ ...o, to, token }),
+        topics: (o) => remoteTopics({ ...o, to, token }),
+        entries: (o) => remoteEntries({ ...o, to, token }),
+      }
+    : { search: searchEntries, topics: listTopics, entries: listEntries };
 
   // stdout 留给协议，日志一律 stderr——混一行进去客户端就断开。
   // 不在这里等：stdin 开着，readline 就撑着进程；关掉时进程自己退。
   startMcp({
-    search,
+    ...io,
     log: (m) => process.stderr.write(`${m}\n`),
   });
 }

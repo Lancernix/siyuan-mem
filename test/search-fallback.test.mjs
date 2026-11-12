@@ -253,3 +253,40 @@ test("「没问出词」也要留事件：不然 status 的 trivial 桶永远是
   const added2 = readEvents().slice(before2);
   assert.ok(added2.some((e) => e.ev === "memory.miss" && e.reason === "no-terms" && e.source === "ui"));
 });
+
+test("P2-1：scoreTerms 是生产真正打分的词集，含日期查询与离线重排一致", async () => {
+  // 第十八轮复审：eval-rank 原来用 r.terms（含日期词）离线重排，算出线上从没
+  // 算过的分数。searchEntries 现在返回 scoreTerms(= wordGate)，日期词被摘出去。
+  const { RANK_WEIGHTS } = await import("../src/core/search.mjs");
+  const withDate = await searchEntries({ q: "2025 部署计划", limit: 5, silent: true });
+  assert.deepEqual(withDate.scoreTerms, ["部署", "署计", "计划"], "日期词不参与正文打分");
+  assert.ok(withDate.terms.includes("2025"), "terms 仍然保留日期词，给人看检索词");
+
+  const pure = await searchEntries({ q: "2025", limit: 5, silent: true });
+  assert.deepEqual(pure.scoreTerms, [], "纯日期查询没有正文打分词，只按新近排");
+
+  // 用 scoreTerms 复算，分数必须与生产 score 完全一致（eval-rank 的 base）。
+  const recompute = (h, gate) => {
+    let s = 0;
+    for (const t of gate) {
+      const low = String(t).toLowerCase();
+      s += Math.min(String(h.text ?? "").toLowerCase().split(low).length - 1, RANK_WEIGHTS.textCap) * RANK_WEIGHTS.textPerHit;
+      if (String(h.entity ?? "").toLowerCase().includes(low)) s += RANK_WEIGHTS.entity;
+      if (String(h.brief ?? "").toLowerCase().includes(low)) s += RANK_WEIGHTS.brief;
+    }
+    const days = h.date ? Math.max(0, (Date.now() - Date.parse(h.date + "T00:00:00")) / 86400000) : 60;
+    return s - Math.min(days * RANK_WEIGHTS.daily, RANK_WEIGHTS.cap);
+  };
+  for (const h of withDate.hits) {
+    assert.ok(Math.abs(recompute(h, withDate.scoreTerms) - h.score) < 1e-6, `${h.id} 离线分数必须等于生产`);
+  }
+});
+
+test("P2-1：早退和失败路径也返回 scoreTerms，下游不会拿到 undefined", async () => {
+  const trivial = await searchEntries({ q: "？？？", limit: 5, silent: true });
+  assert.deepEqual(trivial.scoreTerms, []);
+  mode = "not-array";
+  const bad = await searchEntries({ q: "部署计划", limit: 5, silent: true });
+  assert.ok(Array.isArray(bad.scoreTerms), "失败路径也要守同一份返回契约");
+  mode = "ok";
+});

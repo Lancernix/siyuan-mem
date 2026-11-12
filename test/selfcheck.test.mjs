@@ -16,7 +16,7 @@ import { createServer } from "node:http";
 
 process.env.HOME = mkdtempSync(join(tmpdir(), "mem-selfcheck-"));
 
-const { checkDedupe, dedupeHealthToday , recallHealthToday } = await import("../src/core/selfcheck.mjs");
+const { checkDedupe, dedupeHealthToday, recallHealthToday, browseHealthToday } = await import("../src/core/selfcheck.mjs");
 const { dedupeStats, resetDedupeStats } = await import("../src/core/dedupe.mjs");
 
 function cfgFor(port, over = {}) {
@@ -228,4 +228,32 @@ test("后端故障和「没问出词」不算空手：这个指标只该反映�
   assert.equal(h.trivial, 2);
   assert.deepEqual(h.bySource.mcp, { hit: 0, miss: 1, failed: 1, trivial: 0 });
   assert.deepEqual(h.bySource.cli, { hit: 0, miss: 0, failed: 1, trivial: 2 });
+});
+
+test("导航单独计数：不能混进召回的空手率，也要能看出 agent 有没有在用", () => {
+  // 列话题/翻条目是「发现命名空间」，不是「召回准不准」。混进 recallHealthToday
+  // 会让那个分母被导航灌水；完全不记，又答不了新工具到底有没有被用起来。
+  const day = "2099-01-07";
+  const dir = join(process.env.HOME, ".siyuan-mem", "logs");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, `${day}.jsonl`),
+    [
+      { ev: "memory.browse", kind: "topics", source: "mcp", total: 42, shown: 20 },
+      { ev: "memory.browse", kind: "entries", source: "mcp", topic: "通勤骑行", n: 8 },
+      { ev: "memory.browse", kind: "topics", source: "api", total: 42, shown: 5 },
+      { ev: "memory.browse", kind: "weird", source: "mcp" },
+      { ev: "memory.hit", source: "mcp", n: 1 },
+    ]
+      .map((e) => JSON.stringify(e))
+      .join("\n") + "\n"
+  );
+  const b = browseHealthToday(day);
+  assert.equal(b.topics, 2);
+  assert.equal(b.entries, 1);
+  assert.deepEqual(b.bySource.mcp, { topics: 1, entries: 1 });
+  assert.deepEqual(b.bySource.api, { topics: 1, entries: 0 });
+  const r = recallHealthToday(day);
+  assert.equal(r.hit, 1);
+  assert.equal(r.miss, 0, "导航事件一次都不能算空手");
 });

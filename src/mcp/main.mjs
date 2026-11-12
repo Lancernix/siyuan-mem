@@ -12,7 +12,7 @@
  * 写过一次，没必要在 MCP 配置里再抄一遍。
  */
 import { loadConfig } from "../util/config.mjs";
-import { remoteSearch } from "../util/remote.mjs";
+import { remoteSearch, remoteTopics, remoteEntries } from "../util/remote.mjs";
 import { startMcp } from "./server.mjs";
 import { parseArgs } from "../util/args.mjs";
 
@@ -28,8 +28,11 @@ if (!to) {
   process.exit(2);
 }
 
+// 三个工具都走中心：这个入口所在的那台机器没有思源，导航也不能直连。
 startMcp({
   search: (opts) => remoteSearch({ ...opts, to, token }),
+  topics: (opts) => remoteTopics({ ...opts, to, token }),
+  entries: (opts) => remoteEntries({ ...opts, to, token }),
   // stdout 只给协议，日志一律 stderr。
   log: (m) => process.stderr.write(`${m}\n`),
 });

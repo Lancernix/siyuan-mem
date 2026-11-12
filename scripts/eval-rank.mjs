@@ -18,6 +18,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { poolGate } from "./rank-pool.mjs";
 
 const DEFAULT_FILE = join(homedir(), ".siyuan-mem", "eval", "recall-pairs.json");
 function arg(name, fallback = null) {
@@ -44,8 +45,9 @@ for (const c of cases) {
   for (const [label, q] of [["整句", c.q], ["关键词", c.qk]]) {
     if (!q) continue;
     const r = await searchEntries({ q, limit: POOL, silent: true });
-    if (r.failed) throw new Error(`检索失败（${q}）：${r.reason}`);
-    pools.push({ c, label, q, gate: r.terms, rows: r.hits });
+    // 取池逻辑在 rank-pool.mjs，有单测锁着：必须用 scoreTerms（生产真正打分
+    // 的词集），不能用含日期词的 r.terms（第十八轮复审 P2-1）。
+    pools.push({ ...poolGate(r, q), c, label });
   }
 }
 

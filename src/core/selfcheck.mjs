@@ -15,6 +15,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { judgeDuplicates, pickCandidates, dedupeStats } from "./dedupe.mjs";
 import { isBackendFailure, isTrivialQuery } from "./search-reason.mjs";
 import { dayOf, pathOf } from "../util/log.mjs";
+import { normalizeSource } from "../util/source.mjs";
 
 /**
  * 一对自检样本：同一件事的两种说法。
@@ -116,7 +117,7 @@ export function recallHealthToday(day = dayOf()) {
       continue;
     }
     if (e.ev !== "memory.hit" && e.ev !== "memory.miss") continue;
-    const src = e.source || "unknown";
+    const src = normalizeSource(e.source);
     if (!out.bySource[src]) out.bySource[src] = { hit: 0, miss: 0, failed: 0, trivial: 0 };
     if (e.ev === "memory.hit") {
       out.hit++;
@@ -128,6 +129,34 @@ export function recallHealthToday(day = dayOf()) {
       out[kind]++;
       out.bySource[src][kind]++;
     }
+  }
+  return out;
+}
+
+/**
+ * 今天的导航调用：列了几次目录、翻了几次条目，按来源分开。
+ *
+ * 单独一套事件、单独一个计数，不混进 recallHealthToday：那个数是「召回准不准」
+ * 的分母，导航是「有没有能力先发现命名空间」。混在一起会让空手率被导航灌水，
+ * 也会让「agent 到底用没用新工具」这个问题又答不了。
+ */
+export function browseHealthToday(day = dayOf()) {
+  const out = { topics: 0, entries: 0, bySource: {} };
+  const file = pathOf(day);
+  if (!existsSync(file)) return out;
+  for (const line of readFileSync(file, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    let e;
+    try {
+      e = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (e.ev !== "memory.browse" || (e.kind !== "topics" && e.kind !== "entries")) continue;
+    const src = normalizeSource(e.source);
+    if (!out.bySource[src]) out.bySource[src] = { topics: 0, entries: 0 };
+    out[e.kind]++;
+    out.bySource[src][e.kind]++;
   }
   return out;
 }
