@@ -78,7 +78,7 @@ test("单引号仍然按 SQL 规则转，两件事不互相覆盖", () => {
 
 // ---- 时间权重：旧而详细不能压过新而简短 ----
 
-const { scoreOf } = await import("../src/core/search.mjs");
+const { scoreOf, relevanceOf, RANK_WEIGHTS } = await import("../src/core/search.mjs");
 
 const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
 
@@ -239,4 +239,13 @@ test("正文里的日期也按段比：2026-11-11 不能被当成 2026 年 1 月
   assert.equal(dateInText("排期看 2026-11-11 这天的会", "2026-1"), false);
   assert.equal(dateInText("2026/01/05 的事", "2026-1"), true);
   assert.equal(dateInText("没有任何日期的一句话", "2026"), false);
+});
+
+test("排序权重从 RANK_WEIGHTS 一处读：摘要命中比正文重复一次更值钱", () => {
+  // 2026-11-12 用 81 条题库扫了 162 组参数，护栏全过且有正收益的只有把 brief
+  // 从 3 提到 5。别把它改回去，也别在别处另抄一套数字——日期那次就是两处各一套。
+  assert.equal(RANK_WEIGHTS.brief, 5);
+  assert.ok(RANK_WEIGHTS.brief > RANK_WEIGHTS.textPerHit, "摘要是压过的结论，命中它比正文多重复一次更有信息量");
+  const row = { text: "端口 端口 端口", brief: "端口" };
+  assert.ok(relevanceOf({ text: "端口", brief: "" }, ["端口"], "") < relevanceOf(row, ["端口"], ""));
 });

@@ -302,6 +302,25 @@ export function strongHits(hay, gate) {
 }
 
 /**
+ * 排序权重。**唯一真源**：scripts/eval-rank.mjs 直接 import 这一份做 A/B，
+ * 免得像日期那样「SQL 一套、内存一套」，改一处漏一处。
+ *
+ * 这套数字从头到尾一个字没动过，直到 2026-11-12 用 81 条题库扫了 162 组参数
+ * （`node scripts/eval-rank.mjs --sweep`）。结果：只把 `brief` 从 3 提到 5，
+ * 整句 81%→83%、MRR 0.69→0.71、负例仍 11/11，而且两条时间惩罚护栏都还成立。
+ * 别的组合要么没收益，要么会让「旧但啰嗦的条目压过新而简短的」。
+ * 摘要是模型压过的一句结论，命中它比正文里多重复一次更能说明「这条就在讲这件事」。
+ */
+export const RANK_WEIGHTS = Object.freeze({
+  textPerHit: 2,  // 正文里这个词每出现一次
+  textCap: 5,     // 同一个词最多算 5 次：挡住「反复念叨」刷分
+  entity: 6,      // 话题名命中
+  brief: 5,       // 摘要命中（原 3，扫参数后提到 5）
+  daily: 0.08,    // 每天 -0.08
+  cap: 8,         // 时间惩罚最多 -8，约 100 天打满
+});
+
+/**
  * 相关度：只算「词真的出现在正文/话题/摘要里」这部分，不含时间惩罚。
  *
  * 单独拆出来是为了给召回设下限：SQL 是在整个 ial 上做 LIKE 的，一条记忆哪怕只是
@@ -315,9 +334,9 @@ export function relevanceOf(row, terms, entity) {
   for (const t of terms) {
     const lower = t.toLowerCase();
     const inText = text.toLowerCase().split(lower).length - 1;
-    rel += Math.min(inText, 5) * 2;
-    if (String(entity).toLowerCase().includes(lower)) rel += 6;
-    if (String(row.brief).toLowerCase().includes(lower)) rel += 3;
+    rel += Math.min(inText, RANK_WEIGHTS.textCap) * RANK_WEIGHTS.textPerHit;
+    if (String(entity).toLowerCase().includes(lower)) rel += RANK_WEIGHTS.entity;
+    if (String(row.brief).toLowerCase().includes(lower)) rel += RANK_WEIGHTS.brief;
   }
   return rel;
 }
@@ -336,7 +355,7 @@ export function scoreOf(row, terms, entity) {
   // 「只说一遍」的差距——够翻掉啰嗦的旧条目，又不至于让旧知识整体沉底。
   // 约 100 天打满。矛盾条目真正的归宿是被标 superseded，不该靠排序去解决。
   const days = row.date ? Math.max(0, (Date.now() - Date.parse(row.date + "T00:00:00")) / 86400000) : 60;
-  score -= Math.min(days * 0.08, 8);
+  score -= Math.min(days * RANK_WEIGHTS.daily, RANK_WEIGHTS.cap);
   return score;
 }
 

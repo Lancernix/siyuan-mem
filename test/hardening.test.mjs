@@ -19,15 +19,15 @@ process.env.HOME = mkdtempSync(join(tmpdir(), "mem-hard-"));
 
 /* ---------------- 检索：相关度下限 ---------------- */
 
-const { relevanceOf, scoreOf } = await import("../src/core/search.mjs");
+const { relevanceOf, scoreOf, RANK_WEIGHTS } = await import("../src/core/search.mjs");
 
 test("相关度：词只落在原文路径里（已被切掉）就不算命中", () => {
   // 实况：拷一条正文里没有「Mac」、但原文指针里有 /mem-raw/laptop/ 的条目。
   // 修好之后内容里的路径已经被 stripRawLink 切掉，相关度就是 0。
   const row = { text: "端口映射改成 7789 了", brief: "容器端口", date: "2026-11-01" };
   assert.equal(relevanceOf(row, ["Mac"], ""), 0);
-  // 正文一次（+2）+ 摘要「容器端口」里也有（+3）
-  assert.equal(relevanceOf(row, ["端口"], ""), 5);
+  // 正文一次（+2）+ 摘要「容器端口」里也有（+brief 权重）
+  assert.equal(relevanceOf(row, ["端口"], ""), 2 + RANK_WEIGHTS.brief);
 });
 
 test("总分可以是负的，但相关度不能——负分照样会排在结果里", () => {
