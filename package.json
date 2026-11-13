@@ -1,12 +1,20 @@
 {
   "name": "siyuan-mem",
   "version": "0.1.0",
-  "description": "把 harness 会话变成思源笔记里的记忆条目",
+  "description": "把 agent 会话变成思源笔记里的记忆条目：采集、抽取、判重、召回，存储交给思源",
   "type": "module",
   "bin": {
     "mem": "./src/cli/cli.mjs",
     "mem-mcp": "./src/mcp/main.mjs"
   },
+  "files": [
+    "src/",
+    "deploy/",
+    "config.example.json",
+    "README.md",
+    "LICENSE",
+    "docs/panel.png"
+  ],
   "scripts": {
     "mem": "node src/cli/cli.mjs",
     "dist": "node scripts/dist.mjs",
@@ -16,7 +24,24 @@
     "node": ">=22.15.0"
   },
   "license": "MIT",
-  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lancernix/siyuan-mem.git"
+  },
+  "homepage": "https://github.com/Lancernix/siyuan-mem#readme",
+  "bugs": {
+    "url": "https://github.com/Lancernix/siyuan-mem/issues"
+  },
+  "keywords": [
+    "siyuan",
+    "memory",
+    "agent",
+    "mcp",
+    "claude-code",
+    "notes",
+    "sqlite",
+    "embedding-free"
+  ],
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.97",
     "@ai-sdk/google": "^4.0.112",

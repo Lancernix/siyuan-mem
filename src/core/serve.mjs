@@ -231,10 +231,9 @@ async function runRound({ dry, useModel, log }) {
 
   for (const s of sessions) {
     const prev = offsets[s.file];
-    // 老记录没有 mtimeMs：那就只认体积（回到原来的行为），别把"不知道"当成"变了"。
-    // 注意字段名是 mtime 不是 mtimeMs——listSessions 返回的就是 mtime，
-    // 写成 s.mtimeMs 会恒为 undefined，于是每轮都把已补 mtime 的会话当成"变了"，
-    // 反复读取解压，再由 enqueueLog 发现没新轮次。日志上看不出错，只是白烧 CPU。
+    // 老记录没有 mtimeMs：只认体积，别把「不知道」当成「变了」。
+    // 字段名是 mtime 不是 mtimeMs——写错会恒为 undefined，每轮都把会话当「变了」重读，
+    // 日志上还看不出错，只是白烧 CPU。
     if (prev && prev.bytes === s.size && (prev.mtimeMs == null || prev.mtimeMs === s.mtime)) continue;
     // 还在写的会话先别切：等它安静，或者文件被轮转（变小）就立刻处理。
     if (now - s.mtime < quietMs && (!prev || s.size >= prev.bytes)) continue;
@@ -297,7 +296,7 @@ export async function serve({ once = false, dry = false, useModel = true, interv
     assertModel(cfg, { useModel, dry });
   } catch (e) {
     log(`配置问题，这次不启动：${e.message.split("\n")[0]}`);
-    // 提示要跟着平台走。原来写死 launchctl，在 Linux 容器里看到这条只会一脸问号。
+    // 提示跟着平台走：写死 launchctl 的话，Linux 容器里看到这条只会一脸问号。
     const kick = process.platform === "darwin"
       ? "launchctl kickstart -k gui/$(id -u)/com.siyuan.mem"
       : "systemctl --user restart siyuan-mem（容器里：docker compose restart mem）";
@@ -312,13 +311,9 @@ export async function serve({ once = false, dry = false, useModel = true, interv
   );
 
   /**
-   * 判重自检。
-   *
-   * 探一次「判重这条链路现在通不通」：拿一对固定样本走一遍真实调用。判重失败时
-   * 的策略是「当没有重复」，所以它坏起来是完全静默的——2026-11-10 藏了三十七
-   * 分钟才被发现。启动时先问一次，之后每 N 轮再问一次（默认 6 轮，约一小时）。
-   *
-   * --no-model / --dry 时不跑：那时候本来就不该调模型。
+   * 判重自检。拿一对固定样本走一遍真实调用，确认链路通。判重失败时的策略是
+   * 「当没有重复」，坏起来完全静默，所以启动问一次、之后每 N 轮再问一次。
+   * --no-model / --dry 时不跑：那时本来就不该调模型。
    */
   const everyRounds = cfg.serve?.selfCheckEveryRounds ?? 6;
   const selfCheckOn = useModel && !dry && everyRounds > 0;

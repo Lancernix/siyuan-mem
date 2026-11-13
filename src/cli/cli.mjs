@@ -98,7 +98,7 @@ async function cmdInit(flags) {
   const ids = await store.init({ force: Boolean(flags.force), rebind: Boolean(flags.rebind) });
   console.log("笔记本与文档就绪：");
   for (const [k, v] of Object.entries(ids)) {
-    // months 是一组按月分的文档（{ "2026-11": id }），直接打印会变成 [object Object]。
+    // months 是一组按月分的文档 { "2026-11": id }，直接打印会变成 [object Object]。
     if (v && typeof v === "object") {
       const keys = Object.keys(v);
       console.log(`  ${k.padEnd(8)} ${keys.length} 个：${keys.slice(0, 3).join(" ")}${keys.length > 3 ? " …" : ""}`);
@@ -505,10 +505,8 @@ async function cmdModel(args, flags) {
   }
 
   if (sub === "list") {
-    // models.dev 那份目录已经删掉了：5.6MB 的 JSON，解析进内存要 50MB，换来的只是
-    // 「provider 不在预设里时自动找 baseUrl」——一年用不到一次。现在只认下面这十家
-    // 和显式的 --base。要加一家，往 PROVIDERS 里补一行，比联网拉目录可靠。
-    // 后面跟一个词就只列匹配的（原来参数被忽略，`mem model list qwen` 照样列十家）。
+    // 只认下面这十家和显式的 --base：models.dev 那份目录 5.6MB，解析要 50MB 内存，
+    // 换来的只是「provider 不在预设里时自动找 baseUrl」，一年用不到一次。
     const needle = String(args[1] ?? "").toLowerCase();
     const rows = Object.entries(PROVIDERS).filter(([id, p]) =>
       !needle || id.includes(needle) || String(p.model).toLowerCase().includes(needle) || String(p.wire).includes(needle)
@@ -1072,8 +1070,8 @@ async function cmdSearch(args, flags) {
     if (r.failed) process.exitCode = 1;
     return;
   }
-  // **后端故障不是「没记过」**。渲染成「没找到」比报错更糟：它看起来像答案，
-  // 人不会去重试，只会以为这个库是空的。2026-11-11 第十三轮复审的 P2。
+  // 后端故障不是「没记过」。渲染成「没找到」比报错更糟：它看起来像答案，
+  // 人不会重试，只会以为库里是空的。
   if (r.failed) {
     console.error(`检索失败：${failureText(r.reason, r.detail)}。这不代表没记过——后端出错时一条也查不出来。`);
     process.exitCode = 1;

@@ -34,16 +34,10 @@ export function open() {
 /**
  * 读一份会话日志，只把上次之后新增的轮次投进队列。
  *
- * 会话日志是 append-only 的，所以"读到第几轮"就是进度；文件变短说明被重写
- * 或轮转过，那就从头再来。返回 added 为 0 表示没有新内容，不算失败。
+ * 会话日志 append-only，「读到第几轮」就是进度；文件变短说明被重写或轮转，从头再来。
  */
 /**
- * 这个日志是不是还在被写。
- *
- * 正在进行的会话切出来全是半句话——「等等」「你先别」这类没说完的轮次，
- * 抽出来的结论也是半截。serve 靠 quietSeconds 过滤，手动 ingest-log 也要。
- * （实测踩过：投了当前正在进行的那个 1183 轮会话，178 万字跑 112 批、
- *   二十分钟，抽出来全是「用户要求先探清楚能力」这类过程叙述。）
+ * 这个日志是不是还在被写。正在进行的会话切出来全是半句话，抽出来的结论也是半截。
  */
 export function isActive(file, quietSeconds = 180) {
   try {
@@ -57,9 +51,8 @@ export function isActive(file, quietSeconds = 180) {
 /**
  * 分组标题里的「项目」取哪一段。
  *
- * 直接拿 cwd 最后一段会成片地写出 `default-workspace`、`2026-10-27-23-26-02`、
- * `c276c7b5` 这种标题——那是 harness 自己造的目录名，人看不出这是哪个项目。
- * 所以从后往前走，跳过这些没意义的段；全都没意义就退回 harness 名。
+ * cwd 最后一段经常是 `default-workspace`、日期目录、提交哈希这类 harness 自己造的
+ * 名字，人看不出是哪个项目，所以从后往前走跳过它们，全都无意义就退回 harness 名。
  */
 const NOISE_SEGMENT = [
   /^default-workspace$/i,
@@ -106,7 +99,7 @@ export function enqueueLog(file, { format = "", quietSeconds = 180 } = {}) {
   const st = statSync(file);
   const prev = offsets[file];
   // 和 push 用同一套判断：重写（mtime 变了、轮数没涨）就整份重读。
-  // 这里原来只看体积和轮数，同尺寸改写会每轮空转却不投递。
+  // 只看体积和轮数的话，同尺寸改写会每轮空转却不投递。
   const plan = slicePlan(prev, { size: st.size, mtime: st.mtimeMs }, log.turns.length);
   const turns = log.turns.slice(plan.from);
   const before = log.turns.length - turns.length;
@@ -141,9 +134,8 @@ export function enqueueLog(file, { format = "", quietSeconds = 180 } = {}) {
  * 之后再也拿不回，所以不能急。
  */
 /**
- * 没有 key 的时候 extract 会静默退回规则抽取，而规则抽取只取首句/首段，
- * 写进正式库的全是半句话（实测："[interrupted] 让我为您重新推荐一些…"）。
- * 所以默认行为是拒绝，而不是降级；--no-model 才是显式选择规则抽取。
+ * 没有 key 的时候 extract 会静默退回规则抽取，而规则抽取只取首句，写进库的全是半句话。
+ * 所以默认行为是拒绝而不是降级；--no-model 才是显式选择规则抽取。
  */
 export function assertModel(cfg, { useModel = true, dry = false } = {}) {
   if (dry || !useModel || hasModel(cfg)) return;
@@ -185,24 +177,12 @@ function forgetFromPool(pool, id) {
 /**
  * 处理队列。
  *
- * maxSessions / maxMs 是**一轮的预算**，不是总量：跑不完留到下一轮。
- * 没有预算的那一版把整个队列一口气抽完——第一次全量迁移时第 2 轮跑了四小时，
- * 那四小时里心跳不动、`mem status` 看着像死了，边缘新推的东西也插不进来。
- * 队列本身是持久的，留到下一轮没有任何损失；看不见进度才是真问题。
+ * 预算分四层，一层比一层细，缺一层就会出现「一轮计划 20 分钟、实际跑 86 分钟」：
  *
- * 但轮预算只在**会话之间**看，还不够。2026-11-10 凌晨那几轮是这么过的：
- *
- *     02:55  这一轮到预算了（3 个会话 / 86 分钟）
- *     04:05  这一轮到预算了（4 个会话 / 52 分钟）
- *
- * 一轮 20 分钟的预算，实际跑 86 分钟才收手——因为一场会话内部的判重 + 写库
- * 可以无限制拖下去，而那时思源已经开始 5 秒超时。于是：
- *
- *   - maxSessionMs：会话内部也设闸门，到点就停手，已写的条目留着（幂等，下轮
- *     重跑会命中 hash 判重跳过），没写的留队列。
- *   - maxConsecutiveFailures：写库连着失败就熔断本轮。思源卡住时一条 5 秒超时，
- *     一场会话几十条就是几分钟纯等待，还会把内存越顶越高。
- *   - maxAttempts：老是过不去的会话进死信，别再压着队头。
+ *   - maxMs / maxSessions：一轮的总预算，跑不完留到下一轮，队列是持久的；
+ *   - maxSessionMs：会话内部也设闸门，到点停手；已写的留着（幂等，下轮按 hash 跳过）；
+ *   - maxConsecutiveFailures：写库连着失败就熔断本轮，思源卡住时一条超时五秒；
+ *   - maxAttempts：老过不去的会话进死信，别一直压着队头。
  */
 export async function processQueue({
   dry = false,
@@ -242,8 +222,8 @@ export async function processQueue({
 
   assertModel(cfg, { useModel, dry });
 
-  // 判重用的条目池：一轮读一次，之后每写一条就往里补一条。
-  // 不从 SQL 现查：块索引有 3 秒延迟，这一轮刚写的条目查不回来，会被判成"库里没有"。
+  // 判重用的条目池：一轮读一次，之后每写一条往里补一条。不从 SQL 现查——块索引有
+  // 3 秒延迟，这一轮刚写的条目查不回来，会被判成「库里没有」。
 
   const known = !dry && useModel ? await store.listCurrent().catch(() => []) : [];
   // 判重池是有上限的（默认 3000）。撞到上限时判重会漏——新条目跟池子外那条
@@ -357,14 +337,11 @@ export async function processQueue({
         // 把它们算进来会让"原文 N 段"这个数虚高。
         if (!dry) sum.raw += parts.filter((p) => p.path && !p.reused).length;
       } catch (e) {
-        // 归档失败就整场跳过：不抽、不写、不归档，留在队列里下轮重试。
+        // 归档失败就整场跳过：不抽、不写、不归档，留队列里下轮重试。
         //
-        // 原来是"条目照写，只是没有原文"。听着像取舍，实际是永久损失——条目一旦
-        // 写进去，指针就定了，事后没有任何办法把它接回原文（轮次范围只在抽取那
-        // 一刻存在）。而且多 part 归档中途失败时，已传的 part 没有正文引用、
-        // 没传的也没进 parts，最后整场条目全是"无出处"。
-        //
-        // 重试很便宜：已上传的 part 记在 raw-index 里，下一轮从断点接着传。
+        // 不能「条目照写、只是没有原文」：条目一旦写进去指针就定了，事后没有任何办法
+        // 把它接回原文（轮次范围只在抽取那一刻存在），多 part 中途失败时整场都会变成
+        // 无出处。重试很便宜——已传的 part 记在 raw-index 里，下轮从断点接着传。
         onLine(`  ! 原文归档失败，这场先不写：${e.message}（原文留在队列里，下轮重试）`);
         event("raw.fail", { session: payload.session_id ?? "", message: e.message });
         sum.failed++;
@@ -393,8 +370,8 @@ export async function processQueue({
       useModel,
       entityShot,
       session: payload.session_id ?? "",
-      // 抽取也要看表：一场 384 轮的会话能拆十几批，一批一次模型调用、实测单次
-      // 最长 254 秒。不给它这个数，光抽取就能把一轮拖到四十分钟。
+      // 抽取也要看表：一场几百轮的会话能拆十几批，一批一次模型调用，不给 deadline
+      // 光抽取就能把一轮拖到几十分钟。
       deadline: sessionDeadline,
     });
     if (error) onLine(`  ! 模型失败，退回规则：${error}`);
@@ -452,18 +429,15 @@ export async function processQueue({
         // 名不同也值得让模型看一眼。不带就是空的，那条通道对这批条目等于关闭。
         project: projectOf(payload.cwd, payload.harness),
       }));
-      // 候选池给全库，不再只给「同话题」。
-      // 只给同话题的那一版有个看不见的漏：同一件事被抽成两个话题名时（"本地调试环境"
-      // vs "nanobot"），两边永远比不到一起，于是互相否定的两条结论都留在 current。
-      // 筛候选的活交给 pickCandidates——它按字面覆盖率挑，同话题门槛低、跨话题门槛高，
-      // 送进模型的仍然是每条最多 10 条。
+      // 候选池给全库，不是只给同话题：同一件事被抽成两个话题名时，两边永远比不到
+      // 一起，互相否定的两条结论就都留在 current。筛候选交给 pickCandidates。
       const pool = known;
       if (pool.length) {
         const t0 = Date.now();
         const callsBefore = dedupeStats().calls;
         decisions = await judgeDuplicates({ cfg, news, existing: pool, deadline: sessionDeadline });
-        // 统计**真实模型调用次数**。原来记的是「有裁决的批次」——判 keep 的时候一条裁决
-        // 都没有，计数是 0，和 dedupeStats().calls 对不上，也看不出这一轮到底花了多少调用。
+        // 记真实模型调用次数，不是「有裁决的批次」：判 keep 时一条裁决都没有，
+        // 那个数会是 0，看不出这一轮到底花了多少调用。
         sum.dedupeCalls += dedupeStats().calls - callsBefore;
         sum.dedupeMs += Date.now() - t0;
         for (const [idx, d] of decisions) {
@@ -486,12 +460,8 @@ export async function processQueue({
     // 开写之前就已经超预算的，这一场就写完再算——见下面那条注释。
     const overAtWriteStart = !dry && overSession();
     for (const [idx, e] of entries.entries()) {
-      // 单会话闸门：到点就收手。
-      //
-      // 但**开写之前就已经超时的那一场要写完**。抽取一趟可能是十几分钟的模型调用，
-      // 时间全花在抽取和判重上、到写这一步才收手，等于这一场白抽——下轮从头再来，
-      // 三趟之后还会被当成老赖挪进 dead/。所以这个标记在进循环前算一次：
-      // 进来时还在预算内，才允许写到一半停下；进来时就超了，这一场写完。
+      // 单会话闸门：到点收手，但开写之前就已经超时的那一场要写完——抽取可能已经
+      // 花了十几分钟，写到一半收手等于白抽，下轮从头再来，三趟之后还会被挪进 dead/。
       if (!overAtWriteStart && writtenHere > 0 && overSession()) {
         aborted = true;
         onLine(
@@ -502,20 +472,13 @@ export async function processQueue({
       }
       const entity = entityMap.get(e.entity) ?? e.entity;
       const verdict = decisions.get(idx);
-      // 抽取是「一批一次模型调用」，那一批抽出来的 4–10 条结论共用同一个 from/to，
-      // 指针因此常常横跨几十轮、三万多字——点开等于没指。用结论里那些模型编不出来
-      // 的硬锚（文件名、参数、端口、报错串）落回原文行，把范围收窄到真正出处的
-      // 那几轮。原文就在本进程的 payload.turns 里，不用下载附件、不用再调模型。
+      // 抽取是「一批一次模型调用」，一批抽出来的几条结论共用同一个 from/to，指针
+      // 常常横跨几十轮、三万多字，点开等于没指。用结论里那些模型编不出来的硬锚
+      // （文件名、参数、端口、报错串）落回原文行，把范围收窄到真出处。
       //
-      // 收窄是保守的：跨轮归纳、锚点分散、证据掉太多，一律原样返回。宽了只是多读
-      // 几行，窄错了是把出处排除在外而且看不出来，两者代价不对称。
-      // 锚点收窄默认关闭。
-      //
-      // 2026-11-11 抽检：随机 20 条已收窄条目里 3–4 条指偏或存疑（结论讲冲锋衣、
-      // 窗口落在坐垫讨论），极端样本里更到 40%。硬锚/中文片段的「保留率」是算法
-      // 自己的通过条件，证明不了「指对了」——第五轮 CR 说得对。收窄错了比宽更糟：
-      // 宽了只是多读几行，指偏是给人一条看似精确、实则无关的出处，而且看不出来。
-      // 想开就显式配 `raw.narrow: true`，并且先跑 dry + 人工抽检。
+      // **默认关闭**：抽检发现约两成收窄指偏，而收窄错了比宽更糟——宽了只是多读
+      // 几行，指偏是给人一条看似精确、实则无关的出处，还看不出来。想开就显式配
+      // `raw.narrow: true`，并且先跑 dry + 人工抽检。
       const anchor =
         e.from != null && parts.length && cfg.raw?.narrow === true
           ? narrowAnchor(e.text, payload.turns ?? payload.events ?? [], e.from, e.to)
@@ -669,18 +632,11 @@ export async function processQueue({
     const degraded = mode === "heuristic-after-error" || mode === "partial";
     if (degraded) sum.degraded++;
 
-    // 抽取到预算就收手的那种：已经抽过的那几轮从队列里摘掉，剩下的下轮接着抽。
-    // 放在写完条目之后做——先摘再写，万一写库挂了，那几轮的结论就再也没人抽了。
+    // 抽取到预算就收手时：已抽过的轮次从队列摘掉，剩下的下轮接着抽。放在写完条目
+    // 之后做——先摘再写，写库挂了那几轮就再没人抽。
     //
-    // 但「放在后面」还不够：**写失败了就不能摘**。原来只看 stoppedEarly，于是
-    // 「一条都没写进去」也会把前 N 轮从队列删掉，那几轮从此没人再抽，而日志上
-    // 还写着「前 N 轮已写进库」。抽出来没写进去 = 没抽，覆盖点不能算数。
-    // 先把「还剩多少轮没抽」算出来，它跟「写库干不干净」是两件事。
-    //
-    // 上一版把这两件事塞进同一个条件（wroteCleanly 里带 writtenHere > 0），于是
-    // 零写入时既不摘轮次、也不置 trimmed，complete 就成了 true——**直接归档**，
-    // 剩下的轮次跟着文件一起消失。而零写入很常见：全被 hash 判重跳过、或者模型
-    // 这批没抽出东西。抽到点收手 + 零写入 = 剩余轮次必须留在队列里。
+    // 但「写失败就不能摘」：一条都没写进去时摘轮次，那几轮从此没人抽，日志上还写着
+    // 「已写进库」。覆盖点不能算数。
     const rawTurns = payload.turns ?? payload.events ?? [];
     const restTurns = stoppedEarly && coveredThrough != null ? rawTurns.slice(coveredThrough + 1) : [];
     const hasRest = restTurns.length > 0;
@@ -693,9 +649,8 @@ export async function processQueue({
       entries.length === 0 && !degraded && !error && !dropped && !aborted && failedHere === 0 && writtenHere === 0 && skippedHere === 0;
 
     let trimmed = false;
-    // 全被判重跳过（skippedHere > 0）也是「这几轮处理完了」：内容已经在库里，
-    // 不是故障。允许摘轮次，否则重叠区间每轮重抽、重抽又全跳过，攒满三次就被
-    // 当成老赖挪进 dead/，而剩下那 20 轮从此没人抽。
+    // 全被判重跳过也是「这几轮处理完了」：内容已经在库里，不是故障。允许摘轮次，
+    // 否则重叠区间每轮重抽、重抽又全跳过，攒满三次被当成老赖挪进 dead/。
     if (!dry && hasRest && wroteCleanly && (writtenHere > 0 || skippedHere > 0 || cleanEmpty)) {
       const rest = restTurns;
       if (rest.length) {
@@ -726,7 +681,8 @@ export async function processQueue({
       aborted,
       trimmed,
     });
-    // 「抽到点了但还有轮次没抽」不算做完。这条原来漏了，导致零写入时照样归档。
+    // 「抽到点了但还有轮次没抽」不算做完：漏了 hasRest 的话，剩余轮次会跟着文件
+    // 一起被归档掉。
     const complete = !aborted && failedHere === 0 && !degraded && !trimmed && !hasRest;
     // 没做完的场次要单独报出来：失败数是按"条"算的，超预算停手的那场一条都没失败，
     // 只看 failed 会以为一切正常。

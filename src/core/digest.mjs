@@ -73,9 +73,8 @@ export async function collect({ sy, ids }) {
       type: attrOf(r.ial, ATTR.type) || "fact",
       confidence: Number(attrOf(r.ial, ATTR.confidence)) || 3,
       raw: attrOf(r.ial, ATTR.raw),
-      // 项目名直接读属性。原来它是「下载这个会话的原文附件、解 JSON、取第一行的 cwd」，
-      // 一个附件可能是几 MB，一百个会话就是几百 MB 流量换个分组标题——而写入时
-      // 早就把 cwd 推出来的项目名记在 custom-mem-project 上了。
+      // 项目名直接读属性，不下载原文去解 cwd：一个附件几 MB，一百个会话就是几百 MB
+      // 流量，只为换个分组标题——而写入时早把项目名记在属性上了。
       project: attrOf(r.ial, ATTR.project),
     });
     bySession.set(session, e);
@@ -95,11 +94,7 @@ export async function collect({ sy, ids }) {
     return g0;
   });
 
-  // 兜底：早期写的条目没有 custom-mem-project，从原文的 meta 行（那里存着 cwd）补。
-  // 会话 id 前 8 位对人没有意义，「这个项目」才是分组时想看到的东西。
-  //
-  // 每个附件只下一次：同一场会话的所有条目共用一份原文，原来是一个会话下一个
-  // 几 MB 的附件，还按 item 找第一个就算——一个会话一次，一百个会话一百次。
+  // 每个附件只下一次：同一场会话的所有条目共用一份原文。
   const seen = new Map();
   await Promise.all(
     groups
@@ -164,13 +159,9 @@ export function render(groups, { total, now = new Date() } = {}) {
 /**
  * 只渲染给人看，不往思源里写。
  *
- * 试过写成 `06-记忆摘要` 文档，两个坑：
- *   1. 思源没有「覆盖文档内容」的接口，`createDocWithMd` 同 path 会新建一份，
- *      不是覆盖——实测一次就建出三个同名文档。
- *   2. 想靠「删块再写」绕开，但块的 SQL 索引是异步的，刚建完查不到子块，
- *      于是删了个空、又追加一份，跑两次就有两份内容。
- * 视图是派生数据，做不到可靠的「整体替换」就不该写进库。留在终端输出，
- * 思源那边用原生属性视图，两边都不脏。
+ * 试过写成文档，两个坑：createDocWithMd 同 path 是**新建**不是覆盖（一次就建出三份
+ * 同名文档）；想靠「删块再写」绕开，块的 SQL 索引又是异步的，刚建完查不到子块，
+ * 删了个空。视图是派生数据，做不到可靠的整体替换就不该写进库。
  */
 export async function print({ sy, ids, out = console.log } = {}) {
   const groups = await collect({ sy, ids });

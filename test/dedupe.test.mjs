@@ -119,7 +119,7 @@ test("同话题的排序加成还在：覆盖率一样时它排在前面", () =>
 
 const { resolveMatch } = await import("../src/core/dedupe.mjs");
 
-const IDS = ["20260101000000-aaaaaaa", "20260101000000-bbbbbbb", "20260101000000-ccccccc"];
+const IDS = ["20260101000000-aaaaaaa", "20260102000000-bbbbbbb", "20260103000000-ccccccc"];
 
 test("回编号：按这条新条目自己的候选顺序数，从 1 开始", () => {
   assert.equal(resolveMatch(1, IDS), IDS[0]);
@@ -136,12 +136,12 @@ test("回完整 id：直接用", () => {
 });
 
 test("回截断的 id：前缀唯一才认", () => {
-  assert.equal(resolveMatch("20261106132222", IDS), IDS[0]);
+  assert.equal(resolveMatch("20260101000000", IDS), IDS[0]);
 });
 
 test("截断得能对上两条：不猜", () => {
-  // 同一秒建的两条 id 前 14 位一样，猜错比不猜更糟。
-  assert.equal(resolveMatch("202611061322", IDS), "");
+  // 截得太短会把几条都圈进来，猜错比不猜更糟。
+  assert.equal(resolveMatch("202601", IDS), "");
 });
 
 test("回了个不相干的串：不认", () => {

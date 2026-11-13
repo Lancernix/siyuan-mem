@@ -1,17 +1,12 @@
 /**
- * 模型调用层：三种协议、一个接口。
+ * 模型调用层：三种协议，一个接口。
  *
- *   openai     /chat/completions           —— DeepSeek、通义、Kimi、智谱、OpenRouter、火山、ollama
- *   anthropic  /v1/messages                —— Claude
- *   gemini     /models/{m}:generateContent —— Gemini
+ *   openai     /chat/completions
+ *   anthropic  /v1/messages
+ *   gemini     /models/{m}:generateContent
  *
- * 传输一律走 AI SDK（`ai` + 对应的 provider 包），这里只留策略：重试、JSON 回退、
- * 用量记账、provider 预设。调用方只给 messages，拿 {text|object, usage}。
- *
- * 为什么不再手写三种协议的请求体：那三个文件能跑，但它们解决的是"协议变了我不怕"，
- * 而这个项目一年也碰不到一次协议变更；真正的痛点是换厂商要改代码（火山额度到期换
- * DeepSeek），以及三家 JSON 方式不统一。这两件事 AI SDK 直接给了。
- * 换过来的代价是依赖从 1 个变成 5 个，容器镜像大一点——换来的是配置里改两行就换家。
+ * 传输走 AI SDK，这里只留策略：重试、JSON 回退、用量记账、provider 预设。
+ * 调用方给 messages，拿 {text|object, usage}。换厂商只改配置，换协议只改 model.wire。
  */
 import { appendFileSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
@@ -21,9 +16,8 @@ import { event } from "./log.mjs";
 /**
  * 各家预设。baseUrl 写到版本号为止，具体路径由 wire 拼。
  *
- * `env` 是这家惯用的 key 环境变量。写在这里是因为原来只有"目录里的 provider"
- * 才查环境变量，预设里的十家一律不查——于是 `OPENAI_API_KEY=... mem once` 会被
- * 判成"没配模型"，或者在别处被静默降级成规则抽取。同一个东西两种认定，很坑。
+ * `env` 是该家惯用的 key 环境变量名，预设和环境变量两条路都要认——只认其中一条，
+ * `OPENAI_API_KEY=... mem once` 会被判成「没配模型」。
  */
 export const PROVIDERS = {
   deepseek: { wire: "openai", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-v4-flash", jsonMode: true, env: "DEEPSEEK_API_KEY" },
@@ -50,32 +44,18 @@ function presetEnvKey(provider) {
   return null;
 }
 
-/** 协议名 → 模块。懒加载，谁用谁拉。 */
+// 协议名 → 模块，懒加载。
 /**
- * 传输层：一律走 AI SDK。
+ * 关键开关是 supportsStructuredOutputs：
  *
- * 原来三份手写 wire（openai / anthropic / gemini 各一个文件）能跑，但有两个问题：
+ *   json_object  → 模型自己发明键名，schema 校验失败（火山还要求 prompt 里出现 "json"）；
+ *   json_schema  → 按 schema 返回，字段名、枚举都对，服务端强制。
  *
- *   1. 换厂商要改代码。而"火山额度到期换 DeepSeek"是必然会发生的，我们真正需要的
- *      通用性在这儿，不在"自己实现协议"。
- *   2. 结构化输出没人统一。三家各有各的 JSON 方式，出问题只能一家一家调。
- *
- * 换过来之后：换厂商只改配置（provider + baseUrl + 模型名），换协议只改 model.wire。
- *
- * 关键开关是 supportsStructuredOutputs。实测（火山 plan 端点，2026-11-05）：
- *
- *   json_object  → 模型自己发明键名（{"条目":[{"主题":…,"结论":…}]}），schema 校验失败；
- *                  而且火山还要求 prompt 里必须出现 "json" 字样，否则直接 400。
- *   json_schema  → 严格按 schema 返回，字段名、枚举都对，服务端强制。
- *
- * 所以这里必开。不开等于把"字段由谁保证"从服务端退回到提示词。
+ * 必开。不开等于把「字段由谁保证」从服务端退回给提示词。
  */
 /**
- * 哪些「地址 + 模型」不吃 json_schema。踩一次就记住，后面直接走 json_object。
- *
- * 这不是假设：DeepSeek 官方 API、智谱 GLM、MiniMax 都只支持 json_object，
- * 不支持 schema 约束（2026-10 的实测清单里 DeepSeek 是 0/2）。现在用的火山方舟
- * 走的是自己的端点，支持；但哪天换回 DeepSeek 官方 API，第一次会 400。
+ * 哪些「地址 + 模型」不吃 json_schema。DeepSeek 官方 API、智谱 GLM、MiniMax 只支持
+ * json_object，撞一次记一次，后面直接降级。
  */
 const noSchema = new Set();
 
@@ -101,10 +81,8 @@ async function modelFor(m, { json = false } = {}) {
     ...base,
     includeUsage: true,
     supportsStructuredOutputs: true,
-    // 非标准字段从这里塞。默认什么都不加＝用各家默认，也就是说 thinking 是开着的：
-    // 抽取要的是判断得准，不是省那点输出 token（实测开思考后条目更凝练、
-    // 话题命名也更统一，代价是 4 倍输出 token、3 倍时间）。
-    // 只有 model.thinking=false 才显式关掉。
+    // 非标准字段从这里塞。默认什么都不加，等于 thinking 开着：抽取要的是判断准，
+    // 不是省输出 token（开思考后条目更凝练、话题更统一，代价是 4 倍 token、3 倍时间）。
     transformRequestBody: (body) => {
       let b = body;
       if (m.thinking === false) b = { ...b, thinking: { type: "disabled" } };
@@ -155,8 +133,8 @@ function retryAfterOf(e) {
 /** AI SDK 的错误 → 我们的 {status, retryable, retryAfterMs}，重试策略只认这几个。 */
 function shapeError(e) {
   const status = e?.statusCode ?? e?.status;
-  // 注意不是 `?? `：SDK 对不可重试的状态会显式给 isRetryable=false，
-  // 用 ?? 会把这个 false 当成"没意见"，429 就永远不重试了（实测踩过）。
+  // 不能用 ??：SDK 对不可重试的状态会显式给 isRetryable=false，
+  // 用 ?? 会把这个 false 当成「没意见」，429 永远不重试。
   const retryable = e?.isRetryable === true || [408, 409, 429, 500, 502, 503, 504].includes(status);
   const err = new Error(e?.responseBody ? `${e.message}｜${String(e.responseBody).slice(0, 300)}` : (e?.message ?? String(e)));
   err.status = status;
@@ -201,9 +179,7 @@ export const USAGE_PATH = join(HOME_DIR, "usage.jsonl");
 export function resolveModel(cfg) {
   const m = cfg?.model ?? {};
   const preset = PROVIDERS[m.provider] ?? null;
-  // 不在预设里也能用，但必须自己写 baseUrl。我们认协议不认厂商——三家协议的形状
-  // 只有三种，端点属于配置。（原来这里会去 models.dev 那份 233 家的目录里捞 baseUrl：
-  // 5.6MB 的 JSON，解析进内存要 50MB，就为兜这一行，不值。）
+  // 不在预设里也能用，但必须自己写 baseUrl：我们认协议不认厂商，端点属于配置。
   const unknown = !preset && !m.baseUrl;
   // config 里写了 key 就不看环境变量；没写才去预设里找变量名。
   const envKey = m.apiKey ? null : preset ? presetEnvKey(m.provider) : null;
@@ -329,12 +305,8 @@ async function call(cfg, { messages, json = false, schema = null, maxTokens, tag
   const wantSchema = Boolean(schema) && !noSchema.has(key);
   const t0 = Date.now();
   /**
-   * 这次逻辑调用还剩多少时间。
-   *
-   * 之前只有"单次尝试"的超时（timeoutMs），没有"这次调用总共能用多久"。于是一个
-   * 卡住的请求会把 180 秒全用掉，再按 retries=3 重来三遍，一次调用就是十二分钟——
-   * 2026-11-10 那轮里 converge 单次 688 秒就是这么来的，会话闸门再严也拦不住，
-   * 因为闸门只能在两次调用之间看表。
+   * 这次逻辑调用还剩多少时间。只有单次超时不够：卡住的请求会吃满 180 秒，再按
+   * retries 重来几遍，一次调用就是十几分钟，而会话闸门只能在两次调用之间看表。
    */
   const left = () => (Number.isFinite(deadline) ? deadline - Date.now() : Number.POSITIVE_INFINITY);
 
@@ -352,11 +324,10 @@ async function call(cfg, { messages, json = false, schema = null, maxTokens, tag
     try {
       const res = await generateText({
         model,
-        // timeoutMs 一直被读进配置、却从没往下传（评审指出）：端点挂住就真的挂着，
-        // 45 秒的默认值形同虚设。abortSignal 是 SDK 唯一认的中断方式。
+        // timeoutMs 必须真的传下去，否则端点挂住就是真挂住，默认值形同虚设。
+        // abortSignal 是 SDK 唯一认的中断方式。
         abortSignal: AbortSignal.timeout(perTry),
-        // 重试必须关在 SDK 里面：它默认自己重试两次，且不认我们的 Retry-After 策略，
-        // 结果就是"日志上 attempts=1，实际打了三次"（实测）。
+        // 重试全部收在 withRetry：SDK 自己也重试的话，日志上 attempts=1、实际打三次。
         maxRetries: 0,
         ...(system ? { system } : {}),
         messages: rest,
@@ -440,11 +411,9 @@ export async function chat(cfg, opts = {}) {
 }
 
 /**
- * 要一个符合 schema 的对象。
- *
- * schema 是 zod，AI SDK 会把它翻成 JSON Schema 随请求发下去，服务端（火山实测支持）
- * 强制模型按字段返回；不合规时 SDK 抛 NoObjectGeneratedError，但 e.text 里通常有
- * 原始输出——抽取那边会拿它再解析一次，能救回一部分。
+ * 要一个符合 schema 的对象。schema 是 zod，SDK 翻成 JSON Schema 随请求发下去。
+ * 不合规时 SDK 抛 NoObjectGeneratedError，但 e.text 里通常有原始输出，
+ * 抽取那边会再解析一次，能救回一部分。
  */
 export async function chatObject(cfg, opts = {}) {
   return await call(cfg, opts);
@@ -505,9 +474,8 @@ export function saveModelChoice(provider, { apiKey, model, wire, base } = {}) {
     wire: wire || preset?.wire || "openai",
     baseUrl,
     name,
-    // 换厂商时**不能**留着旧 key：错误提示教人"export ARK_API_KEY 再 mem model use
-    // volcengine"，照做的话旧厂商的 key 会被发到火山端点上去。没给新 key 就清空，
-    // 让下面的 hasModel 明确报"没有 key"。
+    // 换厂商不能留旧 key：照错误提示 export 新 key 时，旧 key 会被发到新端点上去。
+    // 没给新 key 就清空，让 hasModel 明确报「没有 key」。
     ...(apiKey ? { apiKey } : switched ? { apiKey: "" } : {}),
   };
   writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });

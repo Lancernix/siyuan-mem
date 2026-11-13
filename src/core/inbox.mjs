@@ -6,11 +6,9 @@ import { INBOX_DIR, DONE_DIR, DEAD_DIR, ATTEMPTS_PATH, ensureDirs } from "../uti
 /**
  * 写文件要么完整、要么不见。
  *
- * 原来直接 writeFileSync 到目标路径：进程在写到一半时被 kill（容器重建、机器重启），
- * 队列里就留下一个半截 JSON。它每轮都被当成队头读一遍、读不动，后面的会话全堵在
- * 它后面。先写同目录下的临时文件再 rename，rename 是原子的，读到的永远是完整内容。
- *
- * 顺手把权限收到 0600：队列里是会话原文，没必要让同机其他用户读。
+ * 直接写目标路径时，进程写到一半被 kill（容器重建、机器重启）会在队列里留下半截
+ * JSON，它每轮都被当成队头读一遍、读不动，后面的会话全堵在它后面。
+ * 先写临时文件再 rename，读到的永远是完整内容。顺手把权限收到 0600。
  */
 function writeAtomic(file, body) {
   const tmp = `${file}.tmp-${process.pid}`;
@@ -54,9 +52,8 @@ export function drop(payload, { key } = {}) {
 /**
  * 会话增量包的幂等键：哪个机器的哪个会话、从第几轮开始的哪几轮。
  *
- * 起始轮次必须进去。原来只算「会话 + 条数 + 内容哈希」，于是同一场会话里
- * 两段**内容恰好相同**的区间（比如两次一模一样的问答）会算出同一个键，
- * 后一段被中心当成重复拒掉——合法的分片就这么没了。
+ * 起始轮次必须进去：只算「会话 + 条数 + 内容哈希」的话，同一场会话里两段内容恰好
+ * 相同的区间会算出同一个键，后一段被中心当重复拒掉，合法的分片就这么没了。
  */
 export function ingestKey({ machine = "", harness = "", session_id: sid = "", turns = [], turnFrom = 1 } = {}) {
   const from = Math.max(1, Number(turnFrom) || 1);

@@ -160,9 +160,8 @@ async function refresh() {
   try {
     const r = await fetch("/api/state");
     const s = await r.json();
-    // **合并，不是替换**：_hits / _error 是搜索的临时状态，整份 state 覆盖掉
-    // 就等于「搜完 5 秒后自己变回最近条目」——搜索结果和错误提示都活不过一轮刷新。
-    // 原来那句「要写回 last」的注释写对了意图，但 refresh 覆盖的就是 last 本身。
+    // 合并不是替换：_hits / _error 是搜索的临时状态，整份 state 覆盖掉的话，
+    // 搜索结果和错误提示都活不过一轮刷新。
     last = { ...last, ...s };
     if (!document.activeElement || document.activeElement.id !== "q") draw(last);
     else $("chips") && draw(last);
@@ -287,12 +286,9 @@ export function startUi({ port = 7787, host = "127.0.0.1", runRound } = {}) {
       }
       if (req.method === "GET" && url.pathname === "/api/search") {
         const q = url.searchParams.get("q") ?? "";
-        // 和 CLI 走同一个函数：面板搜到的跟 `mem search` 搜到的必须是一回事，
-        // 而且命中要记进 memory.hit，那是「这条记忆还活着」的唯一真实信号。
         // source 必须写 ui：面板是第四个真实来源，混进 unknown 会让「谁在查」失真。
         const r = await searchEntries({ q, limit: 30, source: "ui" });
-        // 后端故障不能回 200 + 空 hits：前端只会渲染「没有命中」，
-        // 又把「坏了」说成「没有」（第十四轮复审）。
+        // 后端故障不能回 200 + 空 hits：前端只会渲染「没有命中」，又把坏了说成没有。
         if (r.failed)
           return json(503, { error: `检索失败：${failureText(r.reason, r.detail)}`, reason: r.reason });
         return json(200, r);

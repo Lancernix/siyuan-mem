@@ -1,25 +1,17 @@
 /**
  * MCP server（stdio）：把召回做成 harness 能直接调的工具。
  *
- * 之前只有两条召回通道，都只能活在同一台机器上：`mem search`（直连思源跑 SQL）
- * 和 DSH 插件（hook 注入，也是直连思源）。公司那台机器上，Claude Code 既没有
- * 思源也没有这个仓库的配置，所以记忆对它是不可见的。
+ * 这里只做一层皮：工具调用 → 检索/导航 → 拼成人读的文本。本机自己就是中心时直连，
+ * 边缘机器上走中心接口。
  *
- * 这里只做一层皮：工具调用 → 检索/导航 → 拼成人读的文本。本机自己就是中心时
- * 直连，边缘机器上走中心接口。
+ * 三条约束：
  *
- * 三个约束值得写在这里：
- *
- * 1. **stdout 只能有协议消息。** 任何调试输出都得走 stderr，否则客户端解析到
- *    一行非 JSON 就断开，表现是「插件装上了但不生效」，而且不报错。
- * 2. **返回给人读的文本，不返回 JSON。** 工具结果会被塞进模型上下文，
- *    `{"entity":"…","score":3.2}` 这种结构既费 token 又不帮它判断；条目本来
- *    就是一句人话，原样给就好。
- * 3. **路由写进工具的 description，结果里自带下一步。** 只有一个 search 时，
- *    agent 不知道库里有哪些话题、也不知道 `topic` 该填什么，只能靠猜关键词。
- *    三个工具各自在描述里说清「什么时候用我、什么时候用别的那个」，空结果
- *    给可操作的兜底——不依赖 harness 的系统提示词，每个客户端自带路由提示。
- *    这一套是从 mcp-adapter 的 4 个元工具借来的（2026-11-12 读源码）。
+ * 1. **stdout 只能有协议消息。** 调试输出一律走 stderr，否则客户端解析到一行非 JSON
+ *    就断开，表现是「装上了但不生效」，而且不报错。
+ * 2. **返回人读文本，不返回 JSON。** 工具结果会进模型上下文，结构化字段既费 token
+ *    又不帮它判断。
+ * 3. **路由写进工具 description。** 三个工具各自说清什么时候用我、什么时候换别人，
+ *    空结果给可操作的兜底——不依赖客户端的系统提示词。
  */
 import { createInterface } from "node:readline";
 import { emptyText, failureText } from "../core/search-reason.mjs";
@@ -30,12 +22,8 @@ const SERVER = { name: "siyuan-mem", version: "0.1.0" };
 /**
  * 工具清单：一个主入口 + 两个导航工具。
  *
- * 描述里必须写清**互相的路由**，否则多给工具等于没给：模型不知道什么时候
- * 该换一个，就会一直用最眼熟的那个。mcp-adapter 的 4 个元工具正是这么做的
- * （search_tools 的 description 里直接写「低置信结果建议先调 describe_tool」）。
- *
- * 保留 `TOOL` 这个导出指向主入口：老代码和老测试按单工具写的，别因为它们
- * 引用了 `TOOL.name` 就全改一遍。
+ * 描述里必须写清互相的路由，否则多给工具等于没给：模型不知道什么时候该换一个，
+ * 就会一直用最眼熟的那个。
  */
 export const SEARCH_TOOL = {
   name: "memory_search",
@@ -159,8 +147,7 @@ export function formatHits(hits, terms = [], hint = "", reason = "") {
   }
   const lines = [`找到 ${hits.length} 条` + (terms.length ? `（检索词：${terms.join(" / ")}）` : "") + "："];
   lines.push(...hitLines(hits));
-  // 空手时的导航出口追加在 handleMessage 调用 formatHits 之后，不在这里——
-  // 它是工具分发的决策，不是渲染函数该管的事（第十八轮复审 P3）。
+  // 空手时的导航出口在 handleMessage 里追加：那是工具分发的决策，不是渲染函数的活。
   return lines.join("\n");
 }
 
@@ -265,10 +252,8 @@ export async function handleMessage(msg, { search, topics, entries } = {}) {
 
   if (method === "initialize") {
     return ok(id, {
-      // 回**我们支持的**版本，不是客户端说的那个。原来无脑回显客户端给的字符串，
-      // 等于承诺"你这个版本的语义我也懂"——而实际只实现了 2024-11-05。客户端
-      // 会据此用新版本的字段发消息，然后我们解析不了，表现是"连上了但不响应"。
-      // 规范允许服务端回一个较低版本，客户端不支持就自己断开，那是明确失败。
+      // 回我们支持的版本，不回显客户端给的版本：回显等于承诺「你这个版本的语义
+      // 我也懂」，客户端会据此发新字段，然后解析不了，表现是连上了但不响应。
       protocolVersion: PROTOCOL,
       capabilities: { tools: {} },
       serverInfo: SERVER,

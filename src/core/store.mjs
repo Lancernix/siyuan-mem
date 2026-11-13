@@ -78,8 +78,8 @@ export class Store {
   async init({ force = false, rebind = false } = {}) {
     const name = this.#cfg.siyuan.notebook;
     const state = loadState();
-    // 缓存要按"实例 + 笔记本"隔离。只按 baseUrl 存的话，改了 config 里的笔记本名，
-    // 缓存的还是旧笔记本的文档 id，接着往旧笔记本里写——实测踩过一次。
+    // 缓存按「实例 + 笔记本」隔离：只按 baseUrl 存的话，改了笔记本名之后缓存的还是
+    // 旧笔记本的文档 id，会接着往旧库里写。
     const key = `${this.#cfg.siyuan.baseUrl}#${name}`;
     const cache = force ? {} : state[key] ?? {};
     // --force 的语义是"从思源重新解析"，不是"再建一套"。所以它只读不建：
@@ -104,10 +104,9 @@ export class Store {
         resolved = await this.#sy.createNotebook(name);
       }
 
-      // 关键的一步：**比较 id，而不是靠抛错来判断**。
-      // resolveNb 在 id 失效时会"退回按名字找"，所以笔记本被删了重建（同名换 id）
-      // 的时候它不抛——上一版只把防呆放在 catch 里，这个主场景正好绕过去，
-      // 结果就是新 id 被写回配置、后续全写进新库，旧记忆凭空消失且无日志。
+      // 比较 id，而不是靠抛错来判断：笔记本被删了重建（同名换 id）时 resolveNb 会
+      // 静默退回按名字找、不抛错，只把防呆放在 catch 里正好绕过去——结果新 id 被写回
+      // 配置，旧记忆凭空消失。
       if (configuredId && resolved !== configuredId && !force && !rebind) {
         throw new Error(
           `笔记本的 id 变了：配置里是 ${configuredId}，按名字「${name}」找到的是 ${resolved}。\n` +
@@ -154,14 +153,11 @@ export class Store {
   }
 
   /**
-   * 这条记忆该写进哪个文档。
+   * 这条记忆该写进哪个文档。partition='month' 时按条目日期分：/01-条目/2026-10，
+   * 一个月一百多条正合适，无限长下去大纲和全文搜索都会变慢。
    *
-   * partition='month' 时按条目日期分：/01-条目/2026-10。按月是因为一个月
-   * 150-250 条、4-6 万字，正好在思源舒服的区间；一个文档无限长下去，
-   * 大纲、移动端、全文搜索都会变慢。
-   *
-   * 建的文档 id 记在 state 的 months 里。不能每次按 hpath 查——刚建好的文档
-   * 在 SQL 索引里还查不到，下一秒又会建一份一模一样的（这条踩过三次）。
+   * 建好的文档 id 记在 state 里，不能每次按 hpath 查——刚建好的文档在 SQL 索引里
+   * 还查不到，下一秒会再建一份一模一样的。
    */
   async entriesDocFor(date) {
     const ids = await this.#ensure();
@@ -170,9 +166,8 @@ export class Store {
     const month = /^\d{4}-\d{2}/.test(raw) ? raw.slice(0, 7) : new Date().toISOString().slice(0, 7);
     const hit = ids.months?.[month];
     if (hit) {
-      // 缓存不能盲信：用户可能在思源里把这个月的文档删了。原来直接 return，
-      // 之后整场会话的条目全写不进去，报的还是「tree not found」这种看不出根因的错。
-      // 每个进程每个月只验一次——这是加一次 SQL，不是加一次往返。
+      // 缓存不能盲信：文档可能在思源里被删了。删了还照写，之后整场会话都写不进去，
+      // 报的却是 tree not found 这种看不出根因的错。每月每进程验一次，只多一次 SQL。
       if (this.#monthOk.has(hit)) return hit;
       if (await this.#inNotebook(hit, ids.notebook)) {
         this.#monthOk.add(hit);
@@ -198,12 +193,9 @@ export class Store {
     return id;
   }
 
-  /** 块还在不在。缓存会过期：用户可能在思源里把文档删了。 */
   /**
-   * 笔记本还在不在。
-   *
-   * 原来拿 notebook id 去 `blocks` 表里查——笔记本不是块，这个查询恒为 false，
-   * 于是每次 init 都当"笔记本没了"重新解析一遍。改成问 lsNotebooks。
+   * 笔记本还在不在。要问 lsNotebooks，不能拿 notebook id 去 `blocks` 表查——
+   * 笔记本不是块，那个查询恒为 false，于是每次 init 都当「笔记本没了」重新解析。
    */
   async #existsNotebook(id) {
     const list = (await this.#sy.listNotebooks()) ?? [];
@@ -299,8 +291,8 @@ export class Store {
   async findDuplicate(text) {
     const h = hashOf(text);
     const box = (await this.#ensure()).notebook;
-    // 只认 current。被标过时的内容再出现时必须能重新写回来（A 改成 B，后来又改回 A）——
-    // 原来不看状态，那把旧的那条还躺在库里，于是"改回来"永远写不进去，库里停在 B。
+    // 只认 current：被标过时的内容再出现时必须能重新写回来（A 改成 B 又改回 A），
+    // 不看状态的话旧条目还躺在库里，「改回来」永远写不进去。
     const rows = await this.#sy.sql(
       `SELECT id FROM blocks WHERE box='${box}'
          AND ial LIKE '%${ATTR.hash}="${h}"%'
@@ -340,11 +332,8 @@ export class Store {
     }
     const groups = loadGroups();
     let g = groups[session];
-    // 记录里的分组必须是**这个文档**里的。会话跨月时（10-31 一直聊到 11-01），
-    // 新条目该进 2026-11，但记录还指着 2026-10 那份文档里的列表——照着写就是
-    // "11 月的条目挂在 10 月的分组标题下"。所以先验归属，不合就本月另起一组。
-    //
-    // 老记录没有 doc 字段：查一次标题的 root_id 补上（这些块都很旧，索引早稳了）。
+    // 记录里的分组必须是这个文档里的。会话跨月时新条目该进 11 月的文档，而记录还
+    // 指着 10 月那份的列表，照写就成了「11 月的条目挂在 10 月的标题下」。
     if (g?.list && !g.doc) {
       const doc = await this.#headingDoc(g.heading);
       if (doc) {
@@ -362,9 +351,8 @@ export class Store {
       saveGroups(groups);
       return { blockId: r.blockId, key: session };
     }
-    // 标题可能已经在了、只是还没有列表：上一轮这场对话一条都没写出来，
-    // 但为原件保活建了标题（见 ensureGroupAnchor）。这时补列表，别再造一个标题。
-    // 列表只能靠 previousID 长在标题后面——标题是叶子块，appendBlock 到它身上直接报错。
+    // 标题可能已经在、只是还没有列表（上一轮一条都没写出来，但为原件保活建了标题）。
+    // 这时补列表，别再造一个标题。列表只能靠 previousID 长在标题后面——标题是叶子块。
     const project = String(meta.project || "").trim() || meta.source || "会话";
     const heading = g?.heading ?? (await this.#sy.appendBlock(entriesDocId, `## ${date} · ${project}`, "markdown"));
     await this.#sy.appendBlock(entriesDocId, `- ${body}`, "markdown", { previousID: heading });
@@ -443,10 +431,8 @@ export class Store {
   /**
    * 往列表末尾追加一条，返回条目正文块的 id。
    *
-   * **不能用 appendBlock 的返回值**：往列表块里插 markdown 列表时，它返回的
-   * 是个临时 id，落库之后查不到（实测返回 e0400n3，真实块是 gm6jslt）。
-   * 旧代码没踩到，是因为它 append 到列表项、插入的是纯段落，那种情况返回值是真的。
-   * 多两次 childBlocks 换一个可靠的 id，比事后发现属性挂在空气上便宜。
+   * 不能用 appendBlock 的返回值：往列表块里插 markdown 列表时它返回的是临时 id，
+   * 落库之后查不到，属性就挂在空气上了。多两次 childBlocks 换一个可靠的 id。
    */
   async #appendOne(listId, body, probe = body) {
     try {
@@ -595,8 +581,8 @@ export class Store {
    */
   async listCurrent(limit = 3000) {
     await this.#ensure();
-    // 必须按笔记本收口：SQL 是全局的，不收口会把别的笔记本里的条目也读进来，
-    // 判重就会去比对不相干的库（实测把 Mem 的 864 条读进了试验笔记本）。
+    // 必须按笔记本收口：SQL 是全局的，不收口会把别的笔记本的条目也读进来，
+    // 判重就去比对不相干的库了。
     const box = this.#ids?.notebook;
     const rows = await this.#sy.sql(
       `SELECT id, content, ial FROM blocks

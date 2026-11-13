@@ -1,20 +1,15 @@
 /**
  * 结构化事件日志。
  *
- * 人看的日志（serve.log）只够扫一眼"这一轮写了多少条"；调参、回溯、对比两次
- * 抽取的差异时，需要的是能被程序筛的东西：这条为什么没写、判重判成了什么、
- * 这一批用了哪个 prompt 版本。
- *
- * 所以两份并行：
- *   serve.log        人看，行文本，按体积轮转；
- *   logs/<日期>.jsonl 机器看，一行一个事件，按天分文件。
+ * 两份并行：serve.log 人看、按体积轮转；logs/<日期>.jsonl 机器看、一行一个事件。
+ * 调参、回溯、对比两次抽取的差异时，要的是能被程序筛的东西。
  *
  * 一条记录长这样：
  *   {"ts":"2026-10-31T01:52:03.412Z","ev":"entry.write","session":"6616caf8…",
  *    "id":"20260101000000-aaaaaaa","entity":"mcp-adapter","len":214,"status":"current"}
  *
- * 不记正文。正文在思源里，日志只留 id 和长度——否则日志本身会变成一个
- * 未经治理的记忆库，而且带全文的日志很容易泄漏。
+ * 不记正文：正文在思源里，日志只留 id 和长度，否则日志本身会变成另一个未经治理的
+ * 记忆库，带全文的日志也容易泄漏。
  */
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, unlinkSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -67,7 +62,7 @@ export function event(name, fields = {}) {
     const rec = { ts: new Date().toISOString(), ev: name, ...fields };
     appendFileSync(pathOf(), JSON.stringify(rec) + "\n");
   } catch (e) {
-    // 磁盘满、目录只读的时候，原来这里是全静默的：日志没了，运行看起来完全正常。
+    // 磁盘满、目录只读时这里容易全静默：日志没了，运行看起来完全正常。
     // 只提示一次，别把 stderr 刷满。
     if (!eventBroken) {
       eventBroken = true;

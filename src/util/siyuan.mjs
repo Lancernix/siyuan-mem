@@ -1,9 +1,8 @@
 /**
  * 思源内核的 HTTP 客户端。
  *
- * 只走 HTTP，不走 CLI：CLI 每次要起一个内核进程，实测 150ms 对 7ms，
- * 而且它直接开工作区数据库，跟正在运行的 app 抢同一个 SQLite，长期会有锁冲突。
- * CLI 留给人手敲和 --dry-run 验证。
+ * 只走 HTTP 不走 CLI：CLI 每次要起一个内核进程，而且直接开工作区数据库，跟正在跑的
+ * app 抢同一个 SQLite，长期会锁冲突。CLI 留给人手敲和 --dry-run 验证。
  */
 
 const esc = (v) => String(v ?? "").replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/'/g, "''");
@@ -79,15 +78,14 @@ export class SiYuan {
     return this.#post("/api/notebook/removeNotebook", { notebook: id });
   }
 
-  /** 用 markdown 建文档，path 是文档在笔记本里的路径，例如 "/01-条目"。 */
+  /** 用 markdown 建文档。刚建完笔记本或刚重启内核时思源索引还没跟上，这里自己重试。 */
   /**
    * 建文档。刚建完笔记本、或刚重启内核时，思源的后台索引还没跟上，这里会返回
    * `document metadata is not ready`。以前是把这个错直接抛给用户，让人"等几秒再跑一次"——
    * 初始化流程里连着建四个文档，每次都靠人手重跑一遍很蠢。这里自己重试。
    */
   async createDocWithMd(notebook, path, markdown = "") {
-    // 只对这一句重试。原来的 /not ready|metadata/i 太宽，会把"永久错"也重试六次，
-    // 白等十几秒；而网络错误、401、超时反而不重试——正好反了。
+    // 只对这一句重试：模式放宽会把「永久错」也重试六次，白等十几秒。
     const RETRYABLE = /document metadata is not ready/i;
     let lastErr;
     for (let i = 0; i < 5; i++) {

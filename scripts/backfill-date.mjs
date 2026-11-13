@@ -19,7 +19,12 @@ import { readLog } from "../src/util/readers/index.mjs";
 import { open } from "../src/core/jobs.mjs";
 
 const APPLY = process.argv.includes("--apply");
-const BOX = process.env.MEM_BOX || "20260101000000-aaaaaaa";
+// 笔记本 id 必须自己给：`mem search --json` 里的 box，或思源「文档树 → 复制 ID」。
+const BOX = process.env.MEM_BOX ?? "";
+if (!BOX) {
+  console.error("缺 MEM_BOX：要处理哪个笔记本？先 export MEM_BOX=<笔记本 id>");
+  process.exit(2);
+}
 
 const p2 = (n) => String(n).padStart(2, "0");
 const dayOf = (ms) => {

@@ -109,13 +109,9 @@ export function startIngest({
   entries = listEntries,
   log = () => {},
 } = {}) {
-  // 没有 token 一律不启动，包括绑回环。
-  //
-  // 原来留了一条"绑回环就免密"的口子，靠 socket 来源 + 代理头 + Host 判断
-  // 是不是本机直连。试了两轮都不成立：nginx 裸 proxy_pass 默认既不加
-  // X-Forwarded-For，也会把 Host 改成 127.0.0.1:7788，三个条件全满足——
-  // 而"反代 + 回环"正是部署文档推荐的姿势。这类判断没有可靠的信号，
-  // 所以直接砍掉：要对外服务就配 token（mem center setup 会生成）。
+  // 没有 token 一律不启动，绑回环也一样。靠 socket 来源 + 代理头 + Host 判断是不是
+  // 本机直连不成立：nginx 裸 proxy_pass 默认不加 X-Forwarded-For、还把 Host 改成
+  // 127.0.0.1——而「反代 + 回环」正是部署文档推荐的姿势。
   if (!token) {
     throw new Error(
       "拒绝启动：接收端必须有 token（绑回环也一样）。\n" +
@@ -123,8 +119,8 @@ export function startIngest({
     );
   }
   {
-    // 模板里的那句中文占位符（「自己生成一个长串…」）非空，startIngest 原来只判空，
-    // 于是复制一份模板就等于"鉴权已开启"，而那个 token 全世界都知道。
+    // 模板里的中文占位符非空，只判空的话「复制一份模板」就等于「鉴权已开启」，
+    // 而那个 token 全世界都知道。
     if (/[^\x20-\x7e]/.test(token)) {
       throw new Error(
         "拒绝启动：token 里含非 ASCII 字符，看着像配置模板里的说明文字。\n" +
@@ -242,8 +238,7 @@ export function startIngest({
         type: p.type || undefined,
         days: Number.isFinite(days) && days > 0 ? days : undefined,
         status,
-        // 和 /api/topics、/api/entries 同一套：边缘 MCP 的 search 也必须记成
-        // mcp，否则同一串调用被拆成两种来源（第十八轮复审 P2-2）。
+        // mcp，否则同一串调用被拆成两种来源。
         source: normalizeSource(p.source, "api"),
       });
       // 后端故障必须回 5xx：边缘那边才会显示「检索失败」并重试，而不是把

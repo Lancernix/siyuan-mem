@@ -1,8 +1,8 @@
 /**
  * 把一段会话变成记忆条目。
  *
- * 边界：只留"用户说的话"和"模型最后说的话"。thinking、工具调用、我们自己注入的
- * 上下文全部丢掉——thinking 里一半是被否掉的方案，抽出来就是三条平行记忆。
+ * 边界：只留「用户说的话」和「模型最后说的话」。thinking、工具调用、注入的上下文全丢——
+ * thinking 里一半是被否掉的方案，抽出来就是三条平行记忆。
  */
 
 import { createHash } from "node:crypto";
@@ -331,12 +331,9 @@ function paragraphs(text, budget) {
  * 这时提问和回答的配对已经没意义了，逐段看反而更容易挑出结论。
  */
 function splitExchange(e, budget) {
-  // from/to 必须跟着走：丢了它，这一轮切出来的每条结论都算不出原文指针
-  // （实测切成 4 段，4 段的 from/to 全是 undefined，条目全指不回原话）。
-  //
-  // seg/segTotal 也必须跟着走，而且比 from/to 更要紧：这些段共用同一个 from/to，
-  // 抽取到预算时调用方按 coveredThrough 把「整轮」从队列摘掉。只处理了第 1 段就把
-  // 整轮标成覆盖，剩下几段再也没人抽——而且是静默的，日志上写着「前 N 轮已写进库」。
+  // from/to 和 seg/segTotal 都必须跟着段走：共用同一个 from/to 时，抽取到预算就按
+  // coveredThrough 把「整轮」从队列摘掉——只处理了第 1 段就把整轮标成覆盖，
+  // 剩下几段再也没人抽，而且日志上写着「已写进库」。
   const qSegs = paragraphs(e.q, budget);
   const aSegs = e.a ? paragraphs(e.a, budget) : [];
   const segTotal = qSegs.length + aSegs.length;
@@ -553,8 +550,8 @@ export function mergeEntries(all, limit) {
     const idx = kept.findIndex(
       (k) =>
         entityKey(k) === entityKey(e) &&
-        // 全文完全相同才算同一句。原来比「前 40 字」，两条开头一样、结论不同的
-        // 条目会被合并成一条，而且留下的是长的那条——另一条就永久丢了。
+        // 全文比，不能比前缀：两条开头一样、结论不同的条目会被合并成一条，
+        // 而且留下的是长的那条，另一条永久丢失。
         (norm(k.text) === norm(e.text) || coverage(k.text, e.text) >= DUP_SCORE),
     );
     if (idx < 0) kept.push(e);
@@ -567,10 +564,9 @@ export function mergeEntries(all, limit) {
 /**
  * 这次抽取会不会真的走模型。
  *
- * 单独抽成函数是为了能测：原来这里判的是 `Boolean(cfg.model?.apiKey)`，只认写在
- * config 里的 key，于是 key 来自环境变量、或者 provider 本身 keyless 的时候会
- * 悄悄退回规则抽取——而启动时 assertModel 用的是 hasModel（认识这两种），
- * 两边不一致，表现是"服务说模型正常，写进去的全是半句话"。
+ * 必须和启动时的 assertModel 用同一个判断（hasModel）：只认 config 里的 apiKey 的话，
+ * key 来自环境变量或 provider 本身 keyless 时会悄悄退回规则抽取，
+ * 表现是「服务说模型正常，写进去的全是半句话」。
  */
 export function willUseModel(cfg, useModelOpt) {
   return useModelOpt !== false && hasModel(cfg);
@@ -584,25 +580,15 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
   const useModel = willUseModel(cfg, opts.useModel);
   const plan = planBatches(exchanges, budget);
   /**
-   * 抽到哪个点就该收手了。
-   *
-   * 一场 384 轮的会话能拆出十几批，一批一次模型调用；实测单次 113 秒、254 秒都有过。
-   * 也就是说光**抽取**就能跑四十分钟——2026-11-10 那几轮「3 个会话 / 86 分钟」就是这么来的，
-   * 跟思源卡不卡没关系。所以抽取也要有闸门：到点就不再发下一批，已经抽出来的照常写库，
-   * 剩下的轮次从队头摘掉、留在队列里下轮接着抽（见 jobs.mjs 的 trimQueue）。
-   *
-   * 只在这一批**开始前**看时间，不发半截请求；第一批永远跑，保证每轮都有进展。
+   * 抽到哪个点就收手。一场几百轮的会话能拆十几批，一批一次模型调用，光抽取就能跑
+   * 几十分钟，所以要有闸门：到点不再发下一批，抽出来的照常写库，剩下的留队列。
+   * 只在这一批开始前看表，不发半截请求；第一批永远跑，保证每轮都有进展。
    */
   const deadline = Number(opts.deadline) || Number.POSITIVE_INFINITY;
   /**
-   * 一个会话最多收多少条。
-   *
-   * 这里原来是「批数 ×4，夹在 8~36」。实测一场 1272 轮的会话（82 批）撞了 36 的天花板，
-   * 收敛完还剩 185 条，直接扔掉 149 条——而超长会话往往正是最重要的项目会话
-   * （mcp-adapter、siyuan-mem 都是这么长的）。压到三十几条等于把一场项目的后半段丢了。
-   *
-   * 所以默认不设上限，只留一道 200 的防跑飞闸门（真到 200 条，说明这场会话本身就该拆）。
-   * 想压噪音就在配置里显式写一个数，那样它盖掉这里的默认。
+   * 一个会话最多收多少条。默认不设上限，只留一道 200 的防跑飞闸门：写死小数字时，
+   * 长会话后半段抽出来的东西会被整批丢掉，而长会话往往正是最重要的项目会话。
+   * 想压噪音就在配置里显式写一个数。
    */
   const perSession = cfg.extract?.maxEntriesPerSession ?? 200;
 
@@ -636,10 +622,8 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
       break;
     }
     const batchDeadline = idx === 0 ? Math.max(deadline, Date.now() + oneBatchMs) : deadline;
-    // 一次批调用的总预算（含重试）。不给这个的话，"总预算"是会话级的那 10 分钟，
-    // 于是一个卡住的请求可以按 180 秒 × 4 次尝试把这 10 分钟吃干净——实测 12:26
-    // 那轮就是这么走的：一整批耗掉九分钟，一条都没多抽。一次调用最多三分钟，
-    // 抽不完就是抽不完，剩下的留给下一轮。
+    // 一次批调用的总预算（含重试）。只有会话级预算的话，一个卡住的请求能按
+    // 「单次超时 × 重试次数」把整段时间吃干净，一条都没多抽。
     const callDeadline = Math.min(batchDeadline, Date.now() + oneBatchMs);
     // 这一批覆盖哪几轮。条目继承它，指针才落得到具体段落上——
     // 否则一条结论只能指整个会话（几十万字），等于没有原文。
@@ -668,18 +652,12 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
         drafted.push({ entity: name, brief: e.brief, text: e.text });
       }
       all.push(...kept.map((e) => ({ ...e, from, to })));
-      // 只有**抽出来了、而且这一轮的所有分段都看过了**才推进覆盖点。
-      // 原来在 try 之前就推进，于是预算到点掐掉的那一批也算「抽过了」，
-      // jobs 按这个点把轮次从队列里摘掉——那几轮就再也没人抽，而且看不出来。
+      // 只有抽出来了、而且这一轮所有分段都看过，才推进覆盖点：提前推进的话，
+      // 预算到点被掐掉的那批也算「抽过了」，那几轮再也没人抽。
       if (wholeExchange) coveredThrough = to ?? coveredThrough;
     } catch (e) {
-      // 时间到点被我们自己掐掉的，不算失败。
-      //
-      // 记成失败的话整场会被判成「抽取不完整」→ 原文留在队列里 → 试满三次进 dead/，
-      // 而那半场一行都没处理错。到点就是到点，按收手处理，剩下的下轮接着抽。
-      //
-      // 但要分两种：前面已经有批次成功过，就把这一批也留给下一轮（收手）；
-      // 一批都没成的时候不能收手，那样这一轮等于白跑，退化抽一条保证有进展。
+      // 时间到点被自己掐掉的，不算失败：记成失败会让整场被判「抽取不完整」，
+      // 试满三次进 dead/，而那半场一行都没处理错。
       if (e?.budget || Date.now() >= callDeadline) {
         if (coveredThrough != null) {
           stoppedAt = idx;
