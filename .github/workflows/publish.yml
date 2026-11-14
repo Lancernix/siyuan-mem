@@ -39,7 +39,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4   # 版本读 package.json 的 packageManager
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.14.0   # 不写 packageManager：pnpm 12 会把自己塞进 lock（一堆平台二进制）
 
       - uses: actions/setup-node@v4
         with:
@@ -51,7 +53,7 @@ jobs:
       - name: 升级 npm
         run: npm install -g npm@^11.5.1
 
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile   # 与本机 mise 的 pnpm latest / Node 24 对齐
       - run: pnpm test   # 308 项，固定串行，并发会互相抢 HOME
 
       - name: 从 tag 取版本，只改 CI 副本

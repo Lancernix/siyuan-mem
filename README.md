@@ -31,7 +31,7 @@
 
 ## 安装
 
-需要 Node **24+** 和 pnpm 11+（DSH 的会话日志是多帧 zstd，`zlib.zstdDecompressSync` 要 22.15 以上，仓库统一按 24 走），思源 3.8+ 在跑。
+需要 Node **24+** 和 pnpm 12+（DSH 的会话日志是多帧 zstd，`zlib.zstdDecompressSync` 要 22.15 以上，仓库统一按 24 走），思源 3.8+ 在跑。
 
 ```bash
 git clone <repo> ~/Codes/siyuan-mem && cd ~/Codes/siyuan-mem

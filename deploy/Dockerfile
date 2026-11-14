@@ -9,9 +9,9 @@ ENV TZ=Asia/Shanghai
 WORKDIR /app
 
 # 先只拷依赖清单：改代码不用重装依赖，改依赖才会重建这一层。
-# pnpm 版本跟 package.json 的 packageManager 对齐，别让 corepack 自己猜。
+# pnpm 版本跟 CI 显式对齐，别让 latest 哪天自己跳大版本。
 COPY package.json pnpm-lock.yaml ./
-RUN npm install -g pnpm@11.9.0 \
+RUN npm install -g pnpm@12.14.0 \
  && pnpm install --frozen-lockfile --prod \
  && npm cache clean --force
 
