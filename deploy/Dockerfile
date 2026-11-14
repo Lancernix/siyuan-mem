@@ -2,15 +2,18 @@
 #
 # 依赖只有 AI SDK 那几个包（ai / @ai-sdk/* / zod），全是纯 JS、没有原生模块，
 # 所以 arm64 / amd64 都能直接 build，不需要编译工具链。
-FROM node:22-alpine
+FROM node:24-alpine
 
 # 日志按本地日期分文件，容器默认 UTC 会让「今天」错 8 小时。
 ENV TZ=Asia/Shanghai
 WORKDIR /app
 
 # 先只拷依赖清单：改代码不用重装依赖，改依赖才会重建这一层。
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+# pnpm 版本跟 package.json 的 packageManager 对齐，别让 corepack 自己猜。
+COPY package.json pnpm-lock.yaml ./
+RUN npm install -g pnpm@11.9.0 \
+ && pnpm install --frozen-lockfile --prod \
+ && npm cache clean --force
 
 COPY src ./src
 

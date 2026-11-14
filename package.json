@@ -1,8 +1,9 @@
 {
   "name": "siyuan-mem",
-  "version": "0.1.0",
+  "version": "0.0.0-development",
   "description": "把 agent 会话变成思源笔记里的记忆条目：采集、抽取、判重、召回，存储交给思源",
   "type": "module",
+  "packageManager": "pnpm@11.9.0",
   "bin": {
     "mem": "./src/cli/cli.mjs",
     "mem-mcp": "./src/mcp/main.mjs"
@@ -21,7 +22,8 @@
     "test": "node --test --test-concurrency=1"
   },
   "engines": {
-    "node": ">=22.15.0"
+    "node": ">=24.0.0",
+    "pnpm": ">=11.0.0"
   },
   "license": "MIT",
   "repository": {

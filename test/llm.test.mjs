@@ -5,7 +5,7 @@
  * 不回落会抽不出条目；协议拼错（system 放错位置、角色名不对、模型名没进路径）
  * 服务端只会回 400，而 400 在重试策略里是"立刻抛"，很容易被当成配置问题查半天。
  *
- * 跑：npm test
+ * 跑：pnpm test
  */
 import test from "node:test";
 import assert from "node:assert/strict";

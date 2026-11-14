@@ -1,11 +1,11 @@
-# 走 npm Trusted Publishing（OIDC），仓库里不存任何 npm token。
+# 发版走 npm Trusted Publishing（OIDC），仓库里不存任何 npm token。
+#
+# 版本真源是 Release 的 tag（v<版本>）。仓库里 package.json 永远是占位符
+# 0.0.0-development；CI 把 tag 的版本临时写进发布副本，publish 完 runner 销毁，
+# 不回写、不额外提交，也就不会二次触发 workflow。
 #
 # 一次性前提（只做一次）：
-#   1. 0.1.0 手动发一次 —— 包必须先存在于 npm，才能在包设置里配 Trusted Publisher：
-#        npm login && npm publish --access public --otp <6位验证码>
-#      注意：npm login 自 2025-12-09 起只发两小时的会话凭证，不是长期 token，
-#      登录完就立刻发，别隔夜；发布时账号级 2FA 会要一次验证码。
-#      （这次不要加 --provenance，本机没有 OIDC 提供方。）
+#   1. 包必须已存在于 npm —— 0.1.0 已手动发过。
 #   2. npmjs.com → 包设置 → Trusted Publisher → GitHub Actions，填：
 #        Organization or user: Lancernix
 #        Repository:            siyuan-mem
@@ -14,8 +14,8 @@
 #        Allowed actions:       勾上 npm publish
 #      大小写敏感，repository.url 必须与这个仓库一致。
 #
-# 之后的发布：改 package.json 版本 → push → 在 GitHub 上建一个 v<版本> 的 Release，
-# 这个 workflow 就会跑。tag 和版本对不上会直接拒绝发布。
+# 之后每次发版：push 代码 → 在 GitHub 建一个 tag 为 v<版本> 的 Release。
+# 想跳过网页，也可以在 Actions 页手动跑 workflow_dispatch 并填版本号。
 
 name: Publish to npm
 
@@ -23,6 +23,11 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      version:
+        description: '要发布的版本，如 0.1.1（不带 v）'
+        required: true
+        type: string
 
 jobs:
   publish:
@@ -34,9 +39,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4   # 版本读 package.json 的 packageManager
+
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'   # engines 要求 >= 22.15
+          node-version: '24'   # engines 要求 >= 24
           # 不设 registry-url：OIDC 不需要 .npmrc 里的 _authToken，
           # 设了反而可能让 npm 跳过 OIDC 回退。
 
@@ -44,19 +51,25 @@ jobs:
       - name: 升级 npm
         run: npm install -g npm@^11.5.1
 
-      - run: npm ci
-      - run: npm test   # scripts.test 已固定串行，308 项测试并发会互相抢 HOME
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test   # 308 项，固定串行，并发会互相抢 HOME
 
-      - name: tag 与 package.json 版本对齐
-        if: github.event_name == 'release'
+      - name: 从 tag 取版本，只改 CI 副本
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          RAW: ${{ github.event.release.tag_name || inputs.version }}
         run: |
-          ver="$(node -p "require('./package.json').version")"
-          if [ "$TAG" != "v$ver" ]; then
-            echo "::error::tag $TAG 与 package.json 里的 $ver 不一致，拒绝发布"
+          ver="${RAW#v}"
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+            echo "::error::版本 $RAW 不是 v<semver> 格式，拒绝发布"
             exit 1
           fi
+          name="$(node -p "require('./package.json').name")"
+          if npm view "$name@$ver" version >/dev/null 2>&1; then
+            echo "::error::$name@$ver 已经发过了，换个版本号"
+            exit 1
+          fi
+          VER="$ver" node -e 'const fs=require("fs");const p=require("./package.json");p.version=process.env.VER;fs.writeFileSync("package.json",JSON.stringify(p,null,2)+"\n")'
+          echo "本次发版版本 $ver"
 
       - name: 发布前看一眼包内容
         run: npm pack --dry-run

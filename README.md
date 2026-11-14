@@ -31,7 +31,7 @@
 
 ## 安装
 
-需要 Node **22.15+**（DSH 的会话日志是多帧 zstd，`zlib.zstdDecompressSync` 到 22.15 才有），思源 3.8+ 在跑。
+需要 Node **24+** 和 pnpm 11+（DSH 的会话日志是多帧 zstd，`zlib.zstdDecompressSync` 要 22.15 以上，仓库统一按 24 走），思源 3.8+ 在跑。
 
 ```bash
 git clone <repo> ~/Codes/siyuan-mem && cd ~/Codes/siyuan-mem
@@ -44,12 +44,12 @@ node src/cli/cli.mjs init
 想直接敲 `mem`，从源码编一个自带运行时的单文件再软链进 PATH（npx 装的话直接用 `npx -p siyuan-mem mem`）：
 
 ```bash
-npm run dist                                   # 产物在 ~/.siyuan-mem/mem，86MB
+pnpm dist                                     # 产物在 ~/.siyuan-mem/mem，86MB
 ln -sf ~/.siyuan-mem/mem ~/.local/bin/mem
 mem status
 ```
 
-`~/.siyuan-mem/mem` 是**发版产物**，运行时焊死在里面（当前 bun 1.4.4）。改了代码要重新 `npm run dist`，否则跑的还是旧的。
+`~/.siyuan-mem/mem` 是**发版产物**，运行时焊死在里面（当前 bun 1.4.4）。改了代码要重新 `pnpm dist`，否则跑的还是旧的。
 
 想抽取质量好一点，填 `config.json` 的 `model.apiKey`。不填也能跑，走规则抽取，只是结论糙——糙到什么程度：只取首段，写进库里是「让我为您重新推荐一些…」这种半句话。
 
@@ -495,7 +495,7 @@ plist 里的可执行文件优先指向 `~/.siyuan-mem/mem`，其次退回 node 
 ### 单文件二进制（可选）
 
 ```bash
-npm run dist      # 打包 → 对账 → 装到 ~/.siyuan-mem/mem
+pnpm dist         # 打包 → 对账 → 装到 ~/.siyuan-mem/mem
 ```
 
 `dist` 不只编译，还要**自证**：产物跑一遍 `audit --all`，跟 node 的结果逐字比对，对不上就不落盘。理由是 bun 的 `node:zlib`、`node:fs` 是重实现，我被「`zstdDecompressSync` 只解第一帧、1MB 解出 243 字节还不报错」坑过一次——静默吞掉半段语料比直接崩更难查。
@@ -599,4 +599,8 @@ src/
 
 三条边界：**core** 调模型、写思源；**cli** 只搬运；**mcp** 只读。三者共用 `util/`。
 
-测试：`npm test`，308 项，全部是纯函数或假服务端——不连真思源、不真调模型。
+测试：`pnpm test`，308 项，全部是纯函数或假服务端——不连真思源、不真调模型。
+
+发版不改 `package.json` 的版本号：那里是 `0.0.0-development` 占位符，真正的版本由 Release 的 tag（`v0.1.1` 这种）决定。push 代码后在 GitHub 建一个 `v<版本>` 的 Release，workflow 会把 tag 的版本临时写进发布副本、跑完测试再发到 npm，仓库里永远是占位符——不回写、不额外提交，也不会二次触发自己。前提是先去 npmjs.com 的包设置里配好 Trusted Publisher（GitHub Actions，owner `Lancernix`、repo `siyuan-mem`、workflow `publish.yml`、环境留空），配完之后 CI 不需要任何 npm token。
+
+想跳过网页，也可以在 Actions 页手动跑 `Publish to npm`，填一个版本号。
