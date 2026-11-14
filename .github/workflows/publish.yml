@@ -1,0 +1,65 @@
+# 走 npm Trusted Publishing（OIDC），仓库里不存任何 npm token。
+#
+# 一次性前提（只做一次）：
+#   1. 0.1.0 手动发一次 —— 包必须先存在于 npm，才能在包设置里配 Trusted Publisher：
+#        npm login && npm publish --access public
+#      （这次不要加 --provenance，本机没有 OIDC 提供方。）
+#   2. npmjs.com → 包设置 → Trusted Publisher → GitHub Actions，填：
+#        Organization or user: Lancernix
+#        Repository:            siyuan-mem
+#        Workflow filename:     publish.yml
+#        Environment:           留空
+#        Allowed actions:       勾上 npm publish
+#      大小写敏感，repository.url 必须与这个仓库一致。
+#
+# 之后的发布：改 package.json 版本 → push → 在 GitHub 上建一个 v<版本> 的 Release，
+# 这个 workflow 就会跑。tag 和版本对不上会直接拒绝发布。
+
+name: Publish to npm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # 用 GitHub 的 OIDC 换 npm 的短期发布凭证
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'   # engines 要求 >= 22.15
+          # 不设 registry-url：OIDC 不需要 .npmrc 里的 _authToken，
+          # 设了反而可能让 npm 跳过 OIDC 回退。
+
+      # Trusted Publishing 要求 npm CLI >= 11.5.1，setup-node 自带的版本不够。
+      - name: 升级 npm
+        run: npm install -g npm@^11.5.1
+
+      - run: npm ci
+      - run: npm test   # scripts.test 已固定串行，308 项测试并发会互相抢 HOME
+
+      - name: tag 与 package.json 版本对齐
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          ver="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "v$ver" ]; then
+            echo "::error::tag $TAG 与 package.json 里的 $ver 不一致，拒绝发布"
+            exit 1
+          fi
+
+      - name: 发布前看一眼包内容
+        run: npm pack --dry-run
+
+      # 不要设 NODE_AUTH_TOKEN。npm CLI 检测到 OIDC 环境会自动用短期凭证，
+      # 并自动生成 provenance 签名；设了 token（哪怕是空串）会把它顶掉。
+      - name: 发布
+        run: npm publish --access public

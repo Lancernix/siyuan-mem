@@ -18,7 +18,7 @@
   "scripts": {
     "mem": "node src/cli/cli.mjs",
     "dist": "node scripts/dist.mjs",
-    "test": "node --test"
+    "test": "node --test --test-concurrency=1"
   },
   "engines": {
     "node": ">=22.15.0"
@@ -26,7 +26,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Lancernix/siyuan-mem.git"
+    "url": "https://github.com/Lancernix/siyuan-mem.git"
   },
   "homepage": "https://github.com/Lancernix/siyuan-mem#readme",
   "bugs": {
