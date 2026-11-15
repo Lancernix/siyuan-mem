@@ -9,16 +9,23 @@
   },
   "files": [
     "src/",
-    "deploy/",
     "config.example.json",
     "README.md",
     "LICENSE",
-    "docs/panel.png"
+    "docs/panel.png",
+    "deploy/config.example.json",
+    "deploy/docker-compose.yml",
+    "deploy/Dockerfile",
+    "deploy/README.md",
+    "deploy/sandbox/bootstrap.sh",
+    "deploy/sandbox/config.example.json",
+    "deploy/sandbox/docker-compose.yml"
   ],
   "scripts": {
     "mem": "node src/cli/cli.mjs",
     "dist": "node scripts/dist.mjs",
-    "test": "node --test --test-concurrency=1"
+    "test": "node --test --test-concurrency=1",
+    "prepack": "node scripts/prepack-check.mjs"
   },
   "engines": {
     "node": ">=24.0.0",

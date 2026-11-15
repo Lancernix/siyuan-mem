@@ -32,8 +32,9 @@ const attr = (ial, k) => new RegExp(k + '="([^"]*)"').exec(ial ?? "")?.[1] ?? ""
 const plain = (s, raw = "") => stripRawLink(s, raw);
 
 /**
- * 拼进 LIKE 前转义：单引号，以及 `%` `_` `\` 三个通配符。不转义的话
- * `mem search %` 会变成全表匹配，而且看不出是查询串的锅。配套 ESCAPE 写在 SQL 里。
+ * 拼进 LIKE 前转义：单引号，以及 `%` `_` `\` 三个通配符。早期只转单引号，
+ * `mem search %` 拼成 `LIKE '%%%'` 直接匹配全库，还看不出是查询串的锅。
+ * 配套 ESCAPE 写在 SQL 里。
  */
 export function likeEsc(s) {
   return String(s).replace(/[\\%_]/g, (c) => "\\" + c).replace(/'/g, "''");
