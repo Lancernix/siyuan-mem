@@ -19,7 +19,8 @@
     "deploy/README.md",
     "deploy/sandbox/bootstrap.sh",
     "deploy/sandbox/config.example.json",
-    "deploy/sandbox/docker-compose.yml"
+    "deploy/sandbox/docker-compose.yml",
+    "scripts/prepack-check.mjs"
   ],
   "scripts": {
     "mem": "node src/cli/cli.mjs",

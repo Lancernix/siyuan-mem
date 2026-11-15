@@ -28,8 +28,6 @@ export const ENTRY_LIMIT = { default: 8, max: 20 };
  * 撞到要留痕并告知调用方：这时目录只是「最近 N 条」的统计，老话题会静默消失。
  */
 const ROW_CAP = 20000;
-/** 单个话题名/别名在**展示文本**里最长占多少字符。 */
-const NAME_CHARS = 40;
 /** 每个话题最多列几个别名。 */
 const ALIAS_MAX = 3;
 /**
@@ -44,7 +42,7 @@ export const UNCATEGORIZED = "（未归类）";
  *
  * 所以话题名、别名、候选名一律原样返回，控量只靠 limit 和别名条数。
  */
-const clip = (s, n = NAME_CHARS) => {
+const clip = (s, n = 30) => {
   const t = String(s ?? "").replace(/\s+/g, " ").trim();
   return t.length > n ? `${t.slice(0, n - 1)}…` : t;
 };
