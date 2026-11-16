@@ -229,8 +229,7 @@ export function resolveModel(cfg) {
 
 /** 有 key，或者本地部署（ollama/lmstudio 不要 key）。 */
 export function hasModel(cfg) {
-  const m = resolveModel(cfg);
-  return Boolean(m.baseUrl && m.model && (m.apiKey || m.keyless));
+  return resolveChain(cfg).length > 0;
 }
 
 function record(entry) {
@@ -319,11 +318,7 @@ function modelFail(e) {
   return err;
 }
 
-async function call(cfg, { messages, json = false, schema = null, maxTokens, tag = "", deadline = Number.POSITIVE_INFINITY } = {}) {
-  const m = resolveModel(cfg);
-  // problem 优先：不认识的 provider 也要说清楚是「哪一家不认识」，不能笼统报「没配模型」。
-  if (m.problem) throw new Error(m.problem);
-  if (!hasModel(cfg)) throw new Error("没有配置模型：mem model use <provider> --key ...");
+async function callOne(cfg, m, { messages, json = false, schema = null, maxTokens, tag = "", deadline = Number.POSITIVE_INFINITY } = {}) {
 
   const { generateText, Output } = await import("ai");
   // 带 schema 的调用也要算"想要 JSON"：一旦端点拒绝 json_schema，降级时得把
@@ -434,6 +429,87 @@ async function call(cfg, { messages, json = false, schema = null, maxTokens, tag
   return out;
 }
 
+
+/**
+ * 这次能用的模型，按优先级排。
+ *
+ * `model` 是主力，`model.fallback` 是备用，写几个都行。每个备用项都从主配置继承
+ * 缺省字段，只覆盖自己写了的——所以「同一家换个 key」只要写 `{apiKey: "..."}`，
+ * 「换一家」写 `{provider, baseUrl, name}` 就够，不用把 jsonMode / timeout 抄一遍。
+ *
+ * 缺 baseUrl / 没 key / provider 不认识的直接跳过：那不是「备用」，那是配错了，
+ * 留在链上只会在真出事的时候多报一条误导人的错。
+ */
+export function resolveChain(cfg) {
+  const base = cfg?.model ?? {};
+  const list = [base, ...(Array.isArray(base.fallback) ? base.fallback : [])];
+  const out = [];
+  for (const item of list) {
+    if (!item || typeof item !== "object") continue;
+    const m = resolveModel({ model: { ...base, ...item, fallback: undefined } });
+    if (m.problem || !m.baseUrl || !m.model) continue;
+    if (!m.apiKey && !m.keyless) continue;
+    out.push(m);
+  }
+  return out;
+}
+
+/**
+ * 按链顺序试。换下一家的条件很宽：任何「这次没成」都换——除非是预算到点
+ * （换了也是超时）或者 schema 不合格（那是模型答得不合格式，换一家可能有用，
+ * 但那属于内容问题，交给上层退文本模式重解析）。
+ *
+ * 全挂了才报错，且把每家为什么挂都列出来：单模型时报一条，多模型时只说
+ * 「模型调用失败」等于把排查线索丢了。
+ */
+async function call(cfg, opts = {}) {
+  const chain = resolveChain(cfg);
+  if (!chain.length) {
+    // problem 优先：不认识的 provider 也要说清楚是「哪一家不认识」，不能笼统报「没配模型」。
+    const m = resolveModel(cfg);
+    throw new Error(m.problem || "没有配置模型：mem model use <provider> --key ...");
+  }
+
+  const fails = [];
+  for (let i = 0; i < chain.length; i++) {
+    const m = chain[i];
+    try {
+      const r = await callOne(cfg, m, opts);
+      if (i > 0) {
+        event("llm.fallback", {
+          kind: "model-switch",
+          to: `${m.provider}/${m.model}`,
+          from: `${chain[0].provider}/${chain[0].model}`,
+          index: i,
+        });
+      }
+      return { ...r, model: m.model, provider: m.provider, switched: i > 0 };
+    } catch (e) {
+      fails.push({ label: `${m.provider}/${m.model}`, error: e });
+      if (e?.budget || e?.noObject) throw e;
+      if (i < chain.length - 1) {
+        event("llm.fallback", {
+          kind: "model-down",
+          from: `${m.provider}/${m.model}`,
+          to: `${chain[i + 1].provider}/${chain[i + 1].model}`,
+          status: e?.status,
+          fatal: Boolean(e?.fatal),
+        });
+      }
+    }
+  }
+
+  const err = new Error(
+    `模型调用失败：${fails.map((f) => `${f.label}：${String(f.error?.message ?? f.error).slice(0, 160)}`).join("；")}`
+  );
+  const lastErr = fails[fails.length - 1]?.error;
+  if (lastErr?.status) err.status = lastErr.status;
+  // 只有「每家都是配置问题」才判 fatal：其中一家只是抖的话，下轮还有救，
+  // 不该让上层把整轮停掉。
+  if (fails.length && fails.every((f) => f.error?.fatal)) err.fatal = true;
+  throw err;
+}
+
 /** 只要文本。`json:true` 时让服务端开 json_object（字段仍由 prompt 约定）。 */
 export async function chat(cfg, opts = {}) {
   return await call(cfg, opts);
@@ -472,9 +548,20 @@ export async function probe(cfg) {
   const trimmed = r.text.trim();
   return {
     ...r,
-    provider: m.provider,
-    model: m.model,
-    jsonOk: /"ok"\s*:\s*true/.test(trimmed),
+    // 真正作答的那家：主力挂了会自动换备用，报主力的名字等于骗人。
+    provider: r.provider ?? m.provider,
+    model: r.model ?? m.model,
+    switched: Boolean(r.switched),
+    // 判「能不能可靠地给 JSON」而不是「值是不是 true」：有的模型会回 {"ok":3}，
+    // 那也是合法 JSON，抽取能解析；按 true 判会误报「JSON 模式没生效」。
+    jsonOk: (() => {
+      try {
+        JSON.parse(trimmed);
+        return true;
+      } catch {
+        return false;
+      }
+    })(),
     sample: trimmed.slice(0, 120),
   };
 }

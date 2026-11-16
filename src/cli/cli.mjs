@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { CONFIG_PATH, INBOX_DIR, loadConfig, LOG_PATH, machineId, saveConfig, offsetsOf, loadOffsets } from "../util/config.mjs";
-import { PROVIDERS, resolveModel, hasModel, probe as probeModel, saveModelChoice, maskKey, usageToday } from "../util/llm.mjs";
+import { PROVIDERS, resolveModel, resolveChain, hasModel, probe as probeModel, saveModelChoice, maskKey, usageToday } from "../util/llm.mjs";
 import { dedupeHealthToday, recallHealthToday, browseHealthToday } from "../core/selfcheck.mjs";
 import { formatHits, ATTR } from "../core/store.mjs";
 import { parseArgs } from "../util/args.mjs";
@@ -122,7 +122,8 @@ async function cmdStatus() {
   console.log(`笔记本       ${cfg.siyuan.notebook}`);
   console.log(`条目         current ${stats.current ?? 0} / superseded ${stats.superseded ?? 0}`);
   const mm = resolveModel(cfg);
-  console.log(`模型         ${hasModel(cfg) ? `${mm.provider} / ${mm.model}` : "未配置（走规则抽取）"}`);
+  const spare = hasModel(cfg) ? resolveChain(cfg).length - 1 : 0;
+  console.log(`模型         ${hasModel(cfg) ? `${mm.provider} / ${mm.model}${spare > 0 ? `（另有 ${spare} 个备用）` : ""}` : "未配置（走规则抽取）"}`);
   const u = usageToday();
   if (u.calls) {
     const cache = u.cached ? `（缓存命中 ${u.cached}）` : "";
@@ -482,6 +483,10 @@ async function cmdModel(args, flags) {
       }`
     );
     console.log(`JSON 模式    ${m.jsonMode ? "开" : "关"}`);
+    const chain = resolveChain(cfg);
+    if (chain.length > 1) {
+      console.log(`备用         ${chain.slice(1).map((x, i) => `${i + 2}. ${x.provider}/${x.model}`).join("，")}`);
+    }
     console.log(`今日用量     ${u.calls ? `${u.calls} 次，输入 ${u.prompt}${u.cached ? `（缓存 ${u.cached}）` : ""} / 输出 ${u.completion} tokens` : "还没有调用"}`);
     console.log(`\n可选 provider：${Object.keys(PROVIDERS).join(", ")}`);
     console.log(`协议三选一：openai / anthropic / gemini（自定义端点用 model.wire 指定）`);
