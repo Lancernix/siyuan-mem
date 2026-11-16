@@ -446,8 +446,7 @@ async function callModel(cfg, batch, entityShot = [], part = null) {
   // 给一个空对象，truthy 会把好端端的文本结果丢掉，转而去解析 {}。
   const obj = r.object && Array.isArray(r.object.entries) ? r.object : null;
   const parsed = obj ? parseEntries(JSON.stringify(obj)) : parseEntries(r.text);
-  // 解析不出来就整批算失败：宁可退回规则抽取（并让会话留在队列里重试），
-  // 也不能"零条 + 成功"地归档掉。
+  // 解析不出来就整批算失败：让会话留在队列里重试，也不能"零条 + 成功"地归档掉。
   if (!parsed.ok) {
     throw new Error(`模型返回无法解析为条目：${String(r.text ?? "").slice(0, 60)}`);
   }
@@ -605,6 +604,8 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
   let failures = 0;
   let overflow = 0;
   let lastError = "";
+  // 这类错换下一批也没用（key 失效、订阅过期、模型不存在），调用方要整轮停。
+  let fatal = false;
   // 本会话已经抽出的话题名。每批都只看得到自己那一万六十字，不给它这个，
   // 同一场对话里会顺序长出「订货系统」「订货系统 技术栈」「订货系统 路由设计」。
   const sessionEntities = [];
@@ -657,18 +658,23 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
       if (wholeExchange) coveredThrough = to ?? coveredThrough;
     } catch (e) {
       // 时间到点被自己掐掉的，不算失败：记成失败会让整场被判「抽取不完整」，
-      // 试满三次进 dead/，而那半场一行都没处理错。
+      // 试满三次进 dead/，而那半场一行都没处理错。也不写半句话，前几批抽出来的
+      // 照常带走，剩下的留队列下轮接着来。
       if (e?.budget || Date.now() >= callDeadline) {
-        if (coveredThrough != null) {
-          stoppedAt = idx;
-          break;
-        }
+        stoppedAt = idx;
+        break;
       }
+      // 模型这条路断了就立刻停手。
+      //
+      // 以前这里是退回规则抽取（heuristicEntries）继续往下跑，还推进覆盖点——
+      // 那是拿半句话顶替模型结论：写进去的条目质量差，却和正常条目长得一模一样，
+      // 事后没法分辨，而游标一过，那几轮原文再也不会被人重抽。宁可这一场不写、
+      // 原样留在队列里，等模型回来再抽。
       failures++;
-      lastError = e.message;
-      all.push(...heuristicEntries(batch, opts.fallbackEntity ?? "", 1));
-      // 退回规则抽取也算这一批处理过了：至少从里面捞了一条，指针能落到这段。
-      if (wholeExchange) coveredThrough = to ?? coveredThrough;
+      lastError = e?.message ?? String(e);
+      fatal = fatal || e?.fatal === true;
+      stoppedAt = idx;
+      break;
     }
   }
   // 先去重（字面），再收敛（语义），最后才截断——
@@ -681,7 +687,8 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
   const kept = sorted.slice(0, perSession);
   // 被上限砍掉的那些，只记个数等于扔掉。留下话题 + 摘要，事后还能人工捞回来。
   const droppedBriefs = sorted.slice(perSession).slice(0, 40).map((e) => `${e.entity}｜${e.brief ?? ""}`);
-  const mode = failures === 0 ? "model" : failures === plan.length ? "heuristic-after-error" : "partial";
+  // 现在遇到模型失败是立刻停，所以只可能是「全程走模型」「部分批成功」「第一批就没成」。
+  const mode = failures === 0 ? "model" : all.length ? "partial" : "failed";
   const stoppedEarly = stoppedAt < plan.length;
   return {
     entries: kept,
@@ -696,6 +703,7 @@ export async function extractEntries(cfg, exchanges, opts = {}) {
     stoppedEarly,
     coveredThrough,
     remainingBatches: plan.length - stoppedAt,
+    fatal,
     error: failures ? `${failures}/${plan.length} 批失败：${lastError}` : undefined,
   };
 }

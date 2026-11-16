@@ -965,7 +965,7 @@ async function cmdLog(args, flags) {
     }
     console.log(`最近 ${days} 天：${s.events} 条事件，${s.sessions} 个会话`);
     console.log(`  写入 ${s.written} 条 | 跳过 ${s.skipped} | 取代 ${s.replaced} | 错误 ${s.errors}`);
-    if (s.degraded) console.log(`  ⚠ 降级 ${s.degraded} 次（没走模型，写进去的是规则抽取的半句话）`);
+    if (s.degraded) console.log(`  ⚠ 降级 ${s.degraded} 次（没走模型，或模型失败后停手）`);
     // 模型层的降级不报错，只是结果变糙。不单独列出来，"抽取正常"和"一直在用
     // 提示词硬凑"在日志上长得一模一样。
     if (s.fallbacks?.length) {

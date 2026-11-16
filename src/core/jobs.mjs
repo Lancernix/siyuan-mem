@@ -129,7 +129,7 @@ export function enqueueLog(file, { format = "", quietSeconds = 180 } = {}) {
 /**
  * 把队列里的会话逐条写进思源。
  *
- * 只有"完整跑完"才归档：模型挂了退回规则抽取时，原文留在队列里等模型恢复
+ * 只有"完整跑完"才归档：模型挂了抽取会立刻停手，原文留在队列里等模型恢复
  * 重跑（writeEntry 自带哈希去重，重跑不会写两遍）。归档意味着原文出队，
  * 之后再也拿不回，所以不能急。
  */
@@ -209,7 +209,7 @@ export async function processQueue({
   let broken = null;
   /** 把本轮撞停的那场会话是谁。熔断之后要靠它判断「是思源坏了还是这一场坏了」。 */
   let brokenSession = null;
-  const sum = { sessions: files.length, left: 0, written: 0, skipped: 0, replaced: 0, failed: 0, degraded: 0, raw: 0, entities: 0, pending: 0, dedupeCalls: 0, dedupeMs: 0, dead: 0, unfinished: 0, trimmed: 0, narrowed: 0, broken: false, tokens: { prompt: 0, completion: 0 } };
+  const sum = { sessions: files.length, left: 0, written: 0, skipped: 0, replaced: 0, failed: 0, degraded: 0, modelDown: null, raw: 0, entities: 0, pending: 0, dedupeCalls: 0, dedupeMs: 0, dead: 0, unfinished: 0, trimmed: 0, narrowed: 0, broken: false, tokens: { prompt: 0, completion: 0 } };
 
   // 先补上一轮没标完的"过时"。这件事跟模型无关，也不该等队列里有活才干——
   // 偏偏最容易漏的就是"队列空了但账本还欠着"。
@@ -365,7 +365,7 @@ export async function processQueue({
 
     const fallbackEntity = (payload.cwd ?? "").split("/").filter(Boolean).pop() ?? "";
     const tExtract = Date.now();
-    const { entries, mode, error, batches, dropped, droppedBriefs, merged, usage, stoppedEarly, coveredThrough, remainingBatches } = await extract(cfg, exchanges, {
+    const { entries, mode, error, fatal, batches, dropped, droppedBriefs, merged, usage, stoppedEarly, coveredThrough, remainingBatches } = await extract(cfg, exchanges, {
       fallbackEntity,
       useModel,
       entityShot,
@@ -374,7 +374,7 @@ export async function processQueue({
       // 光抽取就能把一轮拖到几十分钟。
       deadline: sessionDeadline,
     });
-    if (error) onLine(`  ! 模型失败，退回规则：${error}`);
+    if (error) onLine(`  ! 模型调用失败，这一场不写：${error}`);
     // 记账：回灌一百多个会话时，"花了多少 token"是唯一能判断该不该继续跑的指标。
     if (usage) {
       sum.tokens.prompt += usage.prompt;
@@ -396,6 +396,22 @@ export async function processQueue({
       remainingBatches: stoppedEarly ? remainingBatches : undefined,
       error: error ?? undefined,
     });
+
+    /**
+     * 模型这条路断了就整轮停手。
+     *
+     * 三条理由：一是这不是「这一场会话」的毛病，记在它头上只会把整队扫进 dead/；
+     * 二是继续往下走，每场都要先白等一次超时，一轮下来什么都干不成；
+     * 三是配置类错误（key 失效、订阅过期）等下去也不会自己好，得人去看。
+     * 会话原样留在队列里，模型回来下一轮自动接着跑。
+     */
+    if (error && useModel) {
+      sum.modelDown = { error, fatal: Boolean(fatal) };
+      // 这一场也算「没做到」，连同后面没碰的一起留在队列里，下次接着来。
+      sum.left = Math.max(sum.left, files.length - done);
+      event("model.down", { session: payload.session_id ?? "", fatal: Boolean(fatal), error });
+      break;
+    }
 
     const batchNote = batches > 1 ? ` / ${batches} 批` : "";
     onLine(`${payload.session_id ?? "?"}  ${exchanges.length} 轮${batchNote}  ${mode}  抽出 ${entries.length} 条${merged ? `（合并重复 ${merged} 条）` : ""}`);
@@ -629,7 +645,7 @@ export async function processQueue({
     }
 
     sum.failed += failedHere;
-    const degraded = mode === "heuristic-after-error" || mode === "partial";
+    const degraded = mode === "partial" || mode === "failed";
     if (degraded) sum.degraded++;
 
     // 抽取到预算就收手时：已抽过的轮次从队列摘掉，剩下的下轮接着抽。放在写完条目

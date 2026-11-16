@@ -127,7 +127,7 @@ export function stats({ days = 7 } = {}) {
     if (r.ev === "llm.fallback") fallbacks.set(r.kind ?? "?", (fallbacks.get(r.kind ?? "?") ?? 0) + 1);
     if (r.session) sessions.add(String(r.session).slice(0, 8));
     if (r.ev === "extract.result") {
-      // 没走模型就是降级：规则抽取写进库里全是半句话。这个数只要不是 0，
+      // 没走模型、或者模型中途失败停手，都算降级。这个数只要不是 0，
       // 就说明模型那头有配置问题或者正在失败，不能只看"写入多少条"。
       if (r.mode && r.mode !== "model" && r.mode !== "empty") degraded++;
       tokens += (r.tokens?.prompt ?? 0) + (r.tokens?.completion ?? 0);

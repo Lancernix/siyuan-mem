@@ -368,6 +368,7 @@ export async function serve({ once = false, dry = false, useModel = true, interv
             skipped: r.skipped,
             failed: r.failed,
             degraded: r.degraded ?? 0,
+        modelDown: r.modelDown ? (r.modelDown.fatal ? "fatal" : "transient") : undefined,
             tokens: r.tokens ?? { prompt: 0, completion: 0 },
           });
           return r;
@@ -437,6 +438,16 @@ export async function serve({ once = false, dry = false, useModel = true, interv
       if (r.trimmed) log(`  · ${r.trimmed} 场抽到预算就收手了，抽过的已写进库，剩下的轮次留在队列里`);
       if (r.unfinished) log(`  · ${r.unfinished} 场没做完（超了单会话预算或抽取不完整），留在队列里下轮继续`);
       if (r.dead) log(`  · ${r.dead} 个会话试到上限，已挪进 dead/（旁边有 .why 说明原因）`);
+      if (r.modelDown) {
+        // 这一轮一条都没抽、一场都没记账，全是模型那边的锅。说清楚是哪一种：
+        // 抖一下等下一轮就行，配置/账号问题得人去看。
+        log(`  !! 模型不可用，本轮抽取停手：${r.modelDown.error}`);
+        log(
+          r.modelDown.fatal
+            ? "  !! 看着像 key / 订阅 / 模型名的问题，等着不会自己好，先用 mem model test 查"
+            : "  !! 会话原样留在队列里，模型恢复后自动接着抽"
+        );
+      }
       if (!r.candidates && !r.sessions) log("  队列空，也没有新会话");
       event("round", {
         no: roundNo,

@@ -130,6 +130,9 @@ function retryAfterOf(e) {
   return e?.retryAfterMs;
 }
 
+/** 400 里这些是「配置/账号的问题」，不是请求内容的问题。 */
+const FATAL_RE = /InvalidSubscription|UnsupportedModel|invalid[_ ]?api[_ ]?key|Unauthorized|insufficient|quota|欠费|余额|model.{0,20}(not found|does not exist)/i;
+
 /** AI SDK 的错误 → 我们的 {status, retryable, retryAfterMs}，重试策略只认这几个。 */
 function shapeError(e) {
   const status = e?.statusCode ?? e?.status;
@@ -139,6 +142,16 @@ function shapeError(e) {
   const err = new Error(e?.responseBody ? `${e.message}｜${String(e.responseBody).slice(0, 300)}` : (e?.message ?? String(e)));
   err.status = status;
   err.retryable = retryable;
+  /**
+   * 换个模型也没用的错：key 失效、订阅过期、模型不存在、账号欠费。
+   *
+   * 和「端点抖了一下」分开，是因为处理方式完全不同——抖动可以等下一轮，
+   * 这一类等着只会一直等，得让人去看配置。抽取那边拿到 fatal 就整轮停手，
+   * 不在队列里反复撞同一个墙。
+   */
+  if (status === 401 || status === 403 || (status === 400 && FATAL_RE.test(err.message))) {
+    err.fatal = true;
+  }
   // 上限保护：服务端说等一小时也不能真的等——一轮的预算就二十分钟，
   // 超过上限就按上限来，剩下的交给下一轮。
   err.retryAfterMs = Math.min(retryAfterOf(e) ?? 0, 5 * 60_000) || undefined;
@@ -290,6 +303,22 @@ async function withRetry(m, send, left = () => Number.POSITIVE_INFINITY) {
  * JSON 模式被拒时去掉该能力重发一次，不算失败：那是服务端不支持，不是配置错，
  * 也不该让整段会话降级成规则抽取。
  */
+/**
+ * 抛给调用方的错误。
+ *
+ * 必须把 shapeError 判出来的标记一起带过去：外面据此决定「换下一家」「整轮停手」
+ * 还是「下轮再试」。之前这里重新 new 了一个干净的 Error，status / fatal 全丢了，
+ * 于是抽取层看到的消息只剩一句人话，分不出订阅过期和端点抖动。
+ */
+function modelFail(e) {
+  const err = new Error(`模型调用失败：${describe(e)}`);
+  if (e?.status) err.status = e.status;
+  if (e?.fatal) err.fatal = true;
+  if (e?.retryable) err.retryable = true;
+  if (e?.budget) err.budget = true;
+  return err;
+}
+
 async function call(cfg, { messages, json = false, schema = null, maxTokens, tag = "", deadline = Number.POSITIVE_INFINITY } = {}) {
   const m = resolveModel(cfg);
   // problem 优先：不认识的 provider 也要说清楚是「哪一家不认识」，不能笼统报「没配模型」。
@@ -355,7 +384,7 @@ async function call(cfg, { messages, json = false, schema = null, maxTokens, tag
         res = await withRetry(m, () => send({ withSchema: false }), left);
       } catch (e2) {
         record({ at: new Date().toISOString(), model: m.model, wire: m.wire, tag, error: describe(e2) });
-        throw new Error(`模型调用失败：${describe(e2)}`);
+        throw modelFail(e2);
       }
     } else if (schema && e.status === 400 && JSON_MODE_REJECTED.test(e.message)) {
       // 这家不认 json_schema（DeepSeek 官方 API、GLM 都是）。记住，退回 json_object，
@@ -367,7 +396,7 @@ async function call(cfg, { messages, json = false, schema = null, maxTokens, tag
         res = await withRetry(m, () => send({ withSchema: false, json: true }), left);
       } catch (e2) {
         record({ at: new Date().toISOString(), model: m.model, wire: m.wire, tag, error: describe(e2) });
-        throw new Error(`模型调用失败：${describe(e2)}`);
+        throw modelFail(e2);
       }
     } else if (wantJson && e.status === 400 && JSON_MODE_REJECTED.test(e.message)) {
       fallback = true;
@@ -376,11 +405,11 @@ async function call(cfg, { messages, json = false, schema = null, maxTokens, tag
         res = await withRetry(m, () => send({ json: false }), left);
       } catch (e2) {
         record({ at: new Date().toISOString(), model: m.model, wire: m.wire, tag, error: describe(e2) });
-        throw new Error(`模型调用失败：${describe(e2)}`);
+        throw modelFail(e2);
       }
     } else {
       record({ at: new Date().toISOString(), model: m.model, wire: m.wire, tag, error: describe(e) });
-      throw new Error(`模型调用失败：${describe(e)}`);
+      throw modelFail(e);
     }
   }
 
