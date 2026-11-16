@@ -7,7 +7,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { chat, resolveChain, hasModel } from "../src/util/llm.mjs";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// 不给临时 HOME 的话，这里每跑一次都往真实的 ~/.siyuan-mem/usage.jsonl 里
+// 写一条 model:"fake"——2026-11-16 查出来时那里已经堆了 2400 多条假记录，
+// mem status 的「今日调用/失败」全被带偏了。
+process.env.HOME = mkdtempSync(join(tmpdir(), "mem-llm-fallback-"));
+
+const { chat, resolveChain, hasModel } = await import("../src/util/llm.mjs");
 
 /** 起一个假端点：ok=true 正常回，否则按 status 报错。 */
 async function fakeModel({ ok = true, status = 401, body = { error: { message: "subscription has expired" } }, reply = '{"ok":true}' } = {}) {

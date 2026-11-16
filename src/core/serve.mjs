@@ -30,7 +30,7 @@ import { enqueueLog, processQueue, assertModel } from "./jobs.mjs";
 import { event } from "../util/log.mjs";
 import { hasModel } from "../util/llm.mjs";
 import { checkDedupe } from "./selfcheck.mjs";
-import { SiYuan } from "../util/siyuan.mjs";
+import { SiYuan, resolveNotebookId } from "../util/siyuan.mjs";
 import { startUi } from "./ui.mjs";
 import { startIngest } from "./ingest.mjs";
 
@@ -284,6 +284,22 @@ async function runRound({ dry, useModel, log }) {
  * @param {number}  opts.intervalMs
  * @param {boolean} opts.force     强行接管锁
  */
+/**
+ * 启动自检：思源活着、笔记本还在。
+ *
+ * 这两样不对，后面每一轮都是白跑；更糟的是失败得很安静——2026-11-16 笔记本
+ * 被删、又被人重建了个空壳，服务照样「扫描 110 个会话、写入 0 条」，看起来
+ * 像没事，实际写了十天空库。宁可当场起不来，也不要假装在干活。
+ *
+ * 只读不写：不走 store.init，避免又碰上「找不到就建一本」的老路。
+ */
+export async function preflightSiyuan(cfg) {
+  const sy = new SiYuan({ baseUrl: cfg.siyuan.baseUrl, token: cfg.siyuan.token, timeoutMs: 5000 });
+  const v = await sy.version();
+  const id = await resolveNotebookId(sy, cfg);
+  return { version: v?.version ?? v?.data?.version ?? "?", notebook: id };
+}
+
 export async function serve({ once = false, dry = false, useModel = true, intervalMs, force = false } = {}) {
   const cfg = loadConfig();
   const gap = intervalMs ?? (cfg.serve?.intervalMinutes ?? 10) * 60_000;
@@ -301,6 +317,16 @@ export async function serve({ once = false, dry = false, useModel = true, interv
       ? "launchctl kickstart -k gui/$(id -u)/com.siyuan.mem"
       : "systemctl --user restart siyuan-mem（容器里：docker compose restart mem）";
     log(`  配好之后：mem service install 再装一次，或 ${kick}`);
+    return;
+  }
+
+  try {
+    const pre = await preflightSiyuan(cfg);
+    log(`自检：思源 v${pre.version}，笔记本「${cfg.siyuan.notebook}」在（${pre.notebook}）`);
+  } catch (e) {
+    log(`自检没过，这次不启动：${e.message}`);
+    log("  笔记本不见了先别新建——查是不是被删了、或者同步把库丢了，恢复回来再跑。");
+    log("  如果确实是第一次跑：mem init。");
     return;
   }
 
