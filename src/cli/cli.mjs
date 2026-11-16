@@ -121,6 +121,14 @@ async function cmdStatus() {
   console.log(`思源         ${cfg.siyuan.baseUrl}  v${version}`);
   console.log(`笔记本       ${cfg.siyuan.notebook}`);
   console.log(`条目         current ${stats.current ?? 0} / superseded ${stats.superseded ?? 0}`);
+  // 边缘机器本地库是空的，看到「0 条」容易以为坏了。配置了 push.to 就说清楚：
+  // 这台只负责采集和转发，条目都在中心，mem search 查的也是那边。
+  if (cfg.push?.to) {
+    const local = (stats.current ?? 0) + (stats.superseded ?? 0);
+    console.log(
+      `推送         ${cfg.push.to}${local === 0 ? "（本机只采集和转发，条目都在中心）" : ""}`
+    );
+  }
   const mm = resolveModel(cfg);
   const spare = hasModel(cfg) ? resolveChain(cfg).length - 1 : 0;
   console.log(`模型         ${hasModel(cfg) ? `${mm.provider} / ${mm.model}${spare > 0 ? `（另有 ${spare} 个备用）` : ""}` : "未配置（走规则抽取）"}`);
