@@ -75,7 +75,7 @@ export class Store {
    * 必须有缓存这一级：思源的文档索引是异步更新的，createDocWithMd 刚返回时
    * 用 hpath 查还是空，于是下一次调用又会建一份一模一样的文档。
    */
-  async init({ force = false, rebind = false } = {}) {
+  async init({ force = false, rebind = false, create = false } = {}) {
     const name = this.#cfg.siyuan.notebook;
     const state = loadState();
     // 缓存按「实例 + 笔记本」隔离：只按 baseUrl 存的话，改了笔记本名之后缓存的还是
@@ -99,6 +99,22 @@ export class Store {
           throw new Error(
             `${e.message}。配置里的 notebookId=${configuredId} 已经失效。\n` +
               "  确认要新建一本空库，先把 config 里的 siyuan.notebookId 清掉再 init。"
+          );
+        }
+        /**
+         * 只有显式的 `mem init` 才许建库。
+         *
+         * 以前这里任何一次访问都能走到：status 查一眼、serve 开一轮、push 推一次，
+         * 发现笔记本不见了就闷声建一本空的，把新 id 写回配置，然后往空库里写。
+         * 2026-11-16 就是这样——笔记本 11-08 被删，16:27 一次隐式 init 把它重建成
+         * 空壳，条目数归零，而日志上一切正常。记忆系统的库不见了只有两种可能：
+         * 第一次跑，或者被人删了/同步丢了。前者该由人跑 mem init，后者更不该建。
+         */
+        if (!create) {
+          throw new Error(
+            `找不到笔记本「${name}」，也没有配 notebookId。\n` +
+              "  如果这是第一次跑：mem init。\n" +
+              "  如果它本来就有东西：别新建——先确认是不是被删了、或者同步把库丢了，恢复回来再跑。"
           );
         }
         resolved = await this.#sy.createNotebook(name);

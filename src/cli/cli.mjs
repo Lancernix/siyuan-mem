@@ -95,7 +95,7 @@ async function cmdInit(flags) {
   const { store } = make();
   // --force  只解析不新建（文档层面）
   // --rebind 接受笔记本 id 变了（删了重建），并把配置指到新的那本
-  const ids = await store.init({ force: Boolean(flags.force), rebind: Boolean(flags.rebind) });
+  const ids = await store.init({ force: Boolean(flags.force), rebind: Boolean(flags.rebind), create: true });
   console.log("笔记本与文档就绪：");
   for (const [k, v] of Object.entries(ids)) {
     // months 是一组按月分的文档 { "2026-11": id }，直接打印会变成 [object Object]。

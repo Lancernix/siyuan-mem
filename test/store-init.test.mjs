@@ -50,12 +50,23 @@ test("配过 notebookId 但对不上：报错，绝不偷偷建新库", async ()
   assert.equal(sy.calls.created, 0, "不许建新笔记本");
 });
 
-test("从没配过 id、名字也找不到：这才是第一次跑，建", async () => {
+test("mem init（显式建的）：从没配过 id、名字也找不到就建", async () => {
   const sy = fakeSy({ notebooks: [], createId: "first-run" });
   const store = new Store(sy, cfgOf());
-  const ids = await store.init();
+  const ids = await store.init({ create: true });
   assert.equal(ids.notebook, "first-run");
   assert.equal(sy.calls.created, 1);
+});
+
+test("隐式路径（status / serve / push 顺手 init）绝不许建库", async () => {
+  // 2026-11-16 的实况：笔记本 11-08 被删，16:27 某次隐式 init 发现名字找不到，
+  // 闷声建了一本空库、把新 id 写回配置，条目数直接归零，日志上一切正常。
+  const sy = fakeSy({ notebooks: [], createId: "sneaky" });
+  const store = new Store(sy, cfgOf());
+  await assert.rejects(() => store.init(), /找不到笔记本「Mem」/);
+  assert.equal(sy.calls.created, 0, "不许建");
+  // 报错得告诉人怎么办：第一次跑该 init，本来有东西的别新建。
+  await assert.rejects(() => store.init(), /mem init/);
 });
 
 test("id 在库里：直接用，不新建", async () => {
