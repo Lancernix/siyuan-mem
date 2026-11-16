@@ -20,6 +20,17 @@ export const ATTEMPTS_PATH = join(HOME_DIR, "attempts.json");
 export const STATE_PATH = join(HOME_DIR, "state.json");
 /** 每个会话日志读到哪儿了。没有它，同一个会话每次都要整份重发一遍。 */
 export const OFFSET_PATH = join(HOME_DIR, "offsets.json");
+/**
+ * 推送进度必须和抽取进度分开放。
+ *
+ * 以前只有一份 offsets：serve 抽完会推进它，push 拿它判断「推没推过」。于是
+ * serve 处理过的会话，push 就认为已经推过，永远不发——2026-11-16 有 6 个会话
+ * （其中一场 944 轮）就是这么没到中心的：本机库里有，中心一条没有。
+ *
+ * 两个消费者各有各的游标，含义本来就不一样：一个记「读到第几轮」，一个记
+ * 「发到第几轮」。共用一个，谁先跑谁把另一个的活儿吃掉。
+ */
+export const PUSH_OFFSET_PATH = join(HOME_DIR, "push-offsets.json");
 /** 进程锁与轮次日志。放这里而不是 serve.mjs，免得 ui.mjs 为了拿路径反向依赖 serve。 */
 export const LOCK_PATH = join(HOME_DIR, "serve.lock");
 export const LOG_PATH = join(HOME_DIR, "serve.log");
@@ -290,6 +301,25 @@ export function saveOffsets(o) {
   ensureDirs();
   writeFileSync(OFFSET_PATH, JSON.stringify(o, null, 2) + "\n", { mode: 0o600 });
   tightenPerms(OFFSET_PATH);
+}
+
+/** push 自己的游标。结构和 offsets 一样，但谁也不许拿它当「抽取进度」用。 */
+export function loadPushOffsets() {
+  ensureDirs();
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync(PUSH_OFFSET_PATH, "utf8"));
+  } catch {
+    return { version: 2, machines: {} };
+  }
+  if (raw && raw.machines && typeof raw.machines === "object") return raw;
+  return { version: 2, machines: { [machineId()]: raw ?? {} } };
+}
+
+export function savePushOffsets(o) {
+  ensureDirs();
+  writeFileSync(PUSH_OFFSET_PATH, JSON.stringify(o, null, 2) + "\n", { mode: 0o600 });
+  tightenPerms(PUSH_OFFSET_PATH);
 }
 
 /** 取某台机器的偏移表（会就地补上缺失的层级，方便直接改再整体保存）。 */

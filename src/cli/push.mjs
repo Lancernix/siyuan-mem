@@ -10,7 +10,7 @@
  * 这里不碰模型、不碰思源，所以边缘机器只需要一个可执行文件和一个地址。
  */
 import { statSync } from "node:fs";
-import { loadConfig, loadOffsets, saveOffsets, offsetsOf, machineId, slicePlan } from "../util/config.mjs";
+import { loadConfig, loadPushOffsets, savePushOffsets, offsetsOf, machineId, slicePlan } from "../util/config.mjs";
 import { listSessions } from "../util/harness.mjs";
 import { readLog } from "../util/readers/index.mjs";
 
@@ -92,7 +92,7 @@ export async function pushOnce({
 } = {}) {
   if (!to) throw new Error("没有中心地址：mem push --to http://中心:7788，或者写进 config 的 push.to");
 
-  const all = loadOffsets();
+  const all = loadPushOffsets();
   const offsets = offsetsOf(all, machine);
   const now = Date.now();
   const quietMs = quietSeconds * 1000;
@@ -185,7 +185,7 @@ export async function pushOnce({
 
     // 全部分片成功才推进：中途失败就留在旧位置，下次整段重推，服务端判重。
     offsets[s.file] = { bytes: s.size, mtimeMs: s.mtime, turns: log_.turns.length, at: Date.now() };
-    saveOffsets(all);
+    savePushOffsets(all);
     sum.sessions++;
     sum.turns += turns.length;
     sum.chars += turns.reduce((n, t) => n + t.text.length, 0);
@@ -193,7 +193,7 @@ export async function pushOnce({
     log(`  ${log_.harness}  ${turns.length} 轮 / ${chars(turns)} 字  ${chunks.length > 1 ? `${chunks.length} 包 ` : ""}${where}${dups ? `（${dups} 包重复）` : ""}`);
   }
 
-  if (!dry) saveOffsets(all);
+  if (!dry) savePushOffsets(all);
   sum.left = Math.max(0, candidates.length - limit);
   return sum;
 }
