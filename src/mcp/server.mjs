@@ -20,6 +20,27 @@ const PROTOCOL = "2024-11-05";
 const SERVER = { name: "siyuan-mem", version: "0.1.0" };
 
 /**
+ * 三个工具都只读本机记忆库，annotation 逐项写死，不吃规范默认值：
+ * `destructiveHint` 默认是 true、`openWorldHint` 默认是 true，不声明就会被当成
+ * 「可能删数据、可能访问开放世界」，客户端每次都弹确认，目录审核也会退回。
+ *
+ * 审计日志不计入「修改环境」：三个工具都只在 ~/.siyuan-mem/logs 追加一行使用记录
+ * （查了什么、命中几条，不含正文），且是 try/catch 包住的旁路——写失败不影响结果，
+ * 也不碰思源里的任何数据。所以 readOnlyHint 仍是 true。
+ *
+ * annotations 是 2025-03-26 才进的规范。这里不顺手把 protocolVersion 也提上去：
+ * 那个版本还要求处理 JSON-RPC 批量（数组）请求，我们没实现，报了就是假承诺。
+ * 老客户端解析时忽略不认识的字段，新客户端照读——加在这里是纯增量，不破坏任何人。
+ */
+const readOnly = (title) => ({
+  title,
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+});
+
+/**
  * 工具清单：一个主入口 + 两个导航工具。
  *
  * 描述里必须写清互相的路由，否则多给工具等于没给：模型不知道什么时候该换一个，
@@ -27,6 +48,7 @@ const SERVER = { name: "siyuan-mem", version: "0.1.0" };
  */
 export const SEARCH_TOOL = {
   name: "memory_search",
+  annotations: readOnly("搜索记忆"),
   description:
     "【默认入口】检索本机积累的长期记忆（跨会话、跨项目的历史结论）。知道要找什么词时直接用这个：" +
     "「之前这个是怎么定的」「上次踩过什么坑」「这个项目用过哪些方案」。" +
@@ -64,6 +86,7 @@ export const SEARCH_TOOL = {
 
 export const TOPICS_TOOL = {
   name: "memory_topics",
+  annotations: readOnly("列出话题"),
   description:
     "列出记忆库里有哪些话题（实体名）、别名、每个话题下有多少条、最近什么时候更新。" +
     "用于**发现命名空间**：不确定话题叫什么、memory_search 没命中或结果不对、" +
@@ -86,6 +109,7 @@ export const TOPICS_TOOL = {
 
 export const ENTRIES_TOOL = {
   name: "memory_entries",
+  annotations: readOnly("按话题翻条目"),
   description:
     "按话题把条目逐条翻出来，**不走关键词门槛**：只要挂在这个话题下就返回，按日期从新到旧。" +
     "用于 memory_search 没命中但你知道话题名、或用户问「这个话题之前都记了什么」的时候。" +

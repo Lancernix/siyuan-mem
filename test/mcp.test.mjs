@@ -62,6 +62,24 @@ test("工具清单是「一个主入口 + 两个导航工具」，各自说清�
   }
 });
 
+test("每个工具都声明四个 hint：缺一个，OpenAI 目录直接退回", async () => {
+  const r = await handleMessage({ jsonrpc: "2.0", id: 9, method: "tools/list" });
+  for (const t of r.result.tools) {
+    const a = t.annotations;
+    assert.ok(a, `${t.name} 该有 annotations`);
+    // 四个都必须是布尔值：规范默认值是「非只读 + 可能破坏 + 非幂等 + 开放世界」，
+    // 漏写一个就等于按最坏情况算，客户端每次调用都会弹确认。
+    for (const k of ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"]) {
+      assert.equal(typeof a[k], "boolean", `${t.name} 的 ${k} 该是布尔`);
+    }
+    // 这三个工具都不碰思源里的数据、也不访问外网，只有一行本地审计日志。
+    assert.equal(a.readOnlyHint, true, `${t.name} 只读`);
+    assert.equal(a.destructiveHint, false, `${t.name} 不破坏`);
+    assert.equal(a.openWorldHint, false, `${t.name} 不访问开放世界`);
+    assert.ok(typeof a.title === "string" && a.title.length > 0, `${t.name} 该有给人看的标题`);
+  }
+});
+
 test("调用：参数翻译对了，结果是人读文本带原文指针", async () => {
   const calls = [];
   const r = await handleMessage(
