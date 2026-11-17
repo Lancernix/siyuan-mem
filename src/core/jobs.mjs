@@ -197,6 +197,8 @@ export async function processQueue({
   maxSessions = Number.POSITIVE_INFINITY,
   maxMs = Number.POSITIVE_INFINITY,
   maxSessionMs = 10 * 60_000,
+  // 判重独立预算：它排在抽取之后，共用同一个死线的话大会话必然踩空。
+  maxDedupeMs = 2 * 60_000,
   maxConsecutiveFailures = 3,
   maxAttempts = 3,
   deps = null,
@@ -215,7 +217,7 @@ export async function processQueue({
   let broken = null;
   /** 把本轮撞停的那场会话是谁。熔断之后要靠它判断「是思源坏了还是这一场坏了」。 */
   let brokenSession = null;
-  const sum = { sessions: files.length, left: 0, written: 0, skipped: 0, replaced: 0, failed: 0, degraded: 0, modelDown: null, raw: 0, entities: 0, pending: 0, dedupeCalls: 0, dedupeMs: 0, dead: 0, unfinished: 0, trimmed: 0, narrowed: 0, broken: false, tokens: { prompt: 0, completion: 0 } };
+  const sum = { sessions: files.length, left: 0, written: 0, skipped: 0, replaced: 0, failed: 0, degraded: 0, unjudged: 0, modelDown: null, raw: 0, entities: 0, pending: 0, dedupeCalls: 0, dedupeMs: 0, dead: 0, unfinished: 0, trimmed: 0, narrowed: 0, broken: false, tokens: { prompt: 0, completion: 0 } };
 
   // 先补上一轮没标完的"过时"。这件事跟模型无关，也不该等队列里有活才干——
   // 偏偏最容易漏的就是"队列空了但账本还欠着"。
@@ -295,6 +297,14 @@ export async function processQueue({
     const sessionDeadline = sessionStart + maxSessionMs;
     const overSession = () => Date.now() >= sessionDeadline;
     let aborted = false;
+    /**
+     * 这一场里判重没判成的批数。
+     *
+     * 判重失败不是「没重复」，是「没看过」。这时把条目按新条目写进去，库里就会多出
+     * 一条意思被覆盖了七八成的重复——事后只能靠人翻出来合并，而它看起来完全正常。
+     * 所以宁可不写、留队列下一轮重抽。
+     */
+    let dedupeFailed = 0;
     let payload;
     try {
       payload = readSession(file);
@@ -457,7 +467,18 @@ export async function processQueue({
       if (pool.length) {
         const t0 = Date.now();
         const callsBefore = dedupeStats().calls;
-        decisions = await judgeDuplicates({ cfg, news, existing: pool, deadline: sessionDeadline });
+        const failedBefore = dedupeStats().failed;
+        decisions = await judgeDuplicates({
+          cfg,
+          news,
+          existing: pool,
+          // 判重不跟抽取共用一个死线。抽取是「一批一次调用」，大会话必然把 10 分钟吃光，
+          // 判重一开口就超时——2026-11-18 01:44 那轮，11 批抽取跑满 10 分钟，接着
+          // 7 批判重全部返回「时间预算用完了」，50 条没判重就写进了库。
+          // 给判重单独两分钟：它不是可选的收尾，是防止写重样的最后一道闸。
+          deadline: Math.max(sessionDeadline, Date.now() + maxDedupeMs),
+        });
+        dedupeFailed = dedupeStats().failed - failedBefore;
         // 记真实模型调用次数，不是「有裁决的批次」：判 keep 时一条裁决都没有，
         // 那个数会是 0，看不出这一轮到底花了多少调用。
         sum.dedupeCalls += dedupeStats().calls - callsBefore;
@@ -481,7 +502,18 @@ export async function processQueue({
     let skippedHere = 0;
     // 开写之前就已经超预算的，这一场就写完再算——见下面那条注释。
     const overAtWriteStart = !dry && overSession();
+    const unjudged = dedupeFailed > 0 && entries.length > 0;
+    if (unjudged) {
+      sum.unjudged++;
+      event("dedupe.unjudged", {
+        session: payload.session_id ?? "",
+        entries: entries.length,
+        failed: dedupeFailed,
+      });
+      onLine(`    ! 判重 ${dedupeFailed} 批没跑成，${entries.length} 条没判过重，这场先不写（留队列重试）`);
+    }
     for (const [idx, e] of entries.entries()) {
+      if (unjudged) break;
       // 单会话闸门：到点收手，但开写之前就已经超时的那一场要写完——抽取可能已经
       // 花了十几分钟，写到一半收手等于白抽，下轮从头再来，三趟之后还会被挪进 dead/。
       if (!overAtWriteStart && writtenHere > 0 && overSession()) {
@@ -620,7 +652,7 @@ export async function processQueue({
     // 原文传上去了、但一条条目都没写（全被 covered / 全重复）时，附件在正文里
     // 没有任何引用——"清理未引用资源"会把它当垃圾扫走。给分组标题挂一个会话级链接顶上：
     // 不伪造内容，只建一个标题，下一轮真写出条目时列表会接在它后面。
-    if (parts.length && !writtenHere && !dry) {
+    if (parts.length && !writtenHere && !dry && !unjudged) {
       const anchor = await store
         .ensureGroupAnchor(
           {
@@ -700,12 +732,13 @@ export async function processQueue({
       skipped: skippedHere,
       failed: failedHere,
       degraded,
+      unjudged,
       aborted,
       trimmed,
     });
     // 「抽到点了但还有轮次没抽」不算做完：漏了 hasRest 的话，剩余轮次会跟着文件
     // 一起被归档掉。
-    const complete = !aborted && failedHere === 0 && !degraded && !trimmed && !hasRest;
+    const complete = !aborted && failedHere === 0 && !degraded && !trimmed && !hasRest && !unjudged;
     // 没做完的场次要单独报出来：失败数是按"条"算的，超预算停手的那场一条都没失败，
     // 只看 failed 会以为一切正常。
     if (!complete && !trimmed) sum.unfinished++;
@@ -717,7 +750,8 @@ export async function processQueue({
       }
       // 抽不到东西和超预算是这个会话自己的毛病，记次数；纯粹写不进去是思源的问题，
       // 不记——否则一次思源抖动就能把整队会话挨个记满、集体挪进 dead/。
-      if (aborted || degraded) park(file, aborted ? "单会话超预算" : "抽取不完整");
+      if (unjudged) park(file, "判重没跑成，这批没写，下轮重抽");
+      else if (aborted || degraded) park(file, aborted ? "单会话超预算" : "抽取不完整");
       else if (hasRest && failedHere === 0 && writtenHere === 0 && skippedHere === 0 && !cleanEmpty) {
         // 走到这里说明抽取本身没跑完整：降级、报错、或条目被 dropped 截光。
         // 另外三种零写入都不记账：模型正常判空（上面已摘轮次）、全被判重跳过

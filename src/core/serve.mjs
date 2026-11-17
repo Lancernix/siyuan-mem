@@ -270,6 +270,9 @@ async function runRound({ dry, useModel, log }) {
     maxSessions: cfg.serve?.maxSessionsPerRound ?? 20,
     maxMs: (cfg.serve?.maxMinutesPerRound ?? 20) * 60_000,
     maxSessionMs: (cfg.serve?.maxMinutesPerSession ?? 10) * 60_000,
+    // 判重排在抽取之后，单独给两分钟：共用一个死线的话，大会话抽满 10 分钟，
+    // 判重必然一点就超时，那一批条目就会「没判重直接写」。
+    maxDedupeMs: (cfg.serve?.maxMinutesForDedupe ?? 2) * 60_000,
     maxConsecutiveFailures: cfg.serve?.maxConsecutiveFailures ?? 3,
     maxAttempts: cfg.serve?.maxAttemptsPerSession ?? 3,
   });
@@ -464,6 +467,8 @@ export async function serve({ once = false, dry = false, useModel = true, interv
       );
       if (r.narrowed) log(`  · ${r.narrowed} 条原文指针按锚点收窄了（点开不用再从几十轮里找）`);
       if (r.degraded) log(`  · ${r.degraded} 个会话抽取不完整，原文留在队列里等重试`);
+      // 判重没跑成就不写：这条比「写了几条」更要紧，不报出来等于静默丢产出。
+      if (r.unjudged) log(`  · ${r.unjudged} 个会话判重没跑成，这批没写，原文留在队列里下轮重抽`);
       if (r.trimmed) log(`  · ${r.trimmed} 场抽到预算就收手了，抽过的已写进库，剩下的轮次留在队列里`);
       if (r.unfinished) log(`  · ${r.unfinished} 场没做完（超了单会话预算或抽取不完整），留在队列里下轮继续`);
       if (r.dead) log(`  · ${r.dead} 个会话试到上限，已挪进 dead/（旁边有 .why 说明原因）`);
@@ -487,6 +492,7 @@ export async function serve({ once = false, dry = false, useModel = true, interv
         skipped: r.skipped,
         failed: r.failed,
         degraded: r.degraded ?? 0,
+        unjudged: r.unjudged ?? 0,
         tokens: r.tokens ?? { prompt: 0, completion: 0 },
       });
     } catch (e) {
