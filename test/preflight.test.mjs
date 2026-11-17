@@ -17,7 +17,7 @@ process.env.HOME = mkdtempSync(join(tmpdir(), "mem-preflight-"));
 const { preflightSiyuan } = await import("../src/core/serve.mjs");
 
 /** 假思源：只实现自检要用的两个接口。 */
-function fakeSiyuan({ notebooks = [{ id: "nb-1", name: "Harness-Mem" }], version = "3.8.9" } = {}) {
+function fakeSiyuan({ notebooks = [{ id: "nb-1", name: "Harness-Mem" }], version = "3.8.9", rawVersion = false } = {}) {
   const srv = createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
@@ -26,7 +26,8 @@ function fakeSiyuan({ notebooks = [{ id: "nb-1", name: "Harness-Mem" }], version
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(o));
       };
-      if (req.url.startsWith("/api/system/version")) return send({ code: 0, data: { version } });
+      // 真实思源返回的是 data: "3.8.9"（字符串），不是 {version}。
+      if (req.url.startsWith("/api/system/version")) return send({ code: 0, data: rawVersion ? { version } : version });
       if (req.url.startsWith("/api/notebook/lsNotebooks")) return send({ code: 0, data: { notebooks } });
       return send({ code: 0, data: null });
     });
@@ -47,6 +48,18 @@ test("笔记本在：自检返回版本和 id", async (t) => {
   });
   assert.equal(r.version, "3.8.9");
   assert.equal(r.notebook, "nb-1");
+});
+
+test("版本号两种形状都要接住：字符串和 {version}", async (t) => {
+  const a = await fakeSiyuan();
+  t.after(() => a.srv.close());
+  const r1 = await preflightSiyuan({ siyuan: { baseUrl: a.baseUrl, token: "", notebook: "Harness-Mem", notebookId: "nb-1" } });
+  assert.equal(r1.version, "3.8.9", "data 是字符串");
+
+  const b = await fakeSiyuan({ rawVersion: true });
+  t.after(() => b.srv.close());
+  const r2 = await preflightSiyuan({ siyuan: { baseUrl: b.baseUrl, token: "", notebook: "Harness-Mem", notebookId: "nb-1" } });
+  assert.equal(r2.version, "3.8.9", "data 是 {version}");
 });
 
 test("笔记本不在：直接报错，并说清楚怎么办", async (t) => {

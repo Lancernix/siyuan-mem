@@ -296,8 +296,11 @@ async function runRound({ dry, useModel, log }) {
 export async function preflightSiyuan(cfg) {
   const sy = new SiYuan({ baseUrl: cfg.siyuan.baseUrl, token: cfg.siyuan.token, timeoutMs: 5000 });
   const v = await sy.version();
+  // /api/system/version 的 data 直接就是字符串 "3.8.9"，不是 {version}。
+  // 两种形状都接住，免得日志里永远打「v?」——那种"看不出来"的日志比没有还糟。
+  const version = typeof v === "string" ? v : v?.version ?? v?.data?.version ?? "?";
   const id = await resolveNotebookId(sy, cfg);
-  return { version: v?.version ?? v?.data?.version ?? "?", notebook: id };
+  return { version, notebook: id };
 }
 
 export async function serve({ once = false, dry = false, useModel = true, intervalMs, force = false } = {}) {
