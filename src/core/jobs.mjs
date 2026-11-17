@@ -20,13 +20,19 @@ import { loadEntities, shotList, resolveEntities, convergeTopics, mergeEntities 
 import { judgeDuplicates, dedupeStats } from "./dedupe.mjs";
 import { dropPending, flushPending, notePending } from "./repair.mjs";
 
-/** 建连接。注入路径要能快速放弃，写路径慢一点没关系，但别无限等。 */
+/**
+ * 建连接。注入路径要能快速放弃，写路径慢一点没关系，但别无限等。
+ *
+ * 写库超时默认 5 秒，但 5 秒在慢机器上不够：2026-11-16 中心一次要写 40 多条，
+ * 思源那边赶上索引重建，连续三次 5000ms 超时，639 轮直接进了死信。
+ * 中心机器可以用 siyuan.writeTimeoutMs 调大（读路径不受影响，那边一直是 3~8 秒）。
+ */
 export function open() {
   const cfg = loadConfig();
   const sy = new SiYuan({
     baseUrl: cfg.siyuan.baseUrl,
     token: cfg.siyuan.token,
-    timeoutMs: 5000,
+    timeoutMs: Number(cfg.siyuan.writeTimeoutMs) > 0 ? Number(cfg.siyuan.writeTimeoutMs) : 5000,
   });
   return { cfg, sy, store: new Store(sy, cfg) };
 }
