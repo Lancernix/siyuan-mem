@@ -11,6 +11,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// 隔离 HOME：这里真的会走到模型的记账分支，不隔离就每跑一次往真实
+// ~/.siyuan-mem/usage.jsonl 写一条 model:"fake"，mem status 的数字就不真了。
+process.env.HOME = mkdtempSync(join(tmpdir(), "mem-dedupe-call-"));
 
 const { judgeDuplicates } = await import("../src/core/dedupe.mjs");
 

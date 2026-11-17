@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, renameSync, existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
-import { CONFIG_PATH, INBOX_DIR, loadConfig, LOG_PATH, machineId, saveConfig, offsetsOf, loadOffsets } from "../util/config.mjs";
+import { CONFIG_PATH, DEAD_DIR, INBOX_DIR, loadConfig, LOG_PATH, machineId, saveConfig, offsetsOf, loadOffsets } from "../util/config.mjs";
 import { PROVIDERS, resolveModel, resolveChain, hasModel, probe as probeModel, saveModelChoice, maskKey, usageToday } from "../util/llm.mjs";
 import { dedupeHealthToday, recallHealthToday, browseHealthToday } from "../core/selfcheck.mjs";
 import { formatHits, ATTR } from "../core/store.mjs";
@@ -73,6 +73,7 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
   mem center setup [--port 7788] [--bind 0.0.0.0] [--rotate]
                                   把本机设成中心，生成 token，打印边缘命令
   mem push [--to URL] [--token T] [--once|--watch] [--dry] [--all] [--from-scratch] [--test]
+  mem retry [--all]               看死信队列；--all 把它们挪回队列重跑
                                   把本机会话推给中心（默认只推安静 3 分钟的）
 
 运维
@@ -176,6 +177,19 @@ async function cmdStatus() {
     console.log(`导航         ${bh.topics} 次列话题，${bh.entries} 次翻条目 — ${parts.join("，")}`);
   }
   console.log(`待处理       ${pending().length} 个会话在队列里`);
+  // 死信是静默的：写库超时、抽取不完整，三次之后就挪进 dead/，只有翻日志才知道。
+  // 2026-11-16 有 673 轮就这么躺了两天。数字摆在 status 里，看到非零就该处理。
+  const deadFiles = existsSync(DEAD_DIR) ? readdirSync(DEAD_DIR).filter((f) => f.endsWith(".json")) : [];
+  if (deadFiles.length) {
+    const turns = deadFiles.reduce((n, f) => {
+      try {
+        return n + ((JSON.parse(readFileSync(`${DEAD_DIR}/${f}`, "utf8")).turns ?? []).length);
+      } catch {
+        return n;
+      }
+    }, 0);
+    console.log(`死信         ${deadFiles.length} 个包 / ${turns} 轮（${DEAD_DIR}，mem retry --all 捞回）`);
+  }
   console.log(`服务         ${svcLine}`);
   console.log(`本机         ${machineId()}`);
   const ing = cfg.ingest ?? {};
@@ -730,6 +744,49 @@ async function cmdCenter(args, flags) {
   throw new Error(`不认识的子命令：${sub}（可用：status / setup）`);
 }
 
+/**
+ * 死信队列：挪回 inbox 重跑。
+ *
+ * 不做自动重试——连着失败三次说明是别的问题（思源挂了、模型不可用），
+ * 自动重试只会原地打转。但至少要让人能一眼看到、一条命令捞回来。
+ */
+async function cmdRetry(flags, args) {
+  const files = existsSync(DEAD_DIR) ? readdirSync(DEAD_DIR).filter((f) => f.endsWith(".json")) : [];
+  if (!files.length) {
+    console.log("死信是空的。");
+    return;
+  }
+  const pick = (f) => flags.all || args.some((a) => f.includes(a));
+  const chosen = files.filter(pick);
+  if (!chosen.length) {
+    console.log(`死信里 ${files.length} 个包（加 --all 全部捞回，或给一个名字片段）：`);
+    for (const f of files.slice(0, 20)) {
+      let info = "";
+      try {
+        const d = JSON.parse(readFileSync(`${DEAD_DIR}/${f}`, "utf8"));
+        info = `${(d.turns ?? []).length} 轮 · ${d.harness ?? "?"}`;
+      } catch {
+        info = "（读不出来）";
+      }
+      let why = "";
+      try {
+        why = readFileSync(`${DEAD_DIR}/${f}.why`, "utf8").trim().split("\n")[1] ?? "";
+      } catch {
+        /* 没有 .why 就算了 */
+      }
+      console.log(`  ${f}  ${info}  ${why.slice(0, 60)}`);
+    }
+    if (files.length > 20) console.log(`  …还有 ${files.length - 20} 个`);
+    return;
+  }
+  let n = 0;
+  for (const f of chosen) {
+    renameSync(`${DEAD_DIR}/${f}`, `${INBOX_DIR}/${f}`);
+    n++;
+  }
+  console.log(`已挪回队列 ${n} 个包（下一轮 serve 会处理）`);
+}
+
 async function cmdPush(flags, args) {
   const cfg = loadConfig();
   const to = flags.to ?? cfg.push?.to ?? "";
@@ -1187,6 +1244,8 @@ async function main() {
       return cmdCenter(rest, flags);
     case "push":
       return cmdPush(flags, rest);
+    case "retry":
+      return cmdRetry(flags, rest);
     case "mcp":
       return cmdMcp(flags);
     case undefined:
