@@ -44,6 +44,11 @@ test("initialize 带 instructions：告诉客户端什么时候该来查", async
   for (const kw of ["之前", "上次", "memory_search", "memory_topics"]) {
     assert.ok(text.includes(kw), `instructions 里要有「${kw}」`);
   }
+  // 光有「之前/上次」这类词法触发不够：用户说「今天打球，拍子手感不对」，
+  // 一个字都没提过去，但答案要靠他不知道的私有事实（什么拍子、几磅）。
+  // 判断标准必须写成缺口，而不是话题相关——后者会让它每轮都去查一遍。
+  assert.ok(text.includes("私有情况") || text.includes("不掌握"), "要给出「什么时候算需要查」的判断标准");
+  assert.ok(text.includes("就别查"), "要有刹车：上下文已清楚、寒暄常识都不查");
   assert.ok(text.length < 600, "别写太长，每轮都要占 token");
 });
 
