@@ -48,7 +48,10 @@ test("initialize 带 instructions：告诉客户端什么时候该来查", async
   // 一个字都没提过去，但答案要靠他不知道的私有事实（什么拍子、几磅）。
   // 判断标准必须写成缺口，而不是话题相关——后者会让它每轮都去查一遍。
   assert.ok(text.includes("私有情况") || text.includes("不掌握"), "要给出「什么时候算需要查」的判断标准");
-  assert.ok(text.includes("就别查"), "要有刹车：上下文已清楚、寒暄常识都不查");
+  assert.ok(text.includes("就别查") || text.includes("就不用查"), "要有刹车：上下文已清楚、寒暄常识都不查");
+  // 枚举会把范围钉死：写了「器材、车、项目、老毛病」之后，模型遇到第五类就
+  // 认为不在授权范围内。所以必须明说这三条只是形状，不是清单。
+  assert.ok(text.includes("不是清单"), "触发条件要给自主权，不能写成封闭枚举");
   assert.ok(text.length < 600, "别写太长，每轮都要占 token");
 });
 
