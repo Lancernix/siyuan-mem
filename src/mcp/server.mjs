@@ -14,6 +14,7 @@
  *    空结果给可操作的兜底——不依赖客户端的系统提示词。
  */
 import { createInterface } from "node:readline";
+import { createRequire } from "node:module";
 import { emptyText, failureText } from "../core/search-reason.mjs";
 
 const PROTOCOL = "2024-11-05";
@@ -30,7 +31,16 @@ const INSTRUCTIONS = `这个 MCP 是一套跨会话的长期记忆（用户的�
 - 要给具体值（版本、端口、路径、型号、参数），而你手上没有当前来源
 这三条不是清单，只是几种典型形状。总的原则：答案要靠我不知道的用户私有情况，就去查；相关但上下文里已经说清楚了、或者只是寒暄和常识，就不用查。
 用法：memory_search 是默认入口，有关键词就直接搜；没命中或不知道话题叫什么，先 memory_topics 看目录，再用 memory_entries 翻该话题下的条目。引用记忆时带上它的日期和话题，方便核对。查不到就说没记过，别编。`;
-const SERVER = { name: "siyuan-mem", version: "0.1.0" };
+/**
+ * 版本从包自己的 package.json 读。
+ *
+ * 这里以前写死 "0.1.0"，发到 0.1.3 还报 0.1.0。而 serverInfo.version 恰恰是排查
+ * 「客户端到底加载了哪一版」的第一条线索——写死等于永远给错答案。
+ * CI 发布时那份 package.json 会被改成 tag 的版本，这里读到的就是真版本；
+ * 本地开发副本读到 0.0.0-development，一眼能看出不是发布态。
+ */
+const { version: VERSION } = createRequire(import.meta.url)("../../package.json");
+const SERVER = { name: "siyuan-mem", version: VERSION };
 
 /**
  * 三个工具都只读本机记忆库，annotation 逐项写死，不吃规范默认值：

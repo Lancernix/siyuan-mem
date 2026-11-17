@@ -6,6 +6,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
+import { readFileSync } from "node:fs";
 
 const { handleMessage, startMcp, formatHits, TOOL } = await import("../src/mcp/server.mjs");
 
@@ -33,6 +34,15 @@ test("握手回自己支持的协议版本，不回显客户端的", async () =>
   assert.equal(r.result.protocolVersion, "2024-11-05");
   assert.deepEqual(r.result.capabilities.tools, {});
   assert.equal(r.result.serverInfo.name, "siyuan-mem");
+});
+
+test("serverInfo 的版本来自 package.json，不是写死的", async () => {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const r = await handleMessage({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+  // 以前写死 "0.1.0"，发到 0.1.3 还报 0.1.0——而这个字段正是排查「客户端到底
+  // 加载了哪一版」的第一条线索，写死等于永远给错答案。
+  assert.equal(r.result.serverInfo.version, pkg.version);
+  assert.notEqual(pkg.version, "0.1.0", "发布副本里这份会被 CI 改成 tag 版本；开发副本是占位符");
 });
 
 test("initialize 带 instructions：告诉客户端什么时候该来查", async () => {
