@@ -17,6 +17,18 @@ import { createInterface } from "node:readline";
 import { emptyText, failureText } from "../core/search-reason.mjs";
 
 const PROTOCOL = "2024-11-05";
+
+/**
+ * 给客户端注入的用法说明。
+ *
+ * 关键是「触发条件」而不是功能描述：模型不缺一个叫 memory_search 的函数，
+ * 缺的是「这种问法该去查」的判断。所以按用户的原话举例子，越具体越容易被认出来。
+ */
+const INSTRUCTIONS = `这个 MCP 提供一套跨会话的长期记忆（历史结论、决定、踩过的坑）。遇到下面这些情况，先查再答，别凭印象：
+- 用户说「之前 / 上次 / 以前 / 当初 / 我们说好」「不是定过吗」「记不记得」
+- 问某个决定、方案、配置为什么是这样，而这个项目之前讨论过
+- 要给具体值（版本、端口、路径、参数），而你手上没有当前来源
+用法：memory_search 是默认入口，有关键词就直接搜；没命中或不知道话题叫什么，先 memory_topics 看目录，再用 memory_entries 翻该话题下的条目。引用记忆时带上它的日期和话题，方便核对。查不到就说没记过，别编。`;
 const SERVER = { name: "siyuan-mem", version: "0.1.0" };
 
 /**
@@ -281,6 +293,10 @@ export async function handleMessage(msg, { search, topics, entries } = {}) {
       protocolVersion: PROTOCOL,
       capabilities: { tools: {} },
       serverInfo: SERVER,
+      // 这段会被客户端注入模型上下文（MCP 规范里的 instructions）。没有它，工具
+      // 就是三个躺在列表里的函数——2026-11-09 到 11-17 八天，除了一次配置验证，
+      // 没有任何一次主动检索：模型不知道「什么时候该翻旧账」。
+      instructions: INSTRUCTIONS,
     });
   }
   if (method.startsWith("notifications/")) return null;

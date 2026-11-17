@@ -35,6 +35,18 @@ test("握手回自己支持的协议版本，不回显客户端的", async () =>
   assert.equal(r.result.serverInfo.name, "siyuan-mem");
 });
 
+test("initialize 带 instructions：告诉客户端什么时候该来查", async () => {
+  const r = await handleMessage({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+  const text = r.result.instructions;
+  // 八天里一次主动检索都没有——工具不缺，缺的是「这种问法该查」的判断。
+  // 这段会被客户端注入模型上下文，所以触发词必须在里面。
+  assert.ok(typeof text === "string" && text.length > 80, "instructions 不能是空的");
+  for (const kw of ["之前", "上次", "memory_search", "memory_topics"]) {
+    assert.ok(text.includes(kw), `instructions 里要有「${kw}」`);
+  }
+  assert.ok(text.length < 600, "别写太长，每轮都要占 token");
+});
+
 test("通知不回：回了客户端会当成孤儿响应", async () => {
   const r = await handleMessage({ jsonrpc: "2.0", method: "notifications/initialized" });
   assert.equal(r, null);
