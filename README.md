@@ -74,6 +74,8 @@ mem entity                # 实体表
 mem entity review         # 执行 03-实体待确认 里勾选的项
 mem model list            # 内置 provider（可按关键词过滤）
 mem ui                    # 本地面板 127.0.0.1:7787
+mem ui --bind 0.0.0.0 --allow-host mem.example.com --auth me:密码
+                          # 放到域名后面（必须给密码，否则拒绝启动）
 mem service install       # 装成 launchd / systemd 服务
 mem center setup          # 把本机设成中心（开接收端、生成 token）
 mem push --to URL --token T --save   # 边缘机器：推到中心
@@ -524,7 +526,9 @@ plist 里的可执行文件优先指向 `~/.siyuan-mem/mem`，其次退回 node 
 
 ![面板](docs/panel.png)
 
-只有 127.0.0.1，**没有鉴权**，所以绝不绑 `0.0.0.0`——局域网上任何设备都能读你的记忆库。只绑回环还挡不住 DNS rebinding（攻击者把恶意域名解析到 127.0.0.1，你打开那个页面，脚本 `fetch` 就到了这里），所以每个请求的 `Host` 也校验，不对直接 403。
+默认只有 127.0.0.1，**没有鉴权**，所以默认绝不绑 `0.0.0.0`——局域网上任何设备都能读你的记忆库。只绑回环还挡不住 DNS rebinding（攻击者把恶意域名解析到 127.0.0.1，你打开那个页面，脚本 `fetch` 就到了这里），所以每个请求的 `Host` 也校验，不对直接 403。
+
+要放到公网域名后面，三件事缺一不可：`--bind 0.0.0.0`、`--allow-host 你的域名`、`--auth 用户名:密码`（或 `MEM_PANEL_AUTH`）。绑非回环却不给密码会**直接拒绝启动**——这比「忘了设密码」晚三天才发现安全得多。页面里的请求用的是相对路径，所以挂在 `/panel/` 这种前缀下也能用；`deploy/docker-compose.yml` 里那个 `panel` 服务（profile 默认不启动）就是这么跑的，nginx 只负责转发，鉴权在面板进程里。
 
 ### 单文件二进制（可选）
 
