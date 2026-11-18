@@ -12,6 +12,7 @@ import { SiYuan, resolveNotebookId } from "../util/siyuan.mjs";
 import { event } from "../util/log.mjs";
 import { normalizeSource } from "../util/source.mjs";
 import { stripRawLink } from "../util/raw.mjs";
+import { STATUSES } from "./store.mjs";
 import { loadEntities, topicNames, findCandidates } from "./entities.mjs";
 
 const ATTR = {
@@ -345,13 +346,18 @@ export async function searchEntries(opts = {}) {
   const wordGate = dates.length ? gate.filter((t) => !isDateTerm(t)) : gate;
 
   const conds = [`box='${notebook}'`, "type='p'", `ial LIKE '%${ATTR.hash}="%'`];
-  // status 传空串表示「过时的也要」。必须白名单：它会拼进 SQL，而 /api/search
+  // status 传空串表示「所有状态都算」。必须白名单：它会拼进 SQL，而 /api/search
   // 把外部请求的 status 原样透传进来，`x' OR 1=1 --` 能绕过 box 收口去读全库。
+  // archived 是用户主动丢掉的噪音，默认（current）永远看不到它——要审计归档记录
+  // 走 mem forget --list，不靠检索。
   const status = opts.status === "" ? "" : opts.status || "current";
-  if (status && status !== "current" && status !== "superseded") {
-    throw new Error(`status 只能是 current / superseded / 空，收到「${String(status).slice(0, 30)}」`);
+  if (status && !STATUSES.has(status)) {
+    throw new Error(`status 只能是 ${[...STATUSES].join(" / ")} / 空，收到「${String(status).slice(0, 30)}」`);
   }
   if (status) conds.push(`ial LIKE '%${ATTR.status}="${status}"%'`);
+  // 空 = 「除归档外都要」。include_superseded 的语义是「查当初为什么改」，把用户
+  // 主动丢掉的噪音一起翻出来只会把它淹掉；archived 只在显式点名时才看。
+  else conds.push(`ial NOT LIKE '%${ATTR.status}="archived"%'`);
   // 话题过滤必须走实体表解析：条目上的 entity 是写入当时的名字，人记住的常是
   // 别名或合并前的旧名，拿字面量直接匹配会把它们判成「这个话题没内容」。
   let topicNote = null;

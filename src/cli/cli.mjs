@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { CONFIG_PATH, DEAD_DIR, INBOX_DIR, loadConfig, LOG_PATH, machineId, saveConfig, offsetsOf, loadOffsets } from "../util/config.mjs";
 import { PROVIDERS, resolveModel, resolveChain, hasModel, probe as probeModel, saveModelChoice, maskKey, usageToday } from "../util/llm.mjs";
-import { dedupeHealthToday, recallHealthToday, browseHealthToday } from "../core/selfcheck.mjs";
+import { dedupeHealthToday, recallHealthToday, browseHealthToday, derivedHealthToday } from "../core/selfcheck.mjs";
 import { formatHits, ATTR } from "../core/store.mjs";
 import { parseArgs } from "../util/args.mjs";
 import { loadRawIndex, readRange, parsePtr } from "../util/raw.mjs";
@@ -16,8 +16,9 @@ import { normalizeTurns, promptState, toExchanges } from "../core/extract.mjs";
 import { drop, pending, readSession } from "../core/inbox.mjs";
 import { searchEntries } from "../core/search.mjs";
 import { listTopics, listEntries } from "../core/browse.mjs";
+import { archiveEntries } from "../core/archive.mjs";
 import { emptyText, failureText } from "../core/search-reason.mjs";
-import { remoteSearch, remoteTopics, remoteEntries } from "../util/remote.mjs";
+import { remoteSearch, remoteTopics, remoteEntries, remoteArchive } from "../util/remote.mjs";
 import { readLog, readJsonLines, auditMessages, HARNESS_NAMES } from "../util/readers/index.mjs";
 import { listSessions, summarize } from "../util/harness.mjs";
 import { open, enqueueLog, processQueue } from "../core/jobs.mjs";
@@ -58,7 +59,13 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
 
 手工
   mem remember <文本> [--entity X] [--type decision|fact|preference|reference]
-  mem forget <块id>               标成 superseded（不删）
+  mem forget <#短引用…>            归档（不删、可撤销，之后不再被召回）
+  mem forget --topic <话题> [--yes]   整个话题归档；超过 10 条先列出来，加 --yes 才写
+  mem forget --session <会话id> [--yes]
+  mem forget --list               看已经归档了什么（带短引用和原因）
+  mem forget --undo <#短引用…>     撤销归档，恢复成归档前的状态
+  mem forget … --reason "为什么"    归档原因，写进条目属性，之后能查
+                                  （边缘机器自动走中心，也可显式 --to URL）
 
 模型与提示词
   mem model                       当前配置与今日用量
@@ -117,7 +124,7 @@ async function cmdStatus() {
    * 2026-11-18 把本地那本空的 Harness-Mem 删掉之后，这里会抛「找不到笔记本」，
    * 整条 status 就废了——明明什么都没坏，只是这台不存条目。
    */
-  let stats = { current: 0, superseded: 0 };
+  let stats = { current: 0, superseded: 0, archived: 0 };
   let localMissing = "";
   try {
     stats = await store.stats();
@@ -133,11 +140,14 @@ async function cmdStatus() {
       : "未运行（mem serve 启动它）";
   console.log(`思源         ${cfg.siyuan.baseUrl}  v${version}`);
   console.log(`笔记本       ${cfg.siyuan.notebook}${localMissing ? `（本地没有：${localMissing.slice(0, 60)}）` : ""}`);
-  console.log(`条目         current ${stats.current ?? 0} / superseded ${stats.superseded ?? 0}`);
+  // 归档单独一栏：不加的话「记忆怎么少了」永远对不上账。
+  console.log(
+    `条目         current ${stats.current ?? 0} / superseded ${stats.superseded ?? 0} / archived ${stats.archived ?? 0}`
+  );
   // 边缘机器本地库是空的，看到「0 条」容易以为坏了。配置了 push.to 就说清楚：
   // 这台只负责采集和转发，条目都在中心，mem search 查的也是那边。
   if (cfg.push?.to) {
-    const local = (stats.current ?? 0) + (stats.superseded ?? 0);
+    const local = (stats.current ?? 0) + (stats.superseded ?? 0) + (stats.archived ?? 0);
     console.log(
       `推送         ${cfg.push.to}${local === 0 ? "（本机只采集和转发，条目都在中心）" : ""}`
     );
@@ -187,6 +197,16 @@ async function cmdStatus() {
       .sort((a, b) => b[1].topics + b[1].entries - (a[1].topics + a[1].entries))
       .map(([k, v]) => `${k} 目录 ${v.topics} / 条目 ${v.entries}`);
     console.log(`导航         ${bh.topics} 次列话题，${bh.entries} 次翻条目 — ${parts.join("，")}`);
+  }
+  // 回流：这场会话自己读过记忆库。这类内容抽出来的可能是「关于记忆的总结」，
+  // 先看比例再决定要不要拦（0/0 时不打印，免得每天都多一行废话）。
+  const reflow = derivedHealthToday();
+  if (reflow.sessions) {
+    console.log(
+      `回流         ${reflow.reading}/${reflow.sessions} 场会话调用过 mem 工具（共 ${reflow.calls} 次）${
+        reflow.reading ? "，抽出来的可能是二手复述" : ""
+      }`
+    );
   }
   console.log(`待处理       ${pending().length} 个会话在队列里`);
   // 死信是静默的：写库超时、抽取不完整，三次之后就挪进 dead/，只有翻日志才知道。
@@ -437,12 +457,74 @@ async function cmdRemember(flags, words) {
   console.log(r.duplicate ? `已存在：${r.id}` : `已写入：${r.id}`);
 }
 
-async function cmdForget(args) {
-  const id = args[0];
-  if (!id) throw new Error("要给块 id");
-  const { store } = make();
-  await store.supersede(id);
-  console.log(`已标为 superseded：${id}`);
+/**
+ * 归档 / 撤销 / 看归档。
+ *
+ * 判断逻辑在 core/archive.mjs 里，MCP 那个工具用的是同一份——两处各写一遍
+ * 迟早会出现「CLI 能归档、模型说没找到」这种对不上的情况。
+ */
+async function cmdForget(args, flags = {}) {
+  const opts = {
+    ids: args,
+    topic: flags.topic,
+    session: flags.session,
+    reason: flags.reason,
+    confirm: Boolean(flags.yes),
+    undo: Boolean(flags.undo),
+    list: Boolean(flags.list),
+    limit: flags.limit,
+    source: "cli",
+  };
+  // 和 mem search 同一套选择：配了 push.to 就是边缘机器，本机没有思源，
+  // 归档只能请中心代写（它也是唯一该写库的那一端）。
+  const to = flags.to ?? loadConfig().push?.to ?? "";
+  if (to) {
+    const r = await remoteArchive({ ...opts, to, token: flags.token });
+    return printArchive(r);
+  }
+  const r = await archiveEntries(opts);
+  printArchive(r);
+}
+
+/** 归档结果的文本输出。CLI 和 MCP 的排版各写一份，判断逻辑只有 core/archive.mjs 一份。 */
+function printArchive(r) {
+  if (r.failed) throw new Error(`归档失败：${failureText(r.reason, r.detail)}`);
+
+  const row = (x) => {
+    const head = [x.entity, x.date].filter(Boolean).join(" · ");
+    const why = x.reason ? `（${x.reason}）` : "";
+    return `  #${x.ref ?? String(x.id ?? "").slice(-7)}  ${head}  ${x.brief ?? ""}${why}`;
+  };
+
+  if (r.mode === "list") {
+    if (!r.count) return void console.log("还没有归档过任何条目。");
+    console.log(`最近归档 ${r.count} 条（默认检索看不到）：`);
+    for (const x of r.items) console.log(row(x));
+    console.log("\n恢复：mem forget --undo #短引用");
+    return;
+  }
+  if (r.mode === "preview") {
+    console.log(`没有动。${r.note}`);
+    for (const x of r.items) console.log(row(x));
+    if (r.items.length < r.count) console.log(`  ……（共 ${r.count} 条，只列了前 ${r.items.length} 条）`);
+    console.log("\n确认整批归档：加 --yes；只想归档其中几条：把它们后面的 #短引用 一个个传给 mem forget。");
+    return;
+  }
+  if (r.mode === "undo") {
+    if (!r.count) return void console.log(r.note || "没有恢复任何条目。");
+    console.log(`已撤销归档 ${r.count} 条，会重新出现在召回里：`);
+    for (const x of r.items) console.log(row(x));
+    if (r.note) console.log(r.note);
+    return;
+  }
+  if (!r.ok) {
+    console.log(r.note || "没有可归档的条目。");
+    for (const x of r.items ?? []) console.log(row(x));
+    return;
+  }
+  console.log(`已归档 ${r.count} 条${r.reason ? `（${r.reason}）` : ""}：块和原文都没删，随时能撤销。`);
+  for (const x of r.items) console.log(row(x));
+  if (r.note) console.log(r.note);
 }
 
 async function cmdPrompt(args, flags = {}) {
@@ -1195,8 +1277,15 @@ async function cmdMcp(flags) {
         search: (o) => remoteSearch({ ...o, to, token }),
         topics: (o) => remoteTopics({ ...o, to, token }),
         entries: (o) => remoteEntries({ ...o, to, token }),
+        archive: (o) => remoteArchive({ ...o, to, token }),
       }
-    : { search: searchEntries, topics: listTopics, entries: listEntries };
+    : {
+        search: searchEntries,
+        topics: listTopics,
+        entries: listEntries,
+        // 本机就是中心：直接改思源，不用绕一圈 HTTP。
+        archive: (o) => archiveEntries({ ...o, source: "mcp" }),
+      };
 
   // stdout 留给协议，日志一律 stderr——混一行进去客户端就断开。
   // 不在这里等：stdin 开着，readline 就撑着进程；关掉时进程自己退。
@@ -1241,7 +1330,7 @@ async function main() {
     case "remember":
       return cmdRemember(flags, rest);
     case "forget":
-      return cmdForget(rest);
+      return cmdForget(rest, flags);
     case "prompt":
       return cmdPrompt(rest, flags);
     case "model":

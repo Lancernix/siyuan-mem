@@ -333,6 +333,9 @@ export async function processQueue({
       project: projectOf(payload.cwd, payload.harness),
       turns: turns.length,
       exchanges: exchanges.length,
+      // 0 表示这场没读过库。>0 的会话抽出来的东西可能是二手复述，这里只记数，
+      // 不改变抽取行为——先有数据再决定要不要拦。
+      memTools: Number(payload.memTools) || 0,
     });
 
     const turnFrom = Math.max(1, Number(payload.turnFrom) || 1);

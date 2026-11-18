@@ -124,6 +124,41 @@ export function recallHealthToday(day = dayOf()) {
 }
 
 /**
+ * 今天有多少场会话读过记忆库本身。
+ *
+ * `session.begin` 里带着 memTools（这场调过几次我们自己的 MCP 工具）。工具结果在
+ * 采集层就被丢掉了，所以不会原样回流；但调用过就说明这场的内容是从库里取的，
+ * 它写出来的总结有大概率是二手复述。
+ *
+ * 只统计，不处理。要不要在抽取前拦掉这类会话，得先看真实比例：一场都没有的时候
+ * 就加拦截，只会在「误伤正常会话」和「漏掉大半」之间瞎猜。
+ *
+ * @returns {{sessions:number, reading:number, calls:number}}
+ */
+export function derivedHealthToday(day = dayOf()) {
+  const out = { sessions: 0, reading: 0, calls: 0 };
+  const file = pathOf(day);
+  if (!existsSync(file)) return out;
+  for (const line of readFileSync(file, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    let e;
+    try {
+      e = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (e.ev !== "session.begin") continue;
+    out.sessions++;
+    const n = Number(e.memTools) || 0;
+    if (n > 0) {
+      out.reading++;
+      out.calls += n;
+    }
+  }
+  return out;
+}
+
+/**
  * 今天的导航调用：列了几次目录、翻了几次条目，按来源分开。
  *
  * 单独一套事件、单独一个计数，不混进 recallHealthToday：那个数是「召回准不准」

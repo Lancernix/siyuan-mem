@@ -88,6 +88,9 @@ export async function flushPending(store, { log = () => {} } = {}) {
     }
     if (!status) continue; // 块没了
     if (status === "superseded") continue; // 已经标过
+    // 归档是用户明确做的决定，比这里补的「取代」更权威：盖回去等于把人手动
+    // 丢掉的噪音又捞回来，而且 priorStatus 会丢。
+    if (status === "archived") continue;
 
     try {
       await store.supersede(r.old, r.new);

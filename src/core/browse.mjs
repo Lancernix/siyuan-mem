@@ -16,7 +16,7 @@ import { SiYuan, resolveNotebookId } from "../util/siyuan.mjs";
 import { event } from "../util/log.mjs";
 import { normalizeSource } from "../util/source.mjs";
 import { stripRawLink } from "../util/raw.mjs";
-import { ATTR, attrOf } from "./store.mjs";
+import { ATTR, STATUSES, attrOf } from "./store.mjs";
 import { loadEntities, topicNames, findCandidates, norm } from "./entities.mjs";
 import { likeEsc } from "./search.mjs";
 
@@ -57,8 +57,8 @@ function limitOf(v, spec) {
 function statusOf(v) {
   // 和 searchEntries 同一套白名单：这个字段会拼进 SQL，非法值必须在这里拒掉。
   const s = v === "" ? "" : v || "current";
-  if (s && s !== "current" && s !== "superseded") {
-    throw new Error(`status 只能是 current / superseded / 空，收到「${String(s).slice(0, 30)}」`);
+  if (s && !STATUSES.has(s)) {
+    throw new Error(`status 只能是 ${[...STATUSES].join(" / ")} / 空，收到「${String(s).slice(0, 30)}」`);
   }
   return s;
 }
@@ -69,6 +69,8 @@ const sinceOf = (days) =>
 function baseConds(notebook, status) {
   const conds = [`box='${notebook}'`, "type='p'", `ial LIKE '%${ATTR.hash}="%'`];
   if (status) conds.push(`ial LIKE '%${ATTR.status}="${status}"%'`);
+  // 和 search 同一口径：不带状态 = 除归档外都要。归档只在显式 status=archived 时看。
+  else conds.push(`ial NOT LIKE '%${ATTR.status}="archived"%'`);
   return conds;
 }
 

@@ -26,7 +26,7 @@ function baseOf(opts, cfg) {
   return base;
 }
 
-async function remoteGet(path, opts, body) {
+async function remoteGet(path, opts, body, { timeout = 15000, action = "检索" } = {}) {
   const cfg = loadConfig();
   const base = baseOf(opts, cfg);
   const token = opts.token ?? cfg.push?.token ?? "";
@@ -40,7 +40,7 @@ async function remoteGet(path, opts, body) {
         ...(token ? { authorization: `Bearer ${token}` } : {}),
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(timeout),
     });
   } catch (e) {
     throw new Error(`连不上中心 ${base}：${e.name === "TimeoutError" ? "超时" : e.message}`);
@@ -53,7 +53,7 @@ async function remoteGet(path, opts, body) {
   } catch {
     throw new Error(`中心返回的不是 JSON（HTTP ${res.status}）：${text.slice(0, 200)}`);
   }
-  if (!res.ok) throw new Error(`中心拒绝了检索（HTTP ${res.status}）：${data?.error ?? text.slice(0, 200)}`);
+  if (!res.ok) throw new Error(`中心拒绝了${action}（HTTP ${res.status}）：${data?.error ?? text.slice(0, 200)}`);
   return { ...data, remote: base };
 }
 
@@ -91,4 +91,29 @@ export function remoteEntries(opts = {}) {
     status: opts.status,
     source: normalizeSource(opts.source),
   });
+}
+
+/**
+ * 归档：边缘唯一一条写通道。
+ *
+ * 超时给到 60 秒，比检索宽得多——归档是逐条串行写属性（并发会把思源内核顶爆），
+ * 几十条的批量本来就要十几秒，用检索那 15 秒会把一件已经成功一半的事报成失败。
+ */
+export function remoteArchive(opts = {}) {
+  return remoteGet(
+    "/api/archive",
+    opts,
+    {
+      ids: opts.ids,
+      topic: opts.topic,
+      session: opts.session,
+      reason: opts.reason,
+      confirm: opts.confirm,
+      undo: opts.undo,
+      list: opts.list,
+      limit: opts.limit,
+      source: normalizeSource(opts.source),
+    },
+    { timeout: 60000, action: "归档" }
+  );
 }

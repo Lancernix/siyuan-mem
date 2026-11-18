@@ -30,7 +30,8 @@ const INSTRUCTIONS = `这个 MCP 是一套跨会话的长期记忆（用户的�
 - 他聊到任何东西，只要像是你们之前打过交道的（不管他有没有明说「之前」），就先查一眼——查空只是多花一次调用，漏查是直接答错
 - 要给具体值（版本、端口、路径、型号、参数），而你手上没有当前来源
 这三条不是清单，只是几种典型形状。总的原则：答案要靠我不知道的用户私有情况，就去查；相关但上下文里已经说清楚了、或者只是寒暄和常识，就不用查。
-用法：memory_search 是默认入口，有关键词就直接搜；没命中或不知道话题叫什么，先 memory_topics 看目录，再用 memory_entries 翻该话题下的条目。引用记忆时带上它的日期和话题，方便核对。查不到就说没记过，别编。`;
+用法：memory_search 是默认入口，有关键词就直接搜；没命中或不知道话题叫什么，先 memory_topics 看目录，再用 memory_entries 翻该话题下的条目。引用记忆时带上它的日期和话题，方便核对。查不到就说没记过，别编。
+反过来，用户说某条「记错了 / 没用 / 只是当时试试」时，用 memory_archive 把它收起来——不删、可撤销，但不要自己判断哪条该归档。`;
 /**
  * 版本从包自己的 package.json 读。
  *
@@ -43,7 +44,7 @@ const { version: VERSION } = createRequire(import.meta.url)("../../package.json"
 const SERVER = { name: "siyuan-mem", version: VERSION };
 
 /**
- * 三个工具都只读本机记忆库，annotation 逐项写死，不吃规范默认值：
+ * 只读工具都只读本机记忆库，annotation 逐项写死，不吃规范默认值：
  * `destructiveHint` 默认是 true、`openWorldHint` 默认是 true，不声明就会被当成
  * 「可能删数据、可能访问开放世界」，客户端每次都弹确认，目录审核也会退回。
  *
@@ -62,6 +63,59 @@ const readOnly = (title) => ({
   idempotentHint: true,
   openWorldHint: false,
 });
+
+/**
+ * 归档的唯一写工具。
+ *
+ * 这是整套工具里第一个会改数据的：模型拿到它之后，最危险的不是调不通，而是
+ * 「自作主张地清理」。所以描述里第一句就写死触发条件——只有用户明说「这条没用 /
+ * 记错了 / 过时了」才准用，并且给出「拿不准先问」的出口。工具描述是唯一一定会
+ * 进模型上下文的地方（客户端的系统提示词我们控制不了）。
+ *
+ * destructiveHint 是 false：块不删、原文不动、随时能撤销，按规范不算破坏性；
+ * 但它确实会让条目从默认召回里消失，这一点必须在描述里说清，不能靠 hint 表达。
+ */
+export const ARCHIVE_TOOL = {
+  name: "memory_archive",
+  annotations: {
+    title: "归档记忆",
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  },
+  description:
+    "把记错的、过时的、或者只是临时试用的记忆收起来，之后默认不再被回忆到。" +
+    "**只在用户明确说过这类话时调用**：「这条记错了 / 没用 / 已经过时了 / 当时只是试试 / 别再用了 / 那个不算」。" +
+    "不要自己判断哪条记忆「看起来不重要」就归档——你觉得不重要的，往往正是他下次要问的；" +
+    "拿不准就先问一句，别猜。\n" +
+    "三种范围，从精确到宽：\n" +
+    "· ids：命中行末尾那个短引用（如 #a1b2c3d）或完整块 id，最精确，用户指着某几条说的时候用它；\n" +
+    "· topic：整个话题都是噪音时用（支持别名，名字拿不准先用 memory_topics 查准）。超过 10 条会先返回清单不动手，" +
+    "确认后再调一次并带 confirm=true；\n" +
+    "· session：知道会话 id 时把整场试用归档，一般用不到。\n" +
+    "归档只改状态：块和原文都还在，随时能撤销（undo=true + ids），" +
+    "看归档过哪些用 list=true。reason 写一句为什么——以后回答「当初为什么把这条丢了」全靠它。\n" +
+    "下一步：归档完可以用 memory_search 再搜一遍，确认该留的还在；" +
+    "如果用户还想继续找别的记忆，回到 memory_search。",
+  inputSchema: {
+    type: "object",
+    properties: {
+      ids: {
+        type: "array",
+        items: { type: "string" },
+        description: "条目短引用（命中行末尾的 7 位）或完整块 id。单个条目归档用这个。",
+      },
+      topic: { type: "string", description: "整个话题归档。支持别名和合并前的旧名；超过 10 条要先确认。" },
+      session: { type: "string", description: "整场会话归档。适合「那次只是试用」这种情况。" },
+      reason: { type: "string", description: "一句人话说明为什么归档，会写进条目属性，之后能查。" },
+      confirm: { type: "boolean", description: "整话题 / 整会话超过 10 条时，要置 true 才真的写。" },
+      undo: { type: "boolean", description: "撤销归档，配合 ids 使用。" },
+      list: { type: "boolean", description: "列出最近归档的条目（短引用 + 原因），不做任何修改。" },
+    },
+  },
+};
+
 
 /**
  * 工具清单：一个主入口 + 两个导航工具。
@@ -156,7 +210,7 @@ export const ENTRIES_TOOL = {
   },
 };
 
-export const TOOLS = [SEARCH_TOOL, TOPICS_TOOL, ENTRIES_TOOL];
+export const TOOLS = [SEARCH_TOOL, TOPICS_TOOL, ENTRIES_TOOL, ARCHIVE_TOOL];
 /** @deprecated 用 TOOLS；保留给按单工具写的调用方与测试。 */
 export const TOOL = SEARCH_TOOL;
 
@@ -170,8 +224,11 @@ function hitLines(hits) {
     const head = [h.entity || "未归类", h.project && h.project !== h.entity ? `@${h.project}` : "", h.date || "", h.type || ""]
       .filter(Boolean)
       .join(" · ");
+    // 短引用：块 id 末 7 位。没有它，模型没法点名「就这一条」，只能靠模糊匹配去猜，
+    // 而归档猜错是把真记忆藏起来。全书重复概率极低，真撞了服务端会报歧义。
+    const ref = h.id ? `  #${String(h.id).slice(-7)}` : "";
     lines.push("");
-    lines.push(`${i + 1}. ${head}`);
+    lines.push(`${i + 1}. ${head}${ref}`);
     if (h.brief) lines.push(`   摘要：${h.brief}`);
     const text = String(h.text ?? "");
     if (text && text !== h.brief) {
@@ -181,6 +238,74 @@ function hitLines(hits) {
   });
   return lines;
 }
+
+/** 归档结果里的一条：短引用 + 话题 + 日期 + 摘要。 */
+function itemLines(items = []) {
+  return items.map((x) => {
+    const head = [x.entity || "未归类", x.date || ""].filter(Boolean).join(" · ");
+    const why = x.reason ? `（${x.reason}）` : "";
+    return `- #${x.ref || String(x.id ?? "").slice(-7)}  ${head}  ${x.brief || ""}${why}`;
+  });
+}
+
+/**
+ * 归档工具的结果渲染。
+ *
+ * 每一种结局都要能自己往下走：预览要给「怎么确认」，成功要给「怎么撤销」，
+ * 没对上要给「为什么没对上」。模型看不到内部状态，只有这段文字。
+ */
+export function formatArchive(r) {
+  if (!r) return "归档没有返回结果（内部错误）。";
+  const items = r.items ?? [];
+
+  if (r.mode === "list") {
+    if (!r.count) return "还没有归档过任何条目。";
+    return [
+      `最近归档 ${r.count} 条（默认检索看不到它们）：`,
+      ...itemLines(items),
+      "下一步：要恢复某条，用 memory_archive(undo=true, ids=[\"短引用\"])。",
+    ].join("\n");
+  }
+
+  if (r.mode === "preview") {
+    return [
+      `没有动。${r.note}`,
+      ...itemLines(items),
+      items.length < r.count ? `……（共 ${r.count} 条，这里只列前 ${items.length} 条）` : "",
+      "确认要整批归档：再调一次，带 confirm=true。只想归档其中几条：用 ids 点那几条的短引用。",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  if (r.mode === "undo") {
+    if (!r.count) return r.note || "没有恢复任何条目。";
+    return [
+      `已撤销归档 ${r.count} 条，它们会重新出现在默认召回里：`,
+      ...itemLines(items),
+      r.note || "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  // 没对上条目 / 参数不够：ok=false 但接口本身是通的。
+  if (!r.ok) {
+    return [r.note || "没有可归档的条目。", items.length ? itemLines(items) : "", "下一步：先 memory_search 找到确切条目，再用 ids 的短引用归档。"]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  return [
+    `已归档 ${r.count} 条${r.reason ? `（${r.reason}）` : ""}：不再出现在默认召回里，块和原文都没删。`,
+    ...itemLines(items),
+    r.note || "",
+    `下一步：要撤销某条，用 memory_archive(undo=true, ids=[…])；看归档过哪些用 list=true。`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 
 /** 工具结果：条目原文 + 话题/日期/原文指针。截断是为了别把上下文塞满。 */
 export function formatHits(hits, terms = [], hint = "", reason = "") {
@@ -286,11 +411,11 @@ function missing(kind) {
  * 处理一条消息。通知（没有 id）返回 null——不能回，回了客户端会当成孤儿响应。
  *
  * @param {object} msg
- * @param {{search?:Function, topics?:Function, entries?:Function}} io
- *   三个实现由入口注入：本机直连思源时用 core 的函数，边缘机器上走中心接口。
+ * @param {{search?:Function, topics?:Function, entries?:Function, archive?:Function}} io
+ *   四个实现由入口注入：本机直连思源时用 core 的函数，边缘机器上走中心接口。
  *   分开注入是为了让协议壳的测试不需要真的连思源。
  */
-export async function handleMessage(msg, { search, topics, entries } = {}) {
+export async function handleMessage(msg, { search, topics, entries, archive } = {}) {
   if (!msg || typeof msg !== "object" || msg.jsonrpc !== "2.0") {
     return err(msg?.id ?? null, -32600, "不是 JSON-RPC 2.0");
   }
@@ -397,6 +522,45 @@ export async function handleMessage(msg, { search, topics, entries } = {}) {
         return ok(id, { content: [{ type: "text", text: `翻条目失败：${e.message}` }], isError: true });
       }
     }
+
+    if (name === ARCHIVE_TOOL.name) {
+      if (typeof archive !== "function") return ok(id, missing("归档"));
+      const ids = Array.isArray(a.ids) ? a.ids : a.ids ? [a.ids] : [];
+      // 什么范围都没给时不要落库：一次「无参数调用」绝不能变成全库归档。
+      if (!ids.length && !a.topic && !a.session && !a.list) {
+        return ok(id, {
+          content: [
+            {
+              type: "text",
+              text:
+                "缺范围：要归档哪几条？用 ids（命中行末尾的短引用）、topic（整话题）或 session（整场会话）；" +
+                "想看归档过什么用 list=true。",
+            },
+          ],
+          isError: true,
+        });
+      }
+      try {
+        const r = await archive({
+          ids,
+          topic: a.topic || undefined,
+          session: a.session || undefined,
+          reason: a.reason || undefined,
+          confirm: a.confirm === true,
+          undo: a.undo === true,
+          list: a.list === true,
+          source: "mcp",
+        });
+        // 失败必须说「失败」，不能渲染成「没有这些条目」——那会让模型告诉用户
+        // 「确实没记过」，而实际上只是中心没连上。
+        if (r?.failed) {
+          return ok(id, { content: [{ type: "text", text: `归档失败：${failureText(r.reason, r.detail)}。这不代表条目不存在，稍后重试。` }], isError: true });
+        }
+        return ok(id, { content: [{ type: "text", text: formatArchive(r) }] });
+      } catch (e) {
+        return ok(id, { content: [{ type: "text", text: `归档失败：${e.message}` }], isError: true });
+      }
+    }
   }
 
   return notify ? null : err(id, -32601, `没有这个方法：${method}`);
@@ -407,7 +571,7 @@ export async function handleMessage(msg, { search, topics, entries } = {}) {
  *
  * 串行处理：请求之间没有依赖，但并发写 stdout 会让两条 JSON 交错成一行。
  */
-export function startMcp({ search, topics, entries, input = process.stdin, output = process.stdout, log = () => {} } = {}) {
+export function startMcp({ search, topics, entries, archive, input = process.stdin, output = process.stdout, log = () => {} } = {}) {
   const rl = createInterface({ input, crlfDelay: Infinity });
   let chain = Promise.resolve();
 
@@ -427,7 +591,7 @@ export function startMcp({ search, topics, entries, input = process.stdin, outpu
         return;
       }
       try {
-        send(await handleMessage(msg, { search, topics, entries }));
+        send(await handleMessage(msg, { search, topics, entries, archive }));
       } catch (e) {
         log(`处理 ${msg?.method ?? "?"} 出错：${e.stack ?? e.message}`);
         send(err(msg?.id ?? null, -32603, `内部错误：${e.message}`));

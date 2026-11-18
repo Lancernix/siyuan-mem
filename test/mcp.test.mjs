@@ -70,11 +70,11 @@ test("通知不回：回了客户端会当成孤儿响应", async () => {
   assert.equal(r, null);
 });
 
-test("工具清单是「一个主入口 + 两个导航工具」，各自说清互相的路由", async () => {
+test("工具清单是「一个主入口 + 两个导航 + 一个归档」，各自说清互相的路由", async () => {
   const r = await handleMessage({ jsonrpc: "2.0", id: 2, method: "tools/list" });
   assert.deepEqual(
     r.result.tools.map((t) => t.name),
-    ["memory_search", "memory_topics", "memory_entries"]
+    ["memory_search", "memory_topics", "memory_entries", "memory_archive"]
   );
   assert.equal(r.result.tools[0].name, TOOL.name);
   assert.deepEqual(r.result.tools[0].inputSchema.required, ["query"]);
@@ -85,6 +85,7 @@ test("工具清单是「一个主入口 + 两个导航工具」，各自说清�
     [0, ["memory_topics", "memory_entries"]],
     [1, ["memory_search", "memory_entries"]],
     [2, ["memory_search", "memory_topics"]],
+    [3, ["memory_search", "memory_topics"]],
   ]) {
     for (const other of others) {
       assert.ok(r.result.tools[i].description.includes(other), `工具 ${i} 的描述该提到 ${other}`);
@@ -102,9 +103,12 @@ test("每个工具都声明四个 hint：缺一个，OpenAI 目录直接退回",
     for (const k of ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"]) {
       assert.equal(typeof a[k], "boolean", `${t.name} 的 ${k} 该是布尔`);
     }
-    // 这三个工具都不碰思源里的数据、也不访问外网，只有一行本地审计日志。
-    assert.equal(a.readOnlyHint, true, `${t.name} 只读`);
+    // 归档是唯一的写工具，必须如实标成非只读；另外三个只读（审计日志是旁路，
+    // 不碰思源里的数据）。
+    assert.equal(a.readOnlyHint, t.name !== "memory_archive", `${t.name} 的 readOnlyHint 该说实话`);
+    // 三个工具都不删数据、不访问外网；归档只改状态，块和原文都还在，随时能撤销。
     assert.equal(a.destructiveHint, false, `${t.name} 不破坏`);
+    assert.equal(a.idempotentHint, true, `${t.name} 幂等`);
     assert.equal(a.openWorldHint, false, `${t.name} 不访问开放世界`);
     assert.ok(typeof a.title === "string" && a.title.length > 0, `${t.name} 该有给人看的标题`);
   }

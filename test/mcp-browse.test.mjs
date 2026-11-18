@@ -39,13 +39,22 @@ test("三个工具都能分发，参数翻译对了（含 include_superseded →
   assert.equal(calls[1][1].status, undefined);
 });
 
-test("工具清单三个，各自 description 都点名另两个", () => {
-  assert.deepEqual(TOOLS.map((t) => t.name), ["memory_search", "memory_topics", "memory_entries"]);
-  TOOLS.forEach((t, i) => {
-    for (const other of TOOLS.filter((_, j) => j !== i)) {
-      assert.ok(t.description.includes(other.name), `${t.name} 该提到 ${other.name}`);
-    }
-  });
+test("工具清单四个，每个 description 都给得出下一步（至少回到 memory_search）", () => {
+  assert.deepEqual(TOOLS.map((t) => t.name), [
+    "memory_search",
+    "memory_topics",
+    "memory_entries",
+    "memory_archive",
+  ]);
+  // 归档是唯一的写工具：它必须说清「什么时候才准用」和「之后怎么回到检索」，
+  // 话题名拿不准时还得指向目录。
+  const archive = TOOLS.find((t) => t.name === "memory_archive");
+  assert.match(archive.description, /memory_topics/);
+  assert.match(archive.description, /只在用户明确说过/);
+  for (const t of TOOLS) {
+    if (t.name === "memory_search") continue;
+    assert.ok(t.description.includes("memory_search"), `${t.name} 该说清怎么回到主入口`);
+  }
 });
 
 test("目录结果带匹配依据、条目数、下一步建议", async () => {

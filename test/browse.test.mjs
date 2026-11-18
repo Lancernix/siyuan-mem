@@ -41,6 +41,9 @@ const ROWS = [
   { id: "e", date: "2026-08-01", entity: "羽毛球", text: "比赛用高端竞赛级用球" },
   { id: "f", date: "2026-07-01", entity: "部署沙箱", text: "锁要放在 try 之外", status: "superseded" },
   { id: "g", date: "2026-11-11", entity: "部署沙箱", text: "改成先拿锁再写库" },
+  // 用户主动归档的噪音。它和 superseded 不是一回事：任何「不带状态」的查询
+  // 都不该把它翻出来，只有显式 status=archived 才看。
+  { id: "z", date: "2026-06-01", entity: "部署沙箱", text: "当时随便试的", status: "archived" },
   // 第十八轮复审 P2-3：空 entity 与超长话题名。目录给出的名字必须能直接填回
   // listEntries，否则就是「目录 → 查不到 → 回目录」的死循环。
   { id: "h", date: "2026-11-03", entity: "", text: "没打话题的条目一" },
@@ -83,12 +86,15 @@ const server = createServer((req, res) => {
       // 还原 SQL 里真正生效的条件。别的条件（box/type/hash）是必带的常量，
       // 不为它们造分支；但 status / entity 变了必须看得见。
       // 未归类走的是 `(entity="" OR 属性缺失)`，不是名字列表，得单独认。
-      const wantStatus = /custom-mem-status="([^"]*)"/.exec(lastStmt)?.[1] ?? "";
+      // 归档的排除条件是 NOT LIKE，不能当成想查的状态来解析。
+      const excludeArchived = /NOT LIKE '%custom-mem-status="archived"%'/.test(lastStmt);
+      const wantStatus = excludeArchived ? "" : (/custom-mem-status="([^"]*)"/.exec(lastStmt)?.[1] ?? "");
       const uncategorized = /custom-mem-entity=""|NOT LIKE '%custom-mem-entity=%'/.test(lastStmt);
       const entities = uncategorized
         ? []
         : [...lastStmt.matchAll(/custom-mem-entity="([^"]*)"/g)].map((m) => m[1]);
       const rows = ROWS.filter((r) => {
+        if (excludeArchived && r.status === "archived") return false;
         if (wantStatus && (r.status ?? "current") !== wantStatus) return false;
         if (uncategorized) return r.entity === "";
         // 精确相等：原来用 includes 会让长话题名把短名字的条目也捞进来。
@@ -239,9 +245,12 @@ test("翻条目：superseded 默认不见，include_superseded 才一起看", as
   const normal = await listEntries({ topic: "部署沙箱", silent: true });
   assert.deepEqual(normal.hits.map((h) => h.id), ["g"]);
   const all = await listEntries({ topic: "部署沙箱", status: "", silent: true });
+  // 2 条 = current + superseded；归档那条即使「不带状态」也不能出现。
   assert.equal(all.hits.length, 2);
   assert.ok(all.hits.some((h) => h.status === "superseded"));
-  assert.doesNotMatch(lastStmt, /custom-mem-status="/, "status 为空时不该拼状态条件");
+  assert.ok(!all.hits.some((h) => h.status === "archived"), "归档不该被 include_superseded 带出来");
+  assert.doesNotMatch(lastStmt, /custom-mem-status="current"/, "status 为空时不该只挑 current");
+  assert.match(lastStmt, /NOT LIKE '%custom-mem-status="archived"%'/, "但必须排除归档");
 });
 
 test("翻条目：limit / days 控量与截断提示", async () => {

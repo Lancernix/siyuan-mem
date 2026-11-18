@@ -21,6 +21,8 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { drop, ingestKey, pending } from "./inbox.mjs";
 import { searchEntries } from "./search.mjs";
 import { listTopics, listEntries } from "./browse.mjs";
+import { archiveEntries } from "./archive.mjs";
+import { STATUSES } from "./store.mjs";
 import { failureText } from "./search-reason.mjs";
 import { normalizeSource } from "../util/source.mjs";
 
@@ -84,6 +86,8 @@ function normalize(body, fallbackMachine = "") {
       // 推送方给的 [from, to) 是 0-based 下标，换算成 1-based 的起始轮次。
       // 少了这个，增量推过来的每一包都会被当成「从第 1 轮开始」，原文指针全错位。
       turnFrom: Array.isArray(body?.range) && Number.isFinite(Number(body.range[0])) ? Number(body.range[0]) + 1 : 1,
+      // 会话里调用过几次 mem 自己的 MCP 工具。旧版本边缘不会推这个字段，缺省按 0。
+      memTools: Math.max(0, Math.min(9999, Number(body?.mem_tools) || 0)),
       turns: clean,
     },
     chars: clean.reduce((n, t) => n + t.text.length, 0),
@@ -107,6 +111,8 @@ export function startIngest({
   search = searchEntries,
   topics = listTopics,
   entries = listEntries,
+  // 归档也是写操作，和抽取一样只能由中心执行：边缘机器没有思源，也不该有。
+  archive = archiveEntries,
   log = () => {},
 } = {}) {
   // 没有 token 一律不启动，绑回环也一样。靠 socket 来源 + 代理头 + Host 判断是不是
@@ -171,8 +177,8 @@ export function startIngest({
     }
     const all = p.all === 1 || p.all === true || p.all === "1" || p.all === "true" || p.status === "";
     const status = all ? "" : p.status || undefined;
-    if (status && status !== "current" && status !== "superseded") {
-      return json(res, 400, { error: "status 只能是 current / superseded / 空" });
+    if (status && !STATUSES.has(status)) {
+      return json(res, 400, { error: `status 只能是 ${[...STATUSES].join(" / ")} / 空` });
     }
     const days = Number(p.days);
     const impl = kind === "topics" ? topics : entries;
@@ -225,8 +231,8 @@ export function startIngest({
     const all = p.all === 1 || p.all === true || p.all === "1" || p.all === "true" || p.status === "";
     const status = all ? "" : p.status || undefined;
     // 先拦一道：status 会被拼进 SQL，非法值不能等到 searchEntries 里才炸。
-    if (status && status !== "current" && status !== "superseded") {
-      return json(res, 400, { error: "status 只能是 current / superseded / 空" });
+    if (status && !STATUSES.has(status)) {
+      return json(res, 400, { error: `status 只能是 ${[...STATUSES].join(" / ")} / 空` });
     }
 
     try {
@@ -256,6 +262,57 @@ export function startIngest({
     }
   }
 
+  /**
+   * 归档：写操作，和 /api/ingest 一样只收 POST、必须带 token。
+   *
+   * 边缘的 MCP 只能从这里改状态——它那台机器上没有思源。参数原样交给
+   * archiveEntries，结果也原样回去：CLI 和 MCP 的渲染各写各的，判断逻辑只有一份。
+   */
+  async function handleArchive(req, res) {
+    const a = auth(req);
+    if (!a.ok) return json(res, a.code, { error: a.error });
+    if (req.method !== "POST") return json(res, 405, { error: "归档用 POST" });
+
+    let p;
+    try {
+      p = JSON.parse(await readBody(req, 64 * 1024)) ?? {};
+    } catch (e) {
+      if (e.close) res.setHeader("connection", "close");
+      return json(res, e.status ?? 400, { error: e.status ? e.message : `JSON 读不出来：${e.message}` });
+    }
+
+    const bool = (v) => v === true || v === 1 || v === "1" || v === "true";
+    const ids = Array.isArray(p.ids) ? p.ids : p.id ? [p.id] : [];
+    const list = bool(p.list);
+    if (!ids.length && !p.topic && !p.session && !list) {
+      return json(res, 400, { error: "要给 ids / topic / session 之一，或 list=true" });
+    }
+
+    try {
+      const r = await archive({
+        ids,
+        topic: p.topic,
+        session: p.session,
+        reason: p.reason,
+        confirm: bool(p.confirm),
+        undo: bool(p.undo),
+        list,
+        limit: p.limit,
+        source: normalizeSource(p.source, "api"),
+      });
+      // 后端坏了回 5xx：边缘那边要能说「归档没成功」，不是「这些条目不存在」。
+      if (r.failed) {
+        log(`  归档失败：${r.reason}${r.detail ? `（${String(r.detail).slice(0, 80)}）` : ""}`);
+        return json(res, 503, { error: `归档失败：${failureText(r.reason, r.detail)}` });
+      }
+      log(`  归档 ${r.mode}${r.scope ? ` ${r.scope}` : ""} → ${r.count} 条${r.needsConfirm ? "（待确认）" : ""}`);
+      return json(res, 200, r);
+    } catch (e) {
+      log(`  归档失败：${e.message}`);
+      return json(res, 500, { error: `归档失败：${e.message}` });
+    }
+  }
+
   const server = http.createServer(async (req, res) => {
     // Host 可能是畸形值。`new URL()` 在 try 外面抛，就是一个没人接的异常，
     // 常驻进程会直接死——而这是写入通道，死了等于整个中心停止收数据。
@@ -278,6 +335,7 @@ export function startIngest({
     if (url.pathname === "/api/search") return handleSearch(req, res, url);
     if (url.pathname === "/api/topics") return handleBrowse(req, res, url, "topics");
     if (url.pathname === "/api/entries") return handleBrowse(req, res, url, "entries");
+    if (url.pathname === "/api/archive") return handleArchive(req, res);
 
     if (url.pathname !== "/api/ingest") return json(res, 404, { error: "没有这个接口" });
     if (req.method !== "POST") return json(res, 405, { error: "只接 POST" });

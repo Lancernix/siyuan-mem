@@ -179,6 +179,9 @@ export async function pushOnce({
             // 日志，最后一次写入就是最后一句说完的时间）；再拿不到才用当天。
             date: ymd(chunk.at(-1)?.at ?? s.mtime),
             range: [start, start + chunk.length],
+            // 这场会话调用过几次我们自己的 MCP 工具。工具结果在采集层就被丢掉了，
+            // 但「调用过」这件事是判断内容来源的硬证据，中心要靠它统计回流。
+            mem_tools: log_.memTools ?? 0,
             turns: chunk,
           },
         });

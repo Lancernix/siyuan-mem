@@ -34,7 +34,31 @@ export const ATTR = {
   /** 被谁取代 / 什么时候。链是通的，顺着能走到最新那条。 */
   supersededBy: "custom-mem-superseded-by",
   supersededAt: "custom-mem-superseded-at",
+  /**
+   * 归档：用户明确说「这条没用 / 过时 / 只是试试」，或者整场试用会话。
+   *
+   * 和 superseded 分开不是洁癖：superseded 的语义是「被新结论取代」，查「当初为什么
+   * 改」时还要能翻出来；归档是噪音，默认检索根本不该看见。混成一个状态，前者会被
+   * 后者淹掉，status 的计数也对不上账。
+   */
+  archivedAt: "custom-mem-archived-at",
+  archiveReason: "custom-mem-archive-reason",
+  /** 归档前的状态。撤销要回到它——不能一律回 current，那会把旧结论复活。 */
+  priorStatus: "custom-mem-prior-status",
 };
+
+/** 归档写属性之间的间隔。这个内核是单进程的，连着写会把事务队列堆爆。 */
+const ARCHIVE_PACE_MS = 80;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * 条目状态的全集。
+ *
+ * 单独导出是因为它同时是 SQL 白名单的三处入口（检索、导航、接收端接口）——这个
+ * 字段会被拼进 SQL，三处各写一份迟早有一处漏掉新状态，而漏掉的表现是「归档过
+ * 的条目还能被检索到」，不会报错。
+ */
+export const STATUSES = new Set(["current", "superseded", "archived"]);
 
 export function hashOf(text) {
   return createHash("sha1").update(String(text).trim()).digest("hex").slice(0, 12);
@@ -558,10 +582,6 @@ export class Store {
   }
 
   /**
-   * 把一条标成被取代。不删，也不动它的原文指针——
-   * 改主意的时候最想知道的就是「之前为什么那么想」，那段原话就在旧指针里。
-   */
-  /**
    * 这个块现在是什么状态。块不存在（或没有这个属性）返回空串。
    * 补偿逻辑靠它判断"还该不该补"，所以不能抛——查不出来交给调用方决定。
    */
@@ -574,6 +594,10 @@ export class Store {
     return attrOf(rows[0].ial, ATTR.status);
   }
 
+  /**
+   * 把一条标成被取代。不删，也不动它的原文指针——
+   * 改主意的时候最想知道的就是「之前为什么那么想」，那段原话就在旧指针里。
+   */
   async supersede(id, byId = "") {
     const attrs = { [ATTR.status]: "superseded" };
     if (byId) {
@@ -584,6 +608,144 @@ export class Store {
     if (this.#cfg.siyuan.logChanges !== false) {
       await this.#logChange(`~ superseded ${id}${byId ? ` → ${byId}` : ""}`);
     }
+  }
+
+  /**
+   * 短引用 → 块 id。
+   *
+   * 检索结果里只带块 id 的末 7 位：模型要能点名某一条，但不该为此背 22 个字符。
+   * 后缀在一本笔记本里撞车的概率极低（2000 条约 2.6 万分之一），真撞上报错让
+   * 人改用全 id——这里最不能有的行为是静默挑一条归档掉。
+   *
+   * @returns {{ids:string[], bad:string[], dup:string[]}}
+   */
+  async resolveIds(refs = []) {
+    await this.#ensure();
+    const box = this.#ids?.notebook;
+    const ids = [];
+    const bad = [];
+    const dup = [];
+    const seen = new Set();
+    for (const raw of refs) {
+      // 块 id 全是小写；模型偶尔会把短引用原样大写传回来。
+      const ref = String(raw ?? "").trim().replace(/^#/, "").toLowerCase();
+      if (!ref || seen.has(ref)) continue;
+      seen.add(ref);
+      // 思源块 id 是 `20261118160331-abc1234`：带横杠就按全 id，否则按末 N 位。
+      if (!/^[0-9A-Za-z-]{4,40}$/.test(ref)) {
+        bad.push(ref);
+        continue;
+      }
+      const exact = ref.includes("-");
+      const where = exact
+        ? `id='${ref.replace(/'/g, "''")}'`
+        : `substr(id, -${ref.length})='${ref.replace(/'/g, "''")}'`;
+      const rows = await this.#sy.sql(
+        `SELECT id FROM blocks
+          WHERE type='p' AND ial LIKE '%${ATTR.hash}="%'
+            ${box ? `AND box='${box}'` : ""} AND ${where} LIMIT 2`
+      );
+      if (!rows?.length) bad.push(ref);
+      else if (rows.length > 1) dup.push(ref);
+      else ids.push(rows[0].id);
+    }
+    return { ids, bad, dup };
+  }
+
+  /** 归档 / 撤销共用的读：一次把这批块的 ial 拿全。 */
+  async #rowsOf(ids) {
+    if (!ids?.length) return [];
+    const list = ids.map((x) => `'${String(x).replace(/'/g, "''")}'`).join(",");
+    return (await this.#sy.sql(`SELECT id, content, ial FROM blocks WHERE id IN (${list})`)) ?? [];
+  }
+
+  /**
+   * 归档：用户明确说「这条没用 / 过时 / 只是试试」。
+   *
+   * 和 supersede 是两种东西：superseded 是「被新结论取代」，查历史时还要能翻出来；
+   * archived 是噪音，默认检索不该看见它。混成一个状态会让「当初为什么改」这类
+   * 查询被试用记录淹掉，也会让 status 的两个计数失去意义。
+   *
+   * 不删块、不动原文指针，只改属性：误判能撤销，事后也还能查为什么归档。
+   * 写下 priorStatus 是为了撤销——一条本来就被取代的条目不能撤销成 current，
+   * 那等于把旧结论复活。
+   *
+   * 串行 + 批间留缝：并发打 setBlockAttrs 会把这个单进程内核顶到 OOM（11-16 那次）。
+   */
+  async archive(ids, { reason = "" } = {}) {
+    const rows = await this.#rowsOf(ids);
+    const at = new Date().toISOString().slice(0, 10);
+    const changed = [];
+    const skipped = [];
+    for (const r of rows) {
+      const cur = attrOf(r.ial, ATTR.status) || "current";
+      if (cur === "archived") {
+        skipped.push({ id: r.id, why: "已经是归档状态" });
+        continue;
+      }
+      await this.#sy.setBlockAttrs(r.id, {
+        [ATTR.status]: "archived",
+        [ATTR.priorStatus]: cur,
+        [ATTR.archivedAt]: at,
+        ...(reason ? { [ATTR.archiveReason]: String(reason).slice(0, 200) } : {}),
+      });
+      changed.push(r.id);
+      await sleep(ARCHIVE_PACE_MS);
+    }
+    if (changed.length && this.#cfg.siyuan.logChanges !== false) {
+      await this.#logChange(`- archived ${changed.length} 条${reason ? `（${String(reason).slice(0, 40)}）` : ""}`);
+    }
+    return { changed, skipped, missing: ids.length - rows.length };
+  }
+
+  /** 撤销归档：回到归档前的状态，回到 current 只是其中一种。 */
+  async restore(ids) {
+    const rows = await this.#rowsOf(ids);
+    const changed = [];
+    const skipped = [];
+    for (const r of rows) {
+      if (attrOf(r.ial, ATTR.status) !== "archived") {
+        skipped.push({ id: r.id, why: "不是归档状态" });
+        continue;
+      }
+      // 空值也要写回去：思源会把空串当成一个真属性存着，留着「归档原因」而状态是
+      // current 的话，下次归档审计会读到一条对不上的记录。
+      await this.#sy.setBlockAttrs(r.id, {
+        [ATTR.status]: attrOf(r.ial, ATTR.priorStatus) || "current",
+        [ATTR.priorStatus]: "",
+        [ATTR.archivedAt]: "",
+        [ATTR.archiveReason]: "",
+      });
+      changed.push(r.id);
+      await sleep(ARCHIVE_PACE_MS);
+    }
+    if (changed.length && this.#cfg.siyuan.logChanges !== false) {
+      await this.#logChange(`~ restored ${changed.length} 条`);
+    }
+    return { changed, skipped };
+  }
+
+  /** 最近归档的条目，供「为什么归档了」和撤销时挑。 */
+  async listArchived(limit = 20) {
+    await this.#ensure();
+    const box = this.#ids?.notebook;
+    const rows = await this.#sy.sql(
+      `SELECT id, content, ial, updated FROM blocks
+        WHERE type='p' AND ial LIKE '%${ATTR.hash}="%'
+          AND ial LIKE '%${ATTR.status}="archived"%'
+          ${box ? `AND box='${box}'` : ""}
+        ORDER BY updated DESC LIMIT ${Number(limit) > 0 ? Math.min(Number(limit), 200) : 20}`
+    );
+    return (rows ?? []).map((r) => ({
+      id: r.id,
+      entity: attrOf(r.ial, ATTR.entity),
+      brief: attrOf(r.ial, ATTR.brief),
+      date: attrOf(r.ial, ATTR.date),
+      text: stripRawLink(r.content, attrOf(r.ial, ATTR.raw)),
+      reason: attrOf(r.ial, ATTR.archiveReason),
+      archivedAt: attrOf(r.ial, ATTR.archivedAt),
+      session: attrOf(r.ial, ATTR.session),
+    }));
   }
 
   /** 各文档的块 id。raw / entities 要往对应文档里写。 */
@@ -641,6 +803,7 @@ export class Store {
       `SELECT
          SUM(CASE WHEN ial LIKE '%${ATTR.status}="current"%' THEN 1 ELSE 0 END) AS n_current,
          SUM(CASE WHEN ial LIKE '%${ATTR.status}="superseded"%' THEN 1 ELSE 0 END) AS n_superseded,
+         SUM(CASE WHEN ial LIKE '%${ATTR.status}="archived"%' THEN 1 ELSE 0 END) AS n_archived,
          COUNT(*) AS n_total
        FROM blocks WHERE type='p' AND ial LIKE '%${ATTR.hash}="%'${box ? ` AND box='${box}'` : ""}`
     );
@@ -649,6 +812,7 @@ export class Store {
     return {
       current: Number(r.n_current) || 0,
       superseded: Number(r.n_superseded) || 0,
+      archived: Number(r.n_archived) || 0,
       total: Number(r.n_total) || 0,
     };
   }
@@ -717,7 +881,7 @@ export function formatHits(hits) {
   return hits
     .map((h) => {
       const tag = [h.entity, h.type, h.date].filter(Boolean).join(" · ");
-      const mark = h.status === "superseded" ? " [已过时]" : "";
+      const mark = h.status === "superseded" ? " [已过时]" : h.status === "archived" ? " [已归档]" : "";
       return `- ${h.text}${mark}\n  ${tag}${h.source ? ` · ${h.source}` : ""}  ${h.id}`;
     })
     .join("\n");

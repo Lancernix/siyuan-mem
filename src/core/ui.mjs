@@ -38,7 +38,7 @@ async function state() {
   const { cfg, sy, store } = open();
   const [version, stats, entries] = await Promise.all([
     sy.version().catch(() => "离线"),
-    store.stats().catch(() => ({ current: 0, superseded: 0, total: 0 })),
+    store.stats().catch(() => ({ current: 0, superseded: 0, archived: 0, total: 0 })),
     store.review(30).catch(() => []),
   ]);
   const m = resolveModel(cfg);
@@ -124,7 +124,7 @@ function draw(s) {
   const busy = s.busy && s.busy.running;
   $("chips").innerHTML = [
     chip("思源", online ? "v" + s.siyuan.version : "离线", online ? "ok" : "bad"),
-    chip("条目", s.stats.current + " 在用 / " + s.stats.superseded + " 过时"),
+    chip("条目", s.stats.current + " 在用 / " + s.stats.superseded + " 过时 / " + (s.stats.archived ?? 0) + " 归档"),
     chip("队列", s.queue.length + " 个会话", s.queue.length ? "bad" : "ok"),
     chip("模型", s.model.configured ? s.model.provider + " / " + s.model.model : "未配置", s.model.configured ? "ok" : "bad"),
     chip("今日", s.usage.calls ? s.usage.calls + " 次 · " + (s.usage.prompt + s.usage.completion) + " tok" : "无调用"),

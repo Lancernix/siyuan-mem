@@ -246,11 +246,22 @@ export const DEFAULT_HOOKS = {
 };
 
 /**
+ * 我们自己的 MCP 工具名。
+ *
+ * 有的 harness 会加前缀（`mcp__siyuan-mem__memory_search`），所以只认中段。
+ * 这个计数是「这场会话的内容有多少来自记忆库」的唯一硬证据：工具结果本身在
+ * cleanContent 里就被丢掉了，不会变成语料；但调用过就说明它读的是库里的东西，
+ * 之后写的总结有很大概率是二手复述。
+ */
+const MEM_TOOL_RE = /(?:^|_)memory_(?:search|topics|entries|archive)(?:_|$)/;
+
+/**
  * 把事件流变成发言流。
  *
  * @param {object[]} lines
  * @param {object} hooks 上层各家的差异，见 DEFAULT_HOOKS
- * @returns {{turns:{role:string,text:string}[], sessionId:string, cwd:string, skipped?:string}}
+ * @returns {{turns:{role:string,text:string}[], sessionId:string, cwd:string,
+ *            memTools:number, skipped?:string}}
  */
 export function walkMessages(lines, hooks = {}) {
   const h = { ...DEFAULT_HOOKS, ...hooks };
@@ -260,8 +271,11 @@ export function walkMessages(lines, hooks = {}) {
 
   if (h.isSubagentFile(lines)) {
     const first = lines[0] ?? {};
-    return { turns: [], sessionId: h.sessionIdOf(first) ?? "", cwd: "", skipped: "subagent" };
+    return { turns: [], sessionId: h.sessionIdOf(first) ?? "", cwd: "", memTools: 0, skipped: "subagent" };
   }
+
+  // 只统计，不拦截：现在没有证据表明这类会话一定会产生重复条目，先让数据说话。
+  const memTools = [...idToName.values()].filter((name) => MEM_TOOL_RE.test(String(name ?? ""))).length;
 
   const turns = [];
   for (const d of lines) {
@@ -288,7 +302,7 @@ export function walkMessages(lines, hooks = {}) {
     if (h.dropKind(m, raw, clean, d)) continue;
     turns.push({ role, text: clean, at: h.timeOf(m, d) });
   }
-  return { turns, sessionId, cwd };
+  return { turns, sessionId, cwd, memTools };
 }
 
 /**
