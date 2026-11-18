@@ -744,6 +744,14 @@ async function cmdService(args, flags) {
 async function cmdUi(flags) {
   const cfg = loadConfig();
   const port = Number(flags.port) || cfg.ui?.port || 7787;
+  const host = flags.bind || cfg.ui?.bind || "127.0.0.1";
+  // 放域名后面（容器里跑）时，浏览器敲的是域名，得显式放行；白名单只影响 Host
+  // 校验，读数据仍然要过 Basic。
+  const allowHosts = String(flags["allow-host"] ?? cfg.ui?.allowHosts ?? "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+  const auth = String(flags.auth ?? process.env.MEM_PANEL_AUTH ?? cfg.ui?.auth ?? "");
   // 面板本身只读；点"跑一轮"时才抢锁，抢不到就报"服务正在跑"。
   const runRound = async (logFn) => {
     acquire({ log: logFn ?? console.log });
@@ -753,7 +761,7 @@ async function cmdUi(flags) {
       release();
     }
   };
-  const ui = startUi({ port, runRound });
+  const ui = startUi({ port, host, allowHosts, auth, runRound });
   console.log(`面板 ${ui.url}（Ctrl-C 退出）`);
   const stop = async () => {
     await ui.close().catch(() => {});

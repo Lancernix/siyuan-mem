@@ -25,6 +25,28 @@ services:
     networks:
       - siyuan
 
+  # 面板：看状态、查条目、看队列。和 mem 用同一份镜像、同一个数据卷——它读的就是
+  # 同一套状态，不需要另开一份。
+  #
+  # 默认不启动（profile）：面板显示的是记忆库正文，没设密码它自己也会拒绝绑非回环
+  # 地址。要开：在 deploy/.env 里写 MEM_PANEL_AUTH=用户名:密码，然后
+  #   docker compose --profile panel up -d
+  panel:
+    profiles: ["panel"]
+    image: siyuan-mem:0.1.0
+    container_name: siyuan-mem-panel
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      MEM_PANEL_AUTH: ${MEM_PANEL_AUTH:-}
+    volumes:
+      - ./data:/data
+    # 绑 0.0.0.0 是因为要经容器网络被 nginx 访问；不 publish 端口，外面碰不到。
+    # --allow-host 是 nginx 转发过来的 Host，不列进来会被 DNS rebinding 那道闸挡掉。
+    command: ["ui", "--port", "7787", "--bind", "0.0.0.0", "--allow-host", "${PANEL_HOST:-mem.lancernix.space}"]
+    networks:
+      - siyuan
+
 networks:
   siyuan:
     external: true

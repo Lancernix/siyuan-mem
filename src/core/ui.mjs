@@ -5,9 +5,11 @@
  * 全部代码比一个前端脚手架的配置还短。面板的意义是"不用开终端就知道它在不在干活"，
  * 不是做一个管理系统——真管理应该去思源里改，那边有编辑器。
  *
- * 只绑 127.0.0.1。不绑 0.0.0.0 是因为它没有鉴权：局域网上任何设备都能读你的记忆库。
+ * 默认只绑 127.0.0.1。绑到别的地址（放公网域名后面）必须同时给 --auth：这个面板
+ * 会显示条目正文和日志，没有鉴权就暴露，等于把记忆库摊在网上。
  */
 import http from "node:http";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import { LOG_PATH } from "../util/config.mjs";
 import { open } from "./jobs.mjs";
@@ -158,7 +160,7 @@ function draw(s) {
 let last = null;
 async function refresh() {
   try {
-    const r = await fetch("/api/state");
+    const r = await fetch("api/state");
     const s = await r.json();
     // 合并不是替换：_hits / _error 是搜索的临时状态，整份 state 覆盖掉的话，
     // 搜索结果和错误提示都活不过一轮刷新。
@@ -176,7 +178,7 @@ $("run").onclick = async () => {
   btn.dataset.busy = "1";
   btn.textContent = "跑着…";
   try {
-    const r = await fetch("/api/run", { method: "POST" });
+    const r = await fetch("api/run", { method: "POST" });
     const j = await r.json();
     if (r.status === 409) btn.textContent = "有轮在跑";
     else btn.textContent = r.ok ? "写完 " + (j.written ?? 0) + " 条" : "失败";
@@ -197,7 +199,7 @@ $("q").onkeydown = async (ev) => {
     delete last._error;
     return draw(last);
   }
-  const r = await fetch("/api/search?q=" + encodeURIComponent(q));
+  const r = await fetch("api/search?q=" + encodeURIComponent(q));
   const j = await r.json().catch(() => ({}));
   // 「后端坏了」和「没有命中」在面板上必须长得不一样：前者要人去看后端。
   if (!r.ok) {
@@ -226,8 +228,9 @@ setInterval(refresh, 5000);
  * 这个请求是不是面板自己发的。
  *
  * 没有 Origin 的是非浏览器客户端（curl、脚本），放行——它们要伪造也拦不住，
- * 而这个服务只绑 127.0.0.1。有 Origin 的就必须是 loopback：跨站页面 POST localhost
- * 是能打进来的（响应读不到，但"跑一轮"这个副作用照样发生）。
+ * 真有鉴权要求时它们照样得过 Basic。有 Origin 的必须是同源（或 loopback）：
+ * 跨站页面 POST 过来是能打进来的（响应读不到，但「跑一轮」这个副作用照样发生）。
+ * 放公网域名后面时，Origin 是那个域名，不能只认 loopback。
  */
 function fromThisPage(req) {
   const site = req.headers["sec-fetch-site"];
@@ -235,11 +238,32 @@ function fromThisPage(req) {
   const origin = req.headers.origin;
   if (!origin) return true;
   try {
-    const host = new URL(origin).hostname;
-    return host === "127.0.0.1" || host === "localhost" || host === "::1";
+    const u = new URL(origin);
+    if (u.host === String(req.headers.host ?? "")) return true;
+    return u.hostname === "127.0.0.1" || u.hostname === "localhost" || u.hostname === "::1";
   } catch {
     return false;
   }
+}
+
+/**
+ * Basic 认证。账号密码从启动参数/环境变量来，不落盘。
+ *
+ * 用摘要再比，长度一致、也不泄露前缀匹配的长度差。没配 auth 时直接放行——
+ * 那种情况只允许绑回环（见 startUi 里的守卫）。
+ */
+function authOk(req, expected) {
+  const m = /^Basic\s+(.+)$/i.exec(String(req.headers.authorization ?? ""));
+  if (!m) return false;
+  let given = "";
+  try {
+    given = Buffer.from(m[1], "base64").toString("utf8");
+  } catch {
+    return false;
+  }
+  const a = createHash("sha256").update(given).digest();
+  const b = createHash("sha256").update(String(expected)).digest();
+  return timingSafeEqual(a, b);
 }
 
 /**
@@ -250,12 +274,15 @@ function fromThisPage(req) {
  * 是同源，响应读得到。Origin 校验挡不住这条路（同源请求根本没有 Origin/跨站标记），
  * 只有 Host 会老老实实写着 `evil.com`。所以 GET 也要查。
  */
-function hostOk(req, boundHost) {
+function hostOk(req, boundHost, allowHosts = []) {
   const raw = String(req.headers.host ?? "");
   // 去掉端口，IPv6 去掉方括号。
   const name = raw.replace(/:\d+$/, "").replace(/^\[|\]$/g, "").toLowerCase();
   if (!name) return false;
   if (name === "127.0.0.1" || name === "localhost" || name === "::1") return true;
+  // 放在反向代理后面时，浏览器敲的是域名，DNS rebinding 那套前提就不成立了，
+  // 由调用方显式列出允许的名字。列进来的名字一律要过鉴权才能读到数据。
+  if (allowHosts.map((x) => String(x).toLowerCase()).includes(name)) return true;
   const bound = String(boundHost ?? "").toLowerCase();
   // 显式绑到别的地址（--host 192.168.x.x）时，浏览器里敲的就是那个地址。
   if (name === bound) return true;
@@ -265,7 +292,14 @@ function hostOk(req, boundHost) {
   return false;
 }
 
-export function startUi({ port = 7787, host = "127.0.0.1", runRound } = {}) {
+export function startUi({ port = 7787, host = "127.0.0.1", allowHosts = [], auth = "", runRound } = {}) {
+  // 绑到非回环地址又不给密码：面板会把条目正文和日志摊在网上。宁可起不来。
+  const loopback = ["127.0.0.1", "localhost", "::1"].includes(String(host));
+  if (!loopback && !auth) {
+    throw new Error(
+      `拒绝启动：面板显示的是记忆库正文，绑到 ${host} 必须同时给账号密码（--auth user:密码，或 MEM_PANEL_AUTH）`
+    );
+  }
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     const json = (code, obj) => {
@@ -274,8 +308,15 @@ export function startUi({ port = 7787, host = "127.0.0.1", runRound } = {}) {
     };
 
     try {
-      if (!hostOk(req, host)) {
-        return json(403, { error: `不认这个 Host（${String(req.headers.host ?? "")}）：面板只服务本机` });
+      if (!hostOk(req, host, allowHosts)) {
+        return json(403, { error: `不认这个 Host（${String(req.headers.host ?? "")}）：用 IP 或 localhost 访问，或启动时加 --allow-host` });
+      }
+      if (auth && !authOk(req, auth)) {
+        res.writeHead(401, {
+          "www-authenticate": 'Basic realm="siyuan-mem", charset="UTF-8"',
+          "content-type": "text/plain; charset=utf-8",
+        });
+        return res.end("需要登录");
       }
       if (req.method === "GET" && url.pathname === "/") {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8" });

@@ -13,6 +13,8 @@ const VALUED = new Set([
   "topic", "days", "status", "project",
   // forget 的三个值参数。漏了它们，`--session abc` 会把 abc 当成块 id 去归档。
   "session", "reason",
+  // 面板放域名后面用：--bind / --allow-host / --auth 都是值参数。
+  "bind", "allow-host", "auth",
 ]);
 
 export function parseArgs(argv) {
