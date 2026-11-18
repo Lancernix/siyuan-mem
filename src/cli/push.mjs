@@ -13,6 +13,7 @@ import { statSync } from "node:fs";
 import { loadConfig, loadPushOffsets, savePushOffsets, offsetsOf, machineId, slicePlan } from "../util/config.mjs";
 import { listSessions } from "../util/harness.mjs";
 import { readLog } from "../util/readers/index.mjs";
+import { ymd } from "../util/ymd.mjs";
 
 /**
  * 按字符数切块。一个会话可能有几千轮，单次请求太大会顶到服务端上限，
@@ -168,7 +169,15 @@ export async function pushOnce({
             harness: log_.harness,
             session_id: log_.sessionId || `log-${Date.now()}`,
             cwd: log_.cwd,
-            date: new Date().toISOString().slice(0, 10),
+            // 会话发生的日期，不是推送的日期。
+            //
+            // 这里原来是 new Date()——谁推的、什么时候推的，就记成谁的日期。2026-11-17
+            // 全量重推 108 个会话，十月的老对话条目日期全被刷成 11-17，模型检索出来
+            // 一看「最早只有 11 月」，以为十月的记忆丢了。内容是好的，标签是假的。
+            //
+            // 优先用这一段最后一条消息的时间；拿不到就退回文件 mtime（append-only 的
+            // 日志，最后一次写入就是最后一句说完的时间）；再拿不到才用当天。
+            date: ymd(chunk.at(-1)?.at ?? s.mtime),
             range: [start, start + chunk.length],
             turns: chunk,
           },

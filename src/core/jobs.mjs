@@ -8,6 +8,7 @@ import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename } from "node:path";
 import { loadConfig, loadOffsets, saveOffsets, offsetsOf, machineId, slicePlan } from "../util/config.mjs";
+import { ymd } from "../util/ymd.mjs";
 import { hasModel } from "../util/llm.mjs";
 import { SiYuan } from "../util/siyuan.mjs";
 import { Store } from "./store.mjs";
@@ -502,6 +503,19 @@ export async function processQueue({
     let skippedHere = 0;
     // 开写之前就已经超预算的，这一场就写完再算——见下面那条注释。
     const overAtWriteStart = !dry && overSession();
+    /**
+     * 条目落在哪一轮，就用那一轮发生的时间。
+     *
+     * 整包只有一个 payload.date（推送时按最后一条消息算的）。一个会话常横跨几天，
+     * 用整包日期会让「最近 N 天」过滤和日期显示一起失真——2026-11-06 那批 985 条
+     * 全记成 11-06，十月的内容看起来像十一月才开始的。
+     * from 是这一段 turns 里的 0-based 下标（见 extract 的 toTurns）。
+     */
+    const sessionTurns = payload.turns ?? payload.events ?? [];
+    const dateOf = (from) => {
+      const at = sessionTurns[Number(from)]?.at ?? sessionTurns.at(-1)?.at;
+      return at ? ymd(at) : (payload.date ?? "");
+    };
     const unjudged = dedupeFailed > 0 && entries.length > 0;
     if (unjudged) {
       sum.unjudged++;
@@ -568,7 +582,7 @@ export async function processQueue({
           {
             source: payload.harness ?? "",
             session: payload.session_id ?? "",
-            date: payload.date ?? "",
+            date: dateOf(e.from),
             machine: payload.machine ?? machineId(),
             project: projectOf(payload.cwd, payload.harness),
             raw: rawPtr,

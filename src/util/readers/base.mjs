@@ -220,6 +220,25 @@ export const DEFAULT_HOOKS = {
   isSubagentFile: () => false,
   roleOf: (m) => ROLE_ALIAS[String(m?.role ?? "").toLowerCase()] ?? null,
   /**
+   * 这条消息发生的时间（毫秒）。
+   *
+   * 条目要按「内容发生在哪一天」记日期，不能按抽取的那天。2026-11-17 全量重推
+   * 108 个会话，十月的老对话条目日期全被刷成 11-17；更早一次更狠，985 条记成 11-06。
+   * 模型检索一看「最早只有 11 月」，就以为十月的记忆没进来——内容在，标签是假的。
+   *
+   * 各家字段不一样（DSH 的 time、Claude 系的 timestamp、别的用 ts/created_at），
+   * 认不出来就返回 null，调用方退回文件 mtime，再不济退回当天。
+   */
+  timeOf: (m, d) => {
+    const v = d?.time ?? d?.timestamp ?? d?.ts ?? d?.createdAt ?? d?.created_at ?? m?.time ?? m?.timestamp;
+    if (typeof v === "number" && Number.isFinite(v)) return v < 1e12 ? v * 1000 : v;
+    if (typeof v === "string") {
+      const t = Date.parse(v);
+      return Number.isFinite(t) ? t : null;
+    }
+    return null;
+  },
+  /**
    * 这条消息该不该丢，丢的话归到哪一类。
    * 返回 null 表示收下；返回 "tool" / "injected" 表示丢，并用于对账归类。
    */
@@ -256,7 +275,7 @@ export function walkMessages(lines, hooks = {}) {
     // 子代理回报：以结论的身份进语料，别当成工具输出扔掉。
     const report = delegationText(m, idToName);
     if (report) {
-      turns.push({ role: "assistant", text: `（子代理回报）${cleanAssistantText(report)}` });
+      turns.push({ role: "assistant", text: `（子代理回报）${cleanAssistantText(report)}`, at: h.timeOf(m, d) });
       continue;
     }
 
@@ -267,7 +286,7 @@ export function walkMessages(lines, hooks = {}) {
     const clean = role === "user" ? cleanUserText(raw) : cleanAssistantText(raw);
     if (!clean) continue;
     if (h.dropKind(m, raw, clean, d)) continue;
-    turns.push({ role, text: clean });
+    turns.push({ role, text: clean, at: h.timeOf(m, d) });
   }
   return { turns, sessionId, cwd };
 }
