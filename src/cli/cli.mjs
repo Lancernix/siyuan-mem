@@ -112,7 +112,19 @@ async function cmdInit(flags) {
 async function cmdStatus() {
   const { cfg, sy, store } = make();
   const version = await sy.version();
-  const stats = await store.stats();
+  /**
+   * 边缘机器（配了 push.to）本地可以没有库：它只负责采集和转发，条目都在中心。
+   * 2026-11-18 把本地那本空的 Harness-Mem 删掉之后，这里会抛「找不到笔记本」，
+   * 整条 status 就废了——明明什么都没坏，只是这台不存条目。
+   */
+  let stats = { current: 0, superseded: 0 };
+  let localMissing = "";
+  try {
+    stats = await store.stats();
+  } catch (e) {
+    if (!cfg.push?.to) throw e;
+    localMissing = String(e.message).split("\n")[0];
+  }
   const svc = lockInfo();
   const svcLine = svc.running
     ? `运行中 pid ${svc.pid}，第 ${svc.round ?? 0} 轮，心跳 ${new Date(svc.at ?? Date.now()).toLocaleTimeString("zh-CN", { hour12: false })}`
@@ -120,7 +132,7 @@ async function cmdStatus() {
       ? `锁是孤的（pid ${svc.pid} 已经不在了，下次启动会自动接管）`
       : "未运行（mem serve 启动它）";
   console.log(`思源         ${cfg.siyuan.baseUrl}  v${version}`);
-  console.log(`笔记本       ${cfg.siyuan.notebook}`);
+  console.log(`笔记本       ${cfg.siyuan.notebook}${localMissing ? `（本地没有：${localMissing.slice(0, 60)}）` : ""}`);
   console.log(`条目         current ${stats.current ?? 0} / superseded ${stats.superseded ?? 0}`);
   // 边缘机器本地库是空的，看到「0 条」容易以为坏了。配置了 push.to 就说清楚：
   // 这台只负责采集和转发，条目都在中心，mem search 查的也是那边。
