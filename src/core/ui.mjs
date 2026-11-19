@@ -18,6 +18,7 @@ import { usageToday, resolveModel, hasModel } from "../util/llm.mjs";
 import { lockInfo, roundStatus } from "./serve.mjs";
 import { searchEntries } from "./search.mjs";
 import { failureText } from "./search-reason.mjs";
+import { listTopics, listEntries } from "./browse.mjs";
 
 /** 队列项只读头部：完整会话可能有几 MB，面板不需要。 */
 function queueItem(file) {
@@ -59,164 +60,40 @@ async function state() {
   };
 }
 
-const PAGE = String.raw`<!doctype html>
-<html lang="zh-CN"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>mem · 思源记忆</title>
-<style>
-  :root{--bg:#0e1013;--panel:#161a20;--line:#252b34;--txt:#dfe4ea;--dim:#8b95a3;--accent:#6ee7b7;--warn:#f5b46b}
-  *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.6 ui-sans-serif,-apple-system,"PingFang SC",system-ui,sans-serif}
-  header{padding:18px 22px 12px;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:14px;align-items:baseline}
-  h1{font-size:15px;margin:0;letter-spacing:.5px;font-weight:600}
-  h1 span{color:var(--dim);font-weight:400;margin-left:8px;font-size:12px}
-  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-left:auto}
-  .chip{border:1px solid var(--line);border-radius:99px;padding:3px 10px;font-size:12px;color:var(--dim)}
-  .chip b{color:var(--txt);font-weight:600;font-variant-numeric:tabular-nums}
-  .chip.ok{border-color:#24503f}.chip.ok b{color:var(--accent)}
-  .chip.bad{border-color:#5a3232}.chip.bad b{color:#f88}
-  main{padding:16px 22px 40px;display:grid;gap:16px;grid-template-columns:1.4fr 1fr;align-items:start}
-  @media(max-width:820px){main{grid-template-columns:1fr}}
-  section{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
-  section h2{font-size:12px;margin:0;padding:10px 14px;border-bottom:1px solid var(--line);color:var(--dim);font-weight:500;letter-spacing:.4px}
-  ul{list-style:none;margin:0;padding:0;max-height:52vh;overflow:auto}
-  li{padding:9px 14px;border-bottom:1px solid #1c2128;display:flex;gap:10px;align-items:flex-start}
-  li:last-child{border-bottom:0}
-  .tag{font-size:11px;color:var(--accent);border:1px solid #24503f;border-radius:5px;padding:0 6px;white-space:nowrap;margin-top:2px}
-  .tag.sup{color:var(--warn);border-color:#5a4a2a}
-  .txt{flex:1;min-width:0}
-  .meta{color:var(--dim);font-size:11px;margin-top:2px;font-variant-numeric:tabular-nums}
-  .empty{color:var(--dim);padding:16px 14px;font-size:13px}
-  .bar{display:flex;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line);align-items:center}
-  input,button{font:inherit;color:var(--txt);background:#0f1318;border:1px solid var(--line);border-radius:7px;padding:6px 10px}
-  input{flex:1;min-width:0}
-  button{cursor:pointer}
-  button:hover{border-color:#3a4553}
-  button.primary{border-color:#24503f;color:var(--accent)}
-  button:disabled{opacity:.5;cursor:default}
-  pre{margin:0;padding:10px 14px 16px;font:11.5px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--dim);max-height:32vh;overflow:auto;white-space:pre-wrap;word-break:break-word}
-</style></head><body>
-<header>
-  <h1>mem<span>思源记忆 · 本地面板</span></h1>
-  <div class="chips" id="chips"></div>
-</header>
-<main>
-  <section>
-    <div class="bar">
-      <input id="q" placeholder="搜记忆（回车，留空回到最近条目）">
-      <button id="run" class="primary">跑一轮</button>
-    </div>
-    <ul id="list"><li class="empty">加载中…</li></ul>
-  </section>
-  <div style="display:grid;gap:16px">
-    <section><h2>队列</h2><ul id="queue"><li class="empty">—</li></ul></section>
-    <section><h2>日志</h2><pre id="log">—</pre></section>
-  </div>
-</main>
-<script>
-const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+/** 前端在 src/ui/：三个静态文件，改完刷新就生效，不用重启。 */
+const UI_DIR = new URL("../ui/", import.meta.url);
 
-function chip(label, value, cls = "") {
-  return '<span class="chip ' + cls + '">' + label + " <b>" + esc(value) + "</b></span>";
-}
+const STATIC = {
+  "/": ["index.html", "text/html; charset=utf-8"],
+  "/index.html": ["index.html", "text/html; charset=utf-8"],
+  "/app.css": ["app.css", "text/css; charset=utf-8"],
+  "/app.js": ["app.js", "text/javascript; charset=utf-8"],
+  "/tokens.css": ["tokens.css", "text/css; charset=utf-8"],
+};
 
-function draw(s) {
-  const online = s.siyuan.version !== "离线";
-  const busy = s.busy && s.busy.running;
-  $("chips").innerHTML = [
-    chip("思源", online ? "v" + s.siyuan.version : "离线", online ? "ok" : "bad"),
-    chip("条目", s.stats.current + " 在用 / " + s.stats.superseded + " 过时 / " + (s.stats.archived ?? 0) + " 归档"),
-    chip("队列", s.queue.length + " 个会话", s.queue.length ? "bad" : "ok"),
-    chip("模型", s.model.configured ? s.model.provider + " / " + s.model.model : "未配置", s.model.configured ? "ok" : "bad"),
-    chip("今日", s.usage.calls ? s.usage.calls + " 次 · " + (s.usage.prompt + s.usage.completion) + " tok" : "无调用"),
-    busy
-      ? chip("正在跑", s.busy.kind + " " + s.busy.seconds + "s", "ok")
-      : chip("调度", s.service?.running ? "第 " + (s.service.round ?? 0) + " 轮" : "单次面板", s.service?.running ? "ok" : ""),
-  ].join("");
-
-  // 有一轮在跑就把按钮灰掉：面板和定时是同一进程里的两条流，同时写会互相踩。
-  const btn = $("run");
-  if (btn && !btn.dataset.busy) {
-    btn.disabled = Boolean(busy);
-    btn.title = busy ? "有一轮正在跑，等它跑完" : "";
-  }
-
-  const rows = s._hits ?? s.entries;
-  $("list").innerHTML = s._error
-    ? '<li class="empty">' + esc(s._error) + "</li>"
-    : rows.length
-    ? rows.map((e) => '<li><span class="tag ' + (e.status === "superseded" ? "sup" : "") + '">' + esc(e.entity || e.type || "-") +
-        '</span><div class="txt">' + esc(e.text) + '<div class="meta">' + esc([e.type, e.status, e.date, e.source, e.id].filter(Boolean).join(" · ")) + "</div></div></li>").join("")
-    : '<li class="empty">' + (s._hits ? "没有命中" : "还没有条目") + "</li>";
-
-  $("queue").innerHTML = s.queue.length
-    ? s.queue.map((q) => '<li><div class="txt">' + esc(q.session || q.file) + '<div class="meta">' + esc([q.harness, q.turns ? q.turns + " 轮" : "", q.file].filter(Boolean).join(" · ")) + "</div></div></li>").join("")
-    : '<li class="empty">空</li>';
-
-  $("log").textContent = s.log.length ? s.log.join("\n") : "还没有日志";
-}
-
-let last = null;
-async function refresh() {
+/**
+ * 吐静态文件。每次请求都读盘——面板是自用的，省一次重启比省一次 IO 值。
+ * 没命中返回 false，交给路由继续往下走。
+ */
+function serveStatic(pathname, res) {
+  const hit = STATIC[pathname];
+  if (!hit) return false;
+  let buf;
   try {
-    const r = await fetch("api/state");
-    const s = await r.json();
-    // 合并不是替换：_hits / _error 是搜索的临时状态，整份 state 覆盖掉的话，
-    // 搜索结果和错误提示都活不过一轮刷新。
-    last = { ...last, ...s };
-    if (!document.activeElement || document.activeElement.id !== "q") draw(last);
-    else $("chips") && draw(last);
-  } catch (e) {
-    $("chips").innerHTML = '<span class="chip bad">面板连不上 <b>' + esc(e.message) + "</b></span>";
-  }
-}
-
-$("run").onclick = async () => {
-  const btn = $("run");
-  btn.disabled = true;
-  btn.dataset.busy = "1";
-  btn.textContent = "跑着…";
-  try {
-    const r = await fetch("api/run", { method: "POST" });
-    const j = await r.json();
-    if (r.status === 409) btn.textContent = "有轮在跑";
-    else btn.textContent = r.ok ? "写完 " + (j.written ?? 0) + " 条" : "失败";
+    buf = readFileSync(new URL(hit[0], UI_DIR));
   } catch {
-    btn.textContent = "失败";
-  } finally {
-    delete btn.dataset.busy;
+    res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+    res.end(`前端文件缺失：src/ui/${hit[0]}`);
+    return true;
   }
-  await refresh();
-  setTimeout(() => { btn.disabled = false; btn.textContent = "跑一轮"; }, 2500);
-};
-
-$("q").onkeydown = async (ev) => {
-  if (ev.key !== "Enter") return;
-  const q = $("q").value.trim();
-  if (!q) {
-    delete last._hits;
-    delete last._error;
-    return draw(last);
-  }
-  const r = await fetch("api/search?q=" + encodeURIComponent(q));
-  const j = await r.json().catch(() => ({}));
-  // 「后端坏了」和「没有命中」在面板上必须长得不一样：前者要人去看后端。
-  if (!r.ok) {
-    delete last._hits;
-    last = { ...last, _error: j.error ?? "检索失败（HTTP " + r.status + "）" };
-    return draw(last);
-  }
-  // 要写回 last：refresh() 每 5 秒用 /api/state 整体覆盖一次，只放在临时对象里
-  // 的话，搜索结果活不到 5 秒就被"最近条目"顶掉。
-  last = { ...last, _error: "", _hits: j.hits ?? [] };
-  draw(last);
-};
-
-refresh();
-setInterval(refresh, 5000);
-</script>
-</body></html>`;
+  res.writeHead(200, {
+    "content-type": hit[1],
+    // 自用面板不让浏览器缓存：改完前端刷新就该看到新的。
+    "cache-control": "no-store",
+  });
+  res.end(buf);
+  return true;
+}
 
 /**
  * @param {object} opts
@@ -318,12 +195,28 @@ export function startUi({ port = 7787, host = "127.0.0.1", allowHosts = [], auth
         });
         return res.end("需要登录");
       }
-      if (req.method === "GET" && url.pathname === "/") {
-        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-        return res.end(PAGE);
-      }
+      if (req.method === "GET" && serveStatic(url.pathname, res)) return;
       if (req.method === "GET" && url.pathname === "/api/state") {
         return json(200, await state());
+      }
+      if (req.method === "GET" && url.pathname === "/api/topics") {
+        const q = url.searchParams.get("q") ?? "";
+        const limit = Number(url.searchParams.get("limit")) || 200;
+        const r = await listTopics({ q, limit, source: "ui" });
+        if (r.failed) {
+          return json(503, { error: `列话题失败：${failureText(r.reason, r.detail)}`, reason: r.reason });
+        }
+        return json(200, r);
+      }
+      if (req.method === "GET" && url.pathname === "/api/entries") {
+        const topic = url.searchParams.get("topic") ?? "";
+        if (!topic) return json(400, { error: "要给 topic" });
+        const limit = Number(url.searchParams.get("limit")) || 100;
+        const r = await listEntries({ topic, limit, source: "ui" });
+        if (r.failed) {
+          return json(503, { error: `翻条目失败：${failureText(r.reason, r.detail)}`, reason: r.reason });
+        }
+        return json(200, r);
       }
       if (req.method === "GET" && url.pathname === "/api/search") {
         const q = url.searchParams.get("q") ?? "";

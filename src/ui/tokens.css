@@ -1,0 +1,408 @@
+/* ============================================================
+ * mem 面板设计令牌
+ *
+ * 两层开关：
+ *   <html data-brand="copper|vermilion|blue|moss" data-theme="light|dark">
+ * data-brand 换色相（品牌阶 + 同色相的中性阶），data-theme 换明暗。
+ * 两者正交，4 色 × 2 明暗 = 8 套，组件样式只写一份。
+ *
+ * 色阶由 OKLCH 推出来（scripts/gen-tokens.mjs），不要手改颜色字面量。
+ * ============================================================ */
+
+/* ---------- 1. 原始色阶：按品牌分组 ---------- */
+
+
+/* 品牌：铜金 */
+[data-brand="copper"] {
+  --n0: #ffffff;  /* oklch(1.000 0.000 45) */
+  --n25: #fbf8f7;  /* oklch(0.981 0.003 45) */
+  --n50: #f6f3f1;  /* oklch(0.966 0.004 45) */
+  --n100: #eeeae8;  /* oklch(0.940 0.005 45) */
+  --n150: #e7e2e0;  /* oklch(0.915 0.006 45) */
+  --n200: #ddd8d5;  /* oklch(0.885 0.007 45) */
+  --n300: #c7c1be;  /* oklch(0.815 0.008 45) */
+  --n400: #aaa3a0;  /* oklch(0.720 0.009 45) */
+  --n500: #8a8380;  /* oklch(0.615 0.010 45) */
+  --n600: #6e6764;  /* oklch(0.520 0.010 45) */
+  --n700: #534d4a;  /* oklch(0.425 0.010 45) */
+  --n800: #3b3533;  /* oklch(0.335 0.009 45) */
+  --n900: #25201e;  /* oklch(0.250 0.008 45) */
+  --n950: #13100e;  /* oklch(0.175 0.006 45) */
+  --n1000: #070505;  /* oklch(0.120 0.004 45) */
+  --b50: #fef3eb;  /* oklch(0.970 0.016 55) */
+  --b100: #fbe3d3;  /* oklch(0.930 0.034 55) */
+  --b200: #f7ceb4;  /* oklch(0.880 0.058 55) */
+  --b300: #eeae82;  /* oklch(0.800 0.095 55) */
+  --b400: #dc8748;  /* oklch(0.700 0.130 55) */
+  --b500: #c0640c;  /* oklch(0.600 0.145 55) */
+  --b600: #a45300;  /* oklch(0.530 0.145 55) */
+  --b700: #834100;  /* oklch(0.450 0.125 55) */
+  --b800: #673200;  /* oklch(0.380 0.100 55) */
+  --b900: #4b2504;  /* oklch(0.310 0.072 55) */
+  --b950: #331905;  /* oklch(0.245 0.052 55) */
+}
+
+/* 品牌：朱砂 */
+[data-brand="vermilion"] {
+  --n0: #ffffff;  /* oklch(1.000 0.000 25) */
+  --n25: #fbf8f8;  /* oklch(0.981 0.003 25) */
+  --n50: #f6f3f2;  /* oklch(0.966 0.004 25) */
+  --n100: #eeeae9;  /* oklch(0.940 0.005 25) */
+  --n150: #e7e1e1;  /* oklch(0.915 0.006 25) */
+  --n200: #ded7d7;  /* oklch(0.885 0.007 25) */
+  --n300: #c8c1c0;  /* oklch(0.815 0.008 25) */
+  --n400: #aaa2a2;  /* oklch(0.720 0.009 25) */
+  --n500: #8b8282;  /* oklch(0.615 0.010 25) */
+  --n600: #6f6766;  /* oklch(0.520 0.010 25) */
+  --n700: #544c4c;  /* oklch(0.425 0.010 25) */
+  --n800: #3b3534;  /* oklch(0.335 0.009 25) */
+  --n900: #252020;  /* oklch(0.250 0.008 25) */
+  --n950: #13100f;  /* oklch(0.175 0.006 25) */
+  --n1000: #070505;  /* oklch(0.120 0.004 25) */
+  --b50: #fff2f0;  /* oklch(0.970 0.016 28) */
+  --b100: #fee0db;  /* oklch(0.930 0.034 28) */
+  --b200: #fccac2;  /* oklch(0.880 0.058 28) */
+  --b300: #f5a69c;  /* oklch(0.800 0.095 28) */
+  --b400: #e47d70;  /* oklch(0.700 0.130 28) */
+  --b500: #c8584d;  /* oklch(0.600 0.145 28) */
+  --b600: #b04339;  /* oklch(0.530 0.145 28) */
+  --b700: #8e332b;  /* oklch(0.450 0.125 28) */
+  --b800: #6e2922;  /* oklch(0.380 0.100 28) */
+  --b900: #4f201b;  /* oklch(0.310 0.072 28) */
+  --b950: #351612;  /* oklch(0.245 0.052 28) */
+}
+
+/* 品牌：蓝 */
+[data-brand="blue"] {
+  --n0: #ffffff;  /* oklch(1.000 0.000 255) */
+  --n25: #f7f9fb;  /* oklch(0.981 0.003 255) */
+  --n50: #f2f4f6;  /* oklch(0.966 0.004 255) */
+  --n100: #e9ebee;  /* oklch(0.940 0.005 255) */
+  --n150: #e0e3e7;  /* oklch(0.915 0.006 255) */
+  --n200: #d6d9de;  /* oklch(0.885 0.007 255) */
+  --n300: #bfc3c8;  /* oklch(0.815 0.008 255) */
+  --n400: #a1a5aa;  /* oklch(0.720 0.009 255) */
+  --n500: #81858b;  /* oklch(0.615 0.010 255) */
+  --n600: #65696f;  /* oklch(0.520 0.010 255) */
+  --n700: #4b4f54;  /* oklch(0.425 0.010 255) */
+  --n800: #34373b;  /* oklch(0.335 0.009 255) */
+  --n900: #1f2225;  /* oklch(0.250 0.008 255) */
+  --n950: #0f1113;  /* oklch(0.175 0.006 255) */
+  --n1000: #050607;  /* oklch(0.120 0.004 255) */
+  --b50: #eef6ff;  /* oklch(0.970 0.016 250) · 蓝 */
+  --b100: #d7eafe;  /* oklch(0.930 0.034 250) · 蓝 */
+  --b200: #bbdbfd;  /* oklch(0.880 0.058 250) · 蓝 */
+  --b300: #8ec3f9;  /* oklch(0.800 0.095 250) · 蓝 */
+  --b400: #5aa3ec;  /* oklch(0.700 0.130 250) · 蓝 */
+  --b500: #2d84d3;  /* oklch(0.600 0.145 250) · 蓝 */
+  --b600: #0d6ebb;  /* oklch(0.530 0.145 250) · 蓝 */
+  --b700: #045797;  /* oklch(0.450 0.125 250) · 蓝 */
+  --b800: #0a4475;  /* oklch(0.380 0.100 250) · 蓝 */
+  --b900: #0e3253;  /* oklch(0.310 0.072 250) · 蓝 */
+  --b950: #0a2238;  /* oklch(0.245 0.052 250) · 蓝 */
+}
+
+/* 品牌：苔绿 */
+[data-brand="moss"] {
+  --n0: #ffffff;  /* oklch(1.000 0.000 255) */
+  --n25: #f7f9fb;  /* oklch(0.981 0.003 255) */
+  --n50: #f2f4f6;  /* oklch(0.966 0.004 255) */
+  --n100: #e9ebee;  /* oklch(0.940 0.005 255) */
+  --n150: #e0e3e7;  /* oklch(0.915 0.006 255) */
+  --n200: #d6d9de;  /* oklch(0.885 0.007 255) */
+  --n300: #bfc3c8;  /* oklch(0.815 0.008 255) */
+  --n400: #a1a5aa;  /* oklch(0.720 0.009 255) */
+  --n500: #81858b;  /* oklch(0.615 0.010 255) */
+  --n600: #65696f;  /* oklch(0.520 0.010 255) */
+  --n700: #4b4f54;  /* oklch(0.425 0.010 255) */
+  --n800: #34373b;  /* oklch(0.335 0.009 255) */
+  --n900: #1f2225;  /* oklch(0.250 0.008 255) */
+  --n950: #0f1113;  /* oklch(0.175 0.006 255) */
+  --n1000: #050607;  /* oklch(0.120 0.004 255) */
+  --b50: #f1f7f0;  /* oklch(0.970 0.012 140) · 苔绿 */
+  --b100: #e0ecdd;  /* oklch(0.930 0.024 140) · 苔绿 */
+  --b200: #cadec6;  /* oklch(0.880 0.040 140) · 苔绿 */
+  --b300: #a9c8a2;  /* oklch(0.800 0.062 140) · 苔绿 */
+  --b400: #96be8e;  /* oklch(0.760 0.080 140) · 苔绿 */
+  --b500: #75a06c;  /* oklch(0.660 0.088 140) · 苔绿 */
+  --b600: #5e8756;  /* oklch(0.580 0.086 140) · 苔绿 */
+  --b700: #496b42;  /* oklch(0.490 0.075 140) · 苔绿 */
+  --b800: #385332;  /* oklch(0.410 0.062 140) · 苔绿 */
+  --b900: #293b24;  /* oklch(0.330 0.046 140) · 苔绿 */
+  --b950: #1b2818;  /* oklch(0.260 0.034 140) · 苔绿 */
+}
+
+
+/* ---------- 2. 语义令牌：浅色主题（默认） ---------- */
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+
+  /* 平面：4 级背景，靠明度差分区，不靠阴影 */
+  --bg:            var(--n25);   /* 页面底 */
+  --bg-subtle:     var(--n50);   /* 次区 / 表头 / 条纹 */
+  --bg-muted:      var(--n100);  /* 输入框 / 代码块 */
+  --surface:       var(--n0);    /* 卡片 */
+  --surface-hover: var(--n50);
+  --surface-active:var(--n100);
+
+  /* 文字：3 级，必须同时使用才有层次 */
+  --text-1: var(--n950);   /* 标题、关键数字 */
+  --text-2: var(--n700);   /* 正文 */
+  --text-3: var(--n600);   /* 次要说明 */
+  --text-4: var(--n500);   /* 时间戳、占位符 */
+  --text-on-brand: #ffffff;
+
+  /* 边界 */
+  --border:        rgba(0,0,0,0.08);
+  --border-strong: rgba(0,0,0,0.16);
+  --border-subtle: rgba(0,0,0,0.05);
+  --ring:          #cf5604;  /* focus 环 */
+
+  /* 品牌映射 */
+  --brand:        var(--b600);
+  --brand-hover:  var(--b700);
+  --brand-subtle: var(--b50);
+  --brand-border: var(--b200);
+  --brand-fg:     var(--b700);
+}
+
+/* ---------- 3. 语义令牌：深色主题 ----------
+ * 深色不是浅色反色：① 不用纯黑 ② 阴影在深色上几乎不可见，改用「表面亮度递进 + 顶部 1px 高光」
+ * ③ 品牌色要提亮一档，否则在深底上发闷
+ */
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* 深色面独立标定，不取中性阶倒数 —— 深色不是浅色的镜像 */
+  --bg:            #14110f;   /* L .180 近黑而非纯黑，久看不刺眼 */
+  --bg-subtle:     #1a1615;   /* L .205 */
+  --bg-muted:      #211d1b;   /* L .235 */
+  --surface:       #1f1b19;   /* L .225 卡片比页面亮 —— 靠亮度递进而非阴影 */
+  --surface-hover: #292422;   /* L .265 */
+  --surface-active:#322c2a;   /* L .300 */
+
+  --text-1: #f6f4f3;   /* 微冷白，不用纯白（纯白在深底上会发光晕） */
+  --text-2: #c2bcb9;
+  --text-3: #9d9794;
+  --text-4: #7e7774;
+
+  /* 深色下品牌色是「亮」的（--b400），所以按钮上的文字必须是暗色。
+   * 若沿用白字，白 on 亮蓝只有 2.7:1，直接不合格。
+   * 铁律：on-brand 文字色由「品牌色本身的明度」决定，不是由「主题的明暗」决定。 */
+  --text-on-brand: #0b0d10;
+
+  --border:        rgba(255,255,255,0.09);
+  --border-strong: rgba(255,255,255,0.18);
+  --border-subtle: rgba(255,255,255,0.05);
+  --ring:          #e97c48;
+
+  --brand:        var(--b400);   /* 深色下用更亮的一档 */
+  --brand-hover:  var(--b300);
+  --brand-subtle: #391a0b;
+  --brand-border: #622b0d;
+  --brand-fg:     var(--b300);
+}
+
+/* ---------- 4. 非色彩令牌（双主题共用） ---------- */
+:root {
+  /* 字阶 —— 面板专用，上限 36px（不要用文档那套 48~72px） */
+  --fs-2xs: 11px;  /* 表格辅助、角标 */
+  --fs-xs:  12px;  /* 标签、时间戳 */
+  --fs-sm:  13px;  /* 密集表格、次要文本 */
+  --fs-md:  14px;  /* 正文基准 */
+  --fs-lg:  16px;  /* 卡片标题、输入框 */
+  --fs-xl:  18px;  /* 区块标题 */
+  --fs-2xl: 22px;  /* 页面标题 */
+  --fs-3xl: 28px;  /* KPI 数字 */
+  --fs-4xl: 36px;  /* 大屏主 KPI（上限） */
+
+  /* 行高 —— 中文比英文需要更大行高 */
+  --lh-tight:  1.2;   /* 大字号数字、标题 */
+  --lh-snug:   1.45;  /* 控件、表格单元格 */
+  --lh-normal: 1.6;   /* UI 正文 */
+  --lh-relaxed:1.75;  /* 中文长段落 */
+
+  /* 字距 —— 中文一律 0，只有英文/数字大字号才用负字距 */
+  --ls-tight:   -0.02em;
+  --ls-snug:    -0.01em;
+  --ls-normal:  0;
+  --ls-wide:    0.01em;   /* 小号大写英文标签 */
+  --ls-wider:   0.06em;   /* 全大写 eyebrow */
+
+  /* 字重 —— 中文实际可用 400 / 500 / 600 / 700 */
+  --fw-regular: 400;
+  --fw-medium:  500;
+  --fw-semi:    600;
+  --fw-bold:    700;
+
+  /* 间距 —— 4px 网格（面板比文档密，基准取 4 而非 8） */
+  --sp-0:  0;
+  --sp-1:  4px;
+  --sp-2:  8px;
+  --sp-3:  12px;
+  --sp-4:  16px;
+  --sp-5:  20px;
+  --sp-6:  24px;
+  --sp-8:  32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+  --sp-16: 64px;
+
+  /* 圆角 —— 同页不超过 3 档 */
+  --r-xs:   4px;
+  --r-sm:   6px;   /* 控件 */
+  --r-md:   8px;   /* 卡片 */
+  --r-lg:   12px;  /* 面板、模态 */
+  --r-xl:   16px;
+  --r-full: 9999px;
+
+  /* 控件尺寸 —— 触控最小 32（桌面）/ 44（触控） */
+  --ctl-xs: 24px;
+  --ctl-sm: 28px;
+  --ctl-md: 32px;
+  --ctl-lg: 40px;
+  --row-compact:  36px;  /* 表格密度：紧凑 */
+  --row-default:  44px;  /* 表格密度：标准 */
+  --row-relaxed:  52px;  /* 表格密度：宽松 */
+
+  /* 布局 */
+  --sidebar-w: 232px;
+  --topbar-h:  56px;
+  --content-max: 1440px;
+
+  /* 层级刻度 —— 只准取这些值，禁止 9999 */
+  --z-below:   -1;
+  --z-base:     0;
+  --z-raised:   10;   /* 卡片浮起 */
+  --z-sticky:   100;  /* 粘性表头 / 工具条 */
+  --z-dropdown: 200;
+  --z-overlay:  300;  /* 遮罩 */
+  --z-drawer:   400;
+  --z-modal:    500;
+  --z-popover:  600;  /* 模态内的浮层 */
+  --z-toast:    700;
+  --z-tooltip:  800;
+
+  /* 动效 —— 面板只做状态反馈 + 出入场 + 加载，没有第四类 */
+  --dur-instant: 80ms;
+  --dur-fast:    150ms;
+  --dur-base:    220ms;
+  --dur-slow:    320ms;
+  --ease-out:    cubic-bezier(0.2, 0, 0, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-spring: cubic-bezier(0.34, 1.3, 0.64, 1);
+}
+
+/* ---------- 5. 高程全息系统（阴影 + 平面 + 高光，三件套） ----------
+ * 浅色靠阴影，深色靠表面亮度 + 顶部高光。
+ * 铁律：只有「浮在别的东西之上」的元素才给高程。平级分区用间距/边框。
+ */
+:root, [data-theme="light"] {
+  --e1: 0 1px 2px rgba(16,24,40,.05), 0 1px 1px rgba(16,24,40,.04);
+  --e2: 0 2px 4px -1px rgba(16,24,40,.06), 0 4px 10px -2px rgba(16,24,40,.08);
+  --e3: 0 4px 8px -2px rgba(16,24,40,.08), 0 12px 24px -4px rgba(16,24,40,.10);
+  --e4: 0 8px 16px -4px rgba(16,24,40,.10), 0 24px 40px -8px rgba(16,24,40,.14);
+  --e5: 0 12px 24px -6px rgba(16,24,40,.12), 0 40px 64px -12px rgba(16,24,40,.18);
+}
+[data-theme="dark"] {
+  --e1: 0 1px 2px rgba(0,0,0,.40), inset 0 1px 0 rgba(255,255,255,.04);
+  --e2: 0 2px 6px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.05);
+  --e3: 0 6px 16px rgba(0,0,0,.50), inset 0 1px 0 rgba(255,255,255,.06);
+  --e4: 0 12px 32px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.07);
+  --e5: 0 24px 56px rgba(0,0,0,.60), inset 0 1px 0 rgba(255,255,255,.08);
+}
+
+/* ---------- 6. 图表色板（8 序列，色相均匀、明度统一） ---------- */
+:root {
+  --chart-1: #cb6532;  --chart-2: #a48200;
+  --chart-3: #5e9936;  --chart-4: #009c89;
+  --chart-5: #0094bb;  --chart-6: #657fdd;
+  --chart-7: #a768c1;  --chart-8: #ca5c83;
+  --grid-line: rgba(0,0,0,0.06);
+  --axis-text: var(--n600);
+}
+[data-theme="dark"] {
+  --chart-1: #e98759;  --chart-2: #c5a029;
+  --chart-3: #7fb75d;  --chart-4: #00bfa8;
+  --chart-5: #0bb5e4;  --chart-6: #849ff9;
+  --chart-7: #c489de;  --chart-8: #e87ea1;
+  --grid-line: rgba(255,255,255,0.08);
+  --axis-text: var(--n400);
+}
+
+/* ---------- 7. 密度档位 ----------
+ * 用 <body data-density="compact|cozy|spacious"> 切换。
+ * 意义在于：需求方说「太挤了」时，改的是一个属性，而不是 20 处 padding。
+ */
+:root, [data-density="cozy"] {
+  --row-h: var(--row-default);
+}
+[data-density="compact"] {
+  --row-h: var(--row-compact);
+  --sp-3: 8px;   /* 12 → 8 */
+  --sp-4: 12px;  /* 16 → 12 */
+  --sp-5: 16px;  /* 20 → 16 */
+  --sp-6: 16px;  /* 24 → 16 */
+  --fs-md: 13px; /* 正文降一档 */
+}
+[data-density="spacious"] {
+  --row-h: var(--row-relaxed);
+  --sp-4: 20px;  /* 16 → 20 */
+  --sp-5: 24px;  /* 20 → 24 */
+  --sp-6: 32px;  /* 24 → 32 */
+}
+
+/* ---------- 8. 全局基线 ---------- */
+*, *::before, *::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text-2);
+  font-size: var(--fs-md);
+  line-height: var(--lh-normal);
+  letter-spacing: var(--ls-normal);   /* 中文不做字距 */
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+               "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* 数字等宽 —— 表格与 KPI 必须加，否则数字跳动、列不对齐 */
+.num, td.num, .kpi-value, .tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1, "zero" 1;
+}
+
+/* 焦点环 —— 不许 outline:none 抹掉 */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+/* 尊重系统的减少动效设置 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* 滚动条 —— 细、低调，不抢注意力 */
+* { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: var(--r-full);
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--n400); background-clip: content-box; }
+::-webkit-scrollbar-track { background: transparent; }

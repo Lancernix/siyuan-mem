@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN" data-brand="copper" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>mem · 思源记忆</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><b>mem</b><span>思源记忆</span></div>
+
+  <label class="search" role="search">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+    <input id="q" type="search" placeholder="搜索条目、话题、会话" autocomplete="off" spellcheck="false">
+    <kbd>⌘K</kbd>
+  </label>
+
+  <div class="right">
+    <span class="status" id="status"><i class="dot idle"></i><span>读取中…</span></span>
+    <span class="count-pill" id="counts">—</span>
+
+    <div class="swatches" role="group" aria-label="主题色">
+      <button class="sw" data-brand="copper" aria-label="铜金"></button>
+      <button class="sw" data-brand="vermilion" aria-label="朱砂"></button>
+      <button class="sw" data-brand="blue" aria-label="蓝"></button>
+      <button class="sw" data-brand="moss" aria-label="苔绿"></button>
+    </div>
+    <button class="icon-btn" id="theme" aria-label="切换明暗">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+  <nav class="pane" aria-label="话题">
+    <div class="nav-tabs" role="tablist">
+      <button role="tab" aria-selected="true" data-view="topics">话题</button>
+      <button role="tab" aria-selected="false" data-view="sessions" disabled title="还没做">会话</button>
+      <button role="tab" aria-selected="false" data-view="timeline" disabled title="还没做">时间线</button>
+    </div>
+    <div class="nav-meta"><span id="topic-count">—</span><span>按条目数</span></div>
+    <ul class="list" id="topics"><li class="empty">读取中…</li></ul>
+  </nav>
+
+  <main class="pane" aria-label="条目">
+    <div class="flow-head">
+      <h2 id="flow-title">全部条目</h2>
+      <span class="sub" id="flow-sub"></span>
+      <div class="chips" id="chips"></div>
+    </div>
+    <ul class="flow" id="flow"><li class="empty">读取中…</li></ul>
+  </main>
+
+  <aside class="pane detail" id="detail" aria-label="详情">
+    <p class="empty">选一条看详情</p>
+  </aside>
+</div>
+
+<footer class="worker" id="worker">
+  <span class="grp"><i class="dot idle" id="w-dot"></i><span id="w-state">读取中…</span></span>
+  <span class="grp">队列 <b class="num" id="w-queue">0</b></span>
+  <span class="grp">今日 <b class="num" id="w-usage">0</b> 次调用</span>
+  <span class="grp" id="w-model">—</span>
+  <span class="spacer"></span>
+  <span class="grp" id="w-last">—</span>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
