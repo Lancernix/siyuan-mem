@@ -207,7 +207,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .list { list-style: none; margin: 0; padding: var(--sp-1) var(--sp-2) var(--sp-4); }
 .list li {
   display: flex; align-items: center; gap: var(--sp-2);
-  height: var(--row-h); padding: 0 var(--sp-2);
+  height: var(--row-h); padding: 0 var(--sp-2); overflow: hidden;
   border-radius: var(--r-sm); position: relative; cursor: pointer;
   transition: background var(--dur-fast) var(--ease-out);
 }
@@ -217,10 +217,14 @@ body.resizing { cursor: col-resize; user-select: none; }
   content: ""; position: absolute; left: -2px; top: 8px; bottom: 8px;
   width: 2px; border-radius: var(--r-full); background: var(--brand);
 }
-.list .name { font-size: var(--fs-sm); color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list .name {
+  flex: 1; min-width: 0;
+  font-size: var(--fs-sm); color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .list li[aria-current="true"] .name { color: var(--text-1); font-weight: var(--fw-medium); }
-.list .date { margin-left: auto; font-size: var(--fs-2xs); color: var(--text-4); }
-.list .n { font-size: var(--fs-2xs); color: var(--text-4); min-width: 20px; text-align: right; }
+.list .date { flex: none; margin-left: auto; font-size: var(--fs-2xs); color: var(--text-4); white-space: nowrap; }
+.list .n { flex: none; font-size: var(--fs-2xs); color: var(--text-4); min-width: 20px; text-align: right; white-space: nowrap; }
 .list li[aria-current="true"] .n { color: var(--brand-fg); }
 
 /* 中：条目 */
@@ -359,7 +363,9 @@ body.resizing { cursor: col-resize; user-select: none; }
   z-index: var(--z-overlay);
 }
 .settings {
-  position: fixed; right: 0; top: 0; bottom: 0; width: 480px;
+  position: fixed; right: 0; top: 0; bottom: 0;
+  /* 默认占屏宽 40%，但再窄也不能小于 480px——表单挤到看不全内容就没意义了 */
+  width: max(480px, 40vw);
   display: grid; grid-template-rows: 44px minmax(0, 1fr);
   background: var(--bg-subtle); border-left: 1px solid var(--border-strong);
   box-shadow: var(--shadow-float, 0 8px 28px rgba(0, 0, 0, 0.42));

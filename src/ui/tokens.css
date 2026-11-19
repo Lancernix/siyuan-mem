@@ -40,6 +40,9 @@
   --b800: #673200;  /* oklch(0.380 0.100 55) */
   --b900: #4b2504;  /* oklch(0.310 0.072 55) */
   --b950: #331905;  /* oklch(0.245 0.052 55) */
+  /* 深色下的选中底色与边框，按品牌单独标定 */
+  --brand-subtle-dark: #391a0b;
+  --brand-border-dark: #622b0d;
 }
 
 /* 品牌：朱砂 */
@@ -70,6 +73,9 @@
   --b800: #6e2922;  /* oklch(0.380 0.100 28) */
   --b900: #4f201b;  /* oklch(0.310 0.072 28) */
   --b950: #351612;  /* oklch(0.245 0.052 28) */
+  /* 深色下的选中底色与边框，按品牌单独标定 */
+  --brand-subtle-dark: #3b1816;
+  --brand-border-dark: #642724;
 }
 
 /* 品牌：蓝 */
@@ -100,6 +106,9 @@
   --b800: #0a4475;  /* oklch(0.380 0.100 250) · 蓝 */
   --b900: #0e3253;  /* oklch(0.310 0.072 250) · 蓝 */
   --b950: #0a2238;  /* oklch(0.245 0.052 250) · 蓝 */
+  /* 深色下的选中底色与边框，按品牌单独标定 */
+  --brand-subtle-dark: #0a233b;
+  --brand-border-dark: #0e375c;
 }
 
 /* 品牌：苔绿 */
@@ -130,6 +139,9 @@
   --b800: #385332;  /* oklch(0.410 0.062 140) · 苔绿 */
   --b900: #293b24;  /* oklch(0.330 0.046 140) · 苔绿 */
   --b950: #1b2818;  /* oklch(0.260 0.034 140) · 苔绿 */
+  /* 深色下的选中底色与边框，按品牌单独标定 */
+  --brand-subtle-dark: #182815;
+  --brand-border-dark: #273e22;
 }
 
 
@@ -157,7 +169,7 @@
   --border:        rgba(0,0,0,0.08);
   --border-strong: rgba(0,0,0,0.16);
   --border-subtle: rgba(0,0,0,0.05);
-  --ring:          #cf5604;  /* focus 环 */
+  --ring:          var(--b600);  /* focus 环：跟随品牌色 */
 
   /* 品牌映射 */
   --brand:        var(--b600);
@@ -195,12 +207,12 @@
   --border:        rgba(255,255,255,0.09);
   --border-strong: rgba(255,255,255,0.18);
   --border-subtle: rgba(255,255,255,0.05);
-  --ring:          #e97c48;
+  --ring:          var(--b400);
 
   --brand:        var(--b400);   /* 深色下用更亮的一档 */
   --brand-hover:  var(--b300);
-  --brand-subtle: #391a0b;
-  --brand-border: #622b0d;
+  --brand-subtle: var(--brand-subtle-dark);
+  --brand-border: var(--brand-border-dark);
   --brand-fg:     var(--b300);
 }
 
