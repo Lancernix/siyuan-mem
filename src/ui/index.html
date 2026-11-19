@@ -56,7 +56,13 @@
       <button role="tab" aria-selected="false" data-view="sessions">会话</button>
       <button role="tab" aria-selected="false" data-view="timeline" disabled title="还没做">时间线</button>
     </div>
-    <div class="nav-meta"><span id="topic-count">—</span><span>按条目数</span></div>
+    <div class="nav-meta">
+      <span id="topic-count">—</span>
+      <select id="sort" aria-label="排序方式">
+        <option value="count">按条目数</option>
+        <option value="last">按时间</option>
+      </select>
+    </div>
     <ul class="list" id="topics"><li class="empty">读取中…</li></ul>
   </nav>
 

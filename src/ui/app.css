@@ -176,7 +176,12 @@ body.resizing { cursor: col-resize; user-select: none; }
 .pane { min-width: 0; overflow: auto; }
 /* 分隔线交给 .handle，pane 自己不加：两个都加会出现 2px 的双线 */
 
-.nav-tabs { display: flex; gap: var(--sp-4); padding: var(--sp-3) var(--sp-4) 0; border-bottom: 1px solid var(--border); }
+.nav-tabs {
+  display: flex; gap: var(--sp-4); padding: var(--sp-3) var(--sp-4) 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  position: sticky; top: 0; z-index: var(--z-sticky);
+}
 .nav-tabs button {
   padding: 0 0 var(--sp-2); font-size: var(--fs-sm); color: var(--text-3);
   border-bottom: 2px solid transparent; margin-bottom: -1px;
@@ -186,6 +191,13 @@ body.resizing { cursor: col-resize; user-select: none; }
 .nav-tabs button[aria-selected="true"] { color: var(--text-1); border-bottom-color: var(--brand); }
 
 .nav-meta { padding: var(--sp-2) var(--sp-4); font-size: var(--fs-2xs); color: var(--text-4); display: flex; justify-content: space-between; }
+.nav-meta select {
+  font: inherit; font-size: var(--fs-2xs); color: var(--text-3);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-xs); padding: 0 var(--sp-1);
+  cursor: pointer;
+}
+.nav-meta select:hover { color: var(--text-1); border-color: var(--border-strong); }
 
 .list { list-style: none; margin: 0; padding: var(--sp-1) var(--sp-2) var(--sp-4); }
 .list li {
@@ -289,9 +301,11 @@ body.resizing { cursor: col-resize; user-select: none; }
 }
 @keyframes blink { 0%, 100% { opacity: 0.25; transform: scale(0.85); } 50% { opacity: 1; transform: scale(1); } }
 
-.nav-loading {
-  height: 220px; display: grid; place-items: center; list-style: none;
+.list.is-loading {
+  display: grid; place-items: center;
+  height: 100%; padding: 0;
 }
+.list.is-loading .spinner { margin: auto; }
 .spinner {
   width: 22px; height: 22px; border-radius: var(--r-full);
   border: 2px solid var(--border-strong);

@@ -33,6 +33,8 @@ const S = {
   notice: "",
   /** 当前浏览维度：话题 / 会话（时间线还没做） */
   mode: "topics",
+  /** 目录排序：按条目数 / 按最近时间 */
+  sort: "count",
   sessions: [],
   session: "",
 };
@@ -149,19 +151,31 @@ function wireHandles() {
 }
 
 /* ---------- 渲染 ---------- */
+function sorted(rows) {
+  const cp = [...(rows ?? [])];
+  if (S.sort === "last") {
+    return cp.sort((a, b) => String(b.last ?? "").localeCompare(String(a.last ?? "")) || (b.count ?? 0) - (a.count ?? 0));
+  }
+  return cp.sort((a, b) => (b.count ?? 0) - (a.count ?? 0) || String(b.last ?? "").localeCompare(String(a.last ?? "")));
+}
+
 function renderTopics() {
   const el = $("topics");
   if (S.leftLoading) {
-    el.innerHTML = `<li class="nav-loading"><span class="spinner" role="status" aria-label="读取中"></span></li>`;
+    // 整栏居中：用 grid 撑满 pane，而不是往 li 里塞一个 spinner——
+    // .list li 自带固定行高，spinner 会被顶到左上角。
+    el.classList.add("is-loading");
+    el.innerHTML = `<span class="spinner" role="status" aria-label="读取中"></span>`;
     return;
   }
+  el.classList.remove("is-loading");
   if (S.mode === "sessions") {
     $("topic-count").textContent = S.sessions.length ? `${S.sessions.length} 场会话` : "—";
     if (!S.sessions.length) {
       el.innerHTML = `<li class="empty">还没有带条目的会话</li>`;
       return;
     }
-    el.innerHTML = S.sessions
+    el.innerHTML = sorted(S.sessions)
       .map(
         (t) => `<li data-session="${esc(t.id)}" ${t.id === S.session ? 'aria-current="true"' : ""}>
           <span class="name" title="${esc(t.id)}">${esc(String(t.id).slice(0, 12))}${t.project ? ` · ${esc(t.project)}` : ""}</span>
@@ -178,7 +192,7 @@ function renderTopics() {
     el.innerHTML = `<li class="empty">${S.q ? "没有匹配的话题" : "还没有条目"}</li>`;
     return;
   }
-  el.innerHTML = S.topics
+  el.innerHTML = sorted(S.topics)
     .map(
       (t) => `<li data-topic="${esc(t.name)}" ${t.name === S.topic ? 'aria-current="true"' : ""}>
         <span class="name" title="${esc(t.name)}">${esc(t.name)}</span>
@@ -608,6 +622,11 @@ function wire() {
     const b = e.target.closest(".sw");
     if (!b) return;
     applyLook({ ...look(), brand: b.dataset.brand });
+  });
+
+  $("sort").addEventListener("change", (e) => {
+    S.sort = e.target.value === "last" ? "last" : "count";
+    renderTopics();
   });
 
   $("density").addEventListener("click", (e) => {
