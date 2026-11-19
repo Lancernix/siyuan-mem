@@ -714,6 +714,9 @@ function wire() {
           renderTopics();
           await loadSessionEntries(S.session);
         } else {
+          // 时间线按条目数排会变成"哪天最忙"，不像时间线；默认按时间。
+          S.sort = "last";
+          $("sort").value = "last";
           await loadDays();
           S.day = S.days[0]?.date ?? "";
           renderTopics();
@@ -905,6 +908,10 @@ renderFlow();
   if (q.get("session")) S.session = q.get("session");
   if (["sessions", "timeline"].includes(q.get("view"))) {
     S.mode = q.get("view");
+    if (S.mode === "timeline" && !q.get("sort")) {
+      S.sort = "last";
+      $("sort").value = "last";
+    }
     for (const b of document.querySelectorAll(".nav-tabs button")) {
       b.setAttribute("aria-selected", String(b.dataset.view === S.mode));
     }
