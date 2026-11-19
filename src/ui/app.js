@@ -25,6 +25,8 @@ const S = {
   q: "",
   state: null,
   loading: false,
+  /** 左栏目录在换页：用居中的 spinner，不用骨架——那一栏只有名字和数字，骨架反而看不出在干嘛 */
+  leftLoading: false,
   /** 话题 → 条目。点回看过的话题先出旧数据再刷新，省掉一秒白屏。 */
   cache: new Map(),
   drawer: { open: false, tab: "queue" },
@@ -149,6 +151,10 @@ function wireHandles() {
 /* ---------- 渲染 ---------- */
 function renderTopics() {
   const el = $("topics");
+  if (S.leftLoading) {
+    el.innerHTML = `<li class="nav-loading"><span class="spinner" role="status" aria-label="读取中"></span></li>`;
+    return;
+  }
   if (S.mode === "sessions") {
     $("topic-count").textContent = S.sessions.length ? `${S.sessions.length} 场会话` : "—";
     if (!S.sessions.length) {
@@ -194,7 +200,17 @@ function renderFlow() {
 
   $("flow-loading").hidden = !S.loading;
   el.hidden = S.loading;
-  if (S.loading) return;
+  if (S.loading) {
+    // 骨架铺满可视高度：只给两三条的话，下面一大片空白反而像"卡住了"。
+    // 多给几行：少一行就会在底下露出一块空白，看着像卡住了；溢出的部分
+    // 由滚动容器裁掉，加载一结束整块就换掉，用户不会看到滚动条。
+    const n = 16;
+    $("skeleton").innerHTML = Array.from(
+      { length: n },
+      () => `<li class="entry sk-row"><span class="sk sk-title"></span><span class="sk sk-body"></span><span class="sk sk-meta"></span></li>`
+    ).join("");
+    return;
+  }
 
   if (!S.entries.length) {
     el.innerHTML = `<li class="empty">${S.q ? "没有命中。换个词，或清空搜索回到话题。" : "这个话题下没有条目。"}</li>`;
@@ -383,6 +399,9 @@ async function postAction(url, label) {
 
 /* ---------- 取数 ---------- */
 async function getJSON(url) {
+  // ?slow=1500：人为拖慢每次请求，用来看/调加载态。正常访问不会带这个参数。
+  const slow = Number(new URLSearchParams(location.search).get("slow")) || 0;
+  if (slow > 0) await new Promise((r) => setTimeout(r, slow));
   const r = await fetch(url, { headers: { accept: "application/json" } });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
@@ -390,15 +409,21 @@ async function getJSON(url) {
 }
 
 async function loadTopics() {
+  S.leftLoading = true;
+  renderTopics();
   const d = await getJSON(`api/topics?limit=200${S.q ? `&q=${encodeURIComponent(S.q)}` : ""}`);
   S.topics = d.topics ?? [];
   S.topicsTotal = d.total ?? S.topics.length;
+  S.leftLoading = false;
   renderTopics();
 }
 
 async function loadSessions() {
+  S.leftLoading = true;
+  renderTopics();
   const d = await getJSON("api/sessions?limit=100");
   S.sessions = d.sessions ?? [];
+  S.leftLoading = false;
   renderTopics();
 }
 
@@ -589,6 +614,8 @@ function wire() {
     const b = e.target.closest("button[data-density]");
     if (!b) return;
     applyLook({ ...look(), density: b.dataset.density });
+  // 骨架屏的条数按密度重算，不然切换后下面会留一截空白。
+  if (S.loading) renderFlow();
   });
 
   addEventListener("keydown", (e) => {
@@ -626,9 +653,16 @@ function showError(e) {
 
 /* ---------- 启动 ---------- */
 bootLook();
+S.leftLoading = true;
+S.loading = true;
+renderTopics();
+renderFlow();
 // ?drawer=queue|dead|log|model：直接打开抽屉的那一页，截图和贴链接时用。
 {
   const q = new URLSearchParams(location.search);
+  // ?topic=xxx / ?session=xxx：直接选中某个话题或会话。
+  if (q.get("topic")) S.topic = q.get("topic");
+  if (q.get("session")) S.session = q.get("session");
   if (q.get("view") === "sessions") {
     S.mode = "sessions";
     for (const b of document.querySelectorAll(".nav-tabs button")) {
@@ -648,16 +682,17 @@ loadTopics()
   .then(async () => {
     if (S.mode === "sessions") {
       await loadSessions();
-      S.session = S.sessions[0]?.id ?? "";
+      if (!S.session) S.session = S.sessions[0]?.id ?? "";
       renderTopics();
       return loadSessionEntries(S.session);
     }
-    const first = S.topics[0]?.name ?? "";
-    if (first) {
-      S.topic = first;
+    if (!S.topic) S.topic = S.topics[0]?.name ?? "";
+    if (S.topic) {
       renderTopics();
-      return loadEntries(first);
+      return loadEntries(S.topic);
     }
+    S.loading = false;
+    renderFlow();
   })
   .catch(showError);
 

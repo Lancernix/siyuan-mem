@@ -31,9 +31,9 @@
     <span class="count-pill" id="counts">—</span>
 
     <div class="seg" id="density" role="group" aria-label="密度">
-      <button data-density="compact" title="紧凑">紧</button>
-      <button data-density="cozy" title="标准">标</button>
-      <button data-density="spacious" title="宽松">宽</button>
+      <button data-density="compact" title="紧凑">紧凑</button>
+      <button data-density="cozy" title="标准">标准</button>
+      <button data-density="spacious" title="宽松">宽松</button>
     </div>
 
     <div class="swatches" role="group" aria-label="主题色">
@@ -71,11 +71,7 @@
 
     <div class="flow-loading" id="flow-loading" hidden>
       <div class="loading-line"><b class="pulse"></b>正在翻条目…</div>
-      <ul class="flow" aria-hidden="true">
-        <li class="entry sk-row"><span class="sk sk-title"></span><span class="sk sk-body"></span><span class="sk sk-meta"></span></li>
-        <li class="entry sk-row"><span class="sk sk-title"></span><span class="sk sk-body"></span><span class="sk sk-meta"></span></li>
-        <li class="entry sk-row"><span class="sk sk-title"></span><span class="sk sk-body"></span><span class="sk sk-meta"></span></li>
-      </ul>
+      <ul class="flow" id="skeleton" aria-hidden="true"></ul>
     </div>
 
     <ul class="flow" id="flow"></ul>
