@@ -53,7 +53,7 @@
   <nav class="pane" aria-label="话题">
     <div class="nav-tabs" role="tablist">
       <button role="tab" aria-selected="true" data-view="topics">话题</button>
-      <button role="tab" aria-selected="false" data-view="sessions" disabled title="还没做">会话</button>
+      <button role="tab" aria-selected="false" data-view="sessions">会话</button>
       <button role="tab" aria-selected="false" data-view="timeline" disabled title="还没做">时间线</button>
     </div>
     <div class="nav-meta"><span id="topic-count">—</span><span>按条目数</span></div>
@@ -87,6 +87,8 @@
     <p class="empty">选一条看详情</p>
   </aside>
 </div>
+
+<div class="toast" id="toast" hidden></div>
 
 <div class="drawer-scrim" id="scrim" hidden></div>
 <section class="drawer" id="drawer" hidden aria-label="worker">

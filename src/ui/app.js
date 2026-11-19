@@ -29,6 +29,10 @@ const S = {
   cache: new Map(),
   drawer: { open: false, tab: "queue" },
   notice: "",
+  /** 当前浏览维度：话题 / 会话（时间线还没做） */
+  mode: "topics",
+  sessions: [],
+  session: "",
 };
 
 /* ---------- 外观：色 / 明暗 / 密度 ---------- */
@@ -145,6 +149,24 @@ function wireHandles() {
 /* ---------- 渲染 ---------- */
 function renderTopics() {
   const el = $("topics");
+  if (S.mode === "sessions") {
+    $("topic-count").textContent = S.sessions.length ? `${S.sessions.length} 场会话` : "—";
+    if (!S.sessions.length) {
+      el.innerHTML = `<li class="empty">还没有带条目的会话</li>`;
+      return;
+    }
+    el.innerHTML = S.sessions
+      .map(
+        (t) => `<li data-session="${esc(t.id)}" ${t.id === S.session ? 'aria-current="true"' : ""}>
+          <span class="name" title="${esc(t.id)}">${esc(String(t.id).slice(0, 12))}${t.project ? ` · ${esc(t.project)}` : ""}</span>
+          <span class="n num">${t.count ?? 0}</span>
+          <span class="date num">${esc((t.last ?? "").slice(5))}</span>
+        </li>`
+      )
+      .join("");
+    return;
+  }
+
   $("topic-count").textContent = S.topicsTotal ? `${S.topicsTotal} 个话题` : "—";
   if (!S.topics.length) {
     el.innerHTML = `<li class="empty">${S.q ? "没有匹配的话题" : "还没有条目"}</li>`;
@@ -163,7 +185,11 @@ function renderTopics() {
 
 function renderFlow() {
   const el = $("flow");
-  $("flow-title").textContent = S.q ? `搜索「${S.q}」` : S.topic || "全部条目";
+  $("flow-title").textContent = S.q
+    ? `搜索「${S.q}」`
+    : S.mode === "sessions"
+      ? String(S.session || "").slice(0, 16)
+      : S.topic || "全部条目";
   $("flow-sub").textContent = S.loading ? "" : S.entries.length ? `${S.entries.length} 条` : "";
 
   $("flow-loading").hidden = !S.loading;
@@ -220,6 +246,7 @@ function renderDetail() {
     <div class="actions">
       <a class="btn primary" href="siyuan://blocks/${esc(h.id)}">在思源打开</a>
       ${h.raw ? `<a class="btn" href="#" data-raw="${esc(h.raw)}">看原文</a>` : ""}
+      <button class="btn" id="btn-archive" data-id="${esc(h.id)}">归档这条</button>
     </div>
     <dl class="field">
       <dt>话题</dt><dd>${esc(h.entity || "未归类")}</dd>
@@ -332,6 +359,15 @@ function renderDrawer() {
   $("drawer-body").innerHTML = notice + body;
 }
 
+let toastTimer = 0;
+function toast(text) {
+  const el = $("toast");
+  el.textContent = text;
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (el.hidden = true), 4000);
+}
+
 async function postAction(url, label) {
   try {
     const r = await fetch(url, { method: "POST" });
@@ -358,6 +394,32 @@ async function loadTopics() {
   S.topics = d.topics ?? [];
   S.topicsTotal = d.total ?? S.topics.length;
   renderTopics();
+}
+
+async function loadSessions() {
+  const d = await getJSON("api/sessions?limit=100");
+  S.sessions = d.sessions ?? [];
+  renderTopics();
+}
+
+async function loadSessionEntries(sid) {
+  if (!sid) {
+    S.entries = [];
+    S.selectedId = "";
+    renderFlow();
+    renderDetail();
+    return;
+  }
+  S.loading = true;
+  renderFlow();
+  const d = await getJSON(`api/session?id=${encodeURIComponent(sid)}`);
+  // 请求回来时可能已经切走了，丢掉过期结果。
+  if (S.mode !== "sessions" || S.session !== sid) return;
+  S.entries = d.hits ?? [];
+  S.selectedId = S.entries[0]?.id ?? "";
+  S.loading = false;
+  renderFlow();
+  renderDetail();
 }
 
 async function loadEntries(topic) {
@@ -418,13 +480,72 @@ async function loadState() {
 let qTimer = 0;
 function wire() {
   $("topics").addEventListener("click", (e) => {
-    const li = e.target.closest("li[data-topic]");
+    const li = e.target.closest("li[data-topic], li[data-session]");
     if (!li) return;
-    S.topic = li.dataset.topic;
     S.q = "";
     $("q").value = "";
-    renderTopics();
-    loadEntries(S.topic).catch(showError);
+    if (li.dataset.topic) {
+      S.topic = li.dataset.topic;
+      renderTopics();
+      loadEntries(S.topic).catch(showError);
+    } else {
+      S.session = li.dataset.session;
+      renderTopics();
+      loadSessionEntries(S.session).catch(showError);
+    }
+  });
+
+  document.querySelectorAll(".nav-tabs button[data-view]").forEach((tab) => {
+    tab.addEventListener("click", async () => {
+      const mode = tab.dataset.view;
+      if (!mode || mode === "timeline" || mode === S.mode) return;
+      S.mode = mode;
+      S.q = "";
+      $("q").value = "";
+      for (const b of document.querySelectorAll(".nav-tabs button")) {
+        b.setAttribute("aria-selected", String(b === tab));
+      }
+      try {
+        if (mode === "topics") {
+          await loadTopics();
+          S.topic = S.topics[0]?.name ?? "";
+          renderTopics();
+          await loadEntries(S.topic);
+        } else {
+          await loadSessions();
+          S.session = S.sessions[0]?.id ?? "";
+          renderTopics();
+          await loadSessionEntries(S.session);
+        }
+      } catch (e) {
+        showError(e);
+      }
+    });
+  });
+
+  $("detail").addEventListener("click", async (e) => {
+    if (e.target.closest("a[data-raw]")) e.preventDefault();
+    const b = e.target.closest("#btn-archive");
+    if (!b) return;
+    const id = b.dataset.id;
+    b.disabled = true;
+    try {
+      const r = await fetch(`api/archive?ids=${encodeURIComponent(id)}&reason=${encodeURIComponent("面板归档")}`, {
+        method: "POST",
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      S.entries = S.entries.filter((x) => x.id !== id);
+      for (const [k, v] of S.cache) S.cache.set(k, v.filter((x) => x.id !== id));
+      S.selectedId = S.entries[0]?.id ?? "";
+      renderFlow();
+      renderDetail();
+      toast(`已归档 ${id.slice(-7)}，块和原文都没删，可用 mem forget --undo 恢复`);
+      await loadState();
+    } catch (err) {
+      toast(`归档失败：${err.message}`);
+      b.disabled = false;
+    }
   });
 
   $("flow").addEventListener("click", (e) => {
@@ -437,10 +558,6 @@ function wire() {
     S.selectedId = li.dataset.id;
     renderFlow();
     renderDetail();
-  });
-
-  $("detail").addEventListener("click", (e) => {
-    if (e.target.closest("a[data-raw]")) e.preventDefault();
   });
 
   $("q").addEventListener("input", (e) => {
@@ -512,6 +629,12 @@ bootLook();
 // ?drawer=queue|dead|log|model：直接打开抽屉的那一页，截图和贴链接时用。
 {
   const q = new URLSearchParams(location.search);
+  if (q.get("view") === "sessions") {
+    S.mode = "sessions";
+    for (const b of document.querySelectorAll(".nav-tabs button")) {
+      b.setAttribute("aria-selected", String(b.dataset.view === "sessions"));
+    }
+  }
   if (TABS.includes(q.get("drawer"))) {
     S.drawer.open = true;
     S.drawer.tab = q.get("drawer");
@@ -522,7 +645,13 @@ wire();
 openDrawer(S.drawer.open);
 loadState();
 loadTopics()
-  .then(() => {
+  .then(async () => {
+    if (S.mode === "sessions") {
+      await loadSessions();
+      S.session = S.sessions[0]?.id ?? "";
+      renderTopics();
+      return loadSessionEntries(S.session);
+    }
     const first = S.topics[0]?.name ?? "";
     if (first) {
       S.topic = first;

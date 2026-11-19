@@ -1,9 +1,8 @@
 /**
  * 一个本地面板：看状态、看条目、看队列，点一下跑一轮。
  *
- * 刻意不用框架、不装依赖：总共一个 HTML 字符串 + 五个只读接口 + 一个动作接口，
- * 全部代码比一个前端脚手架的配置还短。面板的意义是"不用开终端就知道它在不在干活"，
- * 不是做一个管理系统——真管理应该去思源里改，那边有编辑器。
+ * 前端在 src/ui/ 下，原生 ESM 三个文件，零依赖零构建。面板的意义是"不用开终端就知道
+ * 它在不在干活，也看得见库里有什么"；改正文去思源，那边才有编辑器。
  *
  * 默认只绑 127.0.0.1。绑到别的地址（放公网域名后面）必须同时给 --auth：这个面板
  * 会显示条目正文和日志，没有鉴权就暴露，等于把记忆库摊在网上。
@@ -20,6 +19,9 @@ import { lockInfo, roundStatus } from "./serve.mjs";
 import { searchEntries } from "./search.mjs";
 import { failureText } from "./search-reason.mjs";
 import { listTopics, listEntries } from "./browse.mjs";
+import { ATTR, attrOf } from "./store.mjs";
+import { stripRawLink } from "../util/raw.mjs";
+import { archiveEntries } from "./archive.mjs";
 
 /** 队列项只读头部：完整会话可能有几 MB，面板不需要。 */
 function queueItem(file) {
@@ -53,6 +55,70 @@ function deadPackages(limit = 20) {
     return { file: f, ...meta, why };
   });
   return { items, total: files.length };
+}
+
+/**
+ * 按会话把条目聚起来。抽取天然以会话为单位，一场往往产出三五条、散在几个话题里；
+ * 按会话看才能回答"那天到底聊了什么、抽成了什么"。
+ *
+ * 只读 ial，不取正文：一场会话的全文可能几万字，目录不需要。
+ */
+async function sessionSummaries(limit = 100) {
+  const { sy, notebook } = open();
+  const rows = await sy.sql(
+    `SELECT ial FROM blocks
+      WHERE type='p' AND box='${notebook}' AND ial LIKE '%${ATTR.hash}="%'
+        AND ial NOT LIKE '%${ATTR.status}="archived"%'
+      ORDER BY updated DESC LIMIT 5000`
+  );
+  if (!Array.isArray(rows)) return [];
+  const groups = new Map();
+  for (const r of rows) {
+    const sid = attrOf(r.ial, ATTR.session);
+    if (!sid) continue;
+    let g = groups.get(sid);
+    if (!g) {
+      g = { id: sid, count: 0, last: "", project: "", machine: "" };
+      groups.set(sid, g);
+    }
+    g.count++;
+    const date = attrOf(r.ial, ATTR.date) || "";
+    if (date > g.last) g.last = date;
+    if (!g.project) g.project = attrOf(r.ial, ATTR.project) || "";
+    if (!g.machine) g.machine = attrOf(r.ial, ATTR.machine) || "";
+  }
+  return [...groups.values()]
+    .sort((a, b) => String(b.last).localeCompare(String(a.last)) || b.count - a.count)
+    .slice(0, limit);
+}
+
+/** 一场会话抽出的条目。字段与 /api/entries 保持一致，前端能共用一套渲染。 */
+async function sessionEntries(sid, limit = 100) {
+  const { sy, notebook } = open();
+  const rows = await sy.sql(
+    `SELECT id, content, ial FROM blocks
+      WHERE type='p' AND box='${notebook}' AND ial LIKE '%${ATTR.hash}="%'
+        AND ial LIKE '%${ATTR.session}="${sid.replace(/[^a-zA-Z0-9_-]/g, "")}"%'
+      ORDER BY updated DESC LIMIT ${limit}`
+  );
+  if (!Array.isArray(rows)) return [];
+  return rows.map((r) => {
+    const raw = attrOf(r.ial, ATTR.raw);
+    return {
+      id: r.id,
+      entity: attrOf(r.ial, ATTR.entity),
+      brief: attrOf(r.ial, ATTR.brief),
+      date: attrOf(r.ial, ATTR.date),
+      type: attrOf(r.ial, ATTR.type),
+      confidence: attrOf(r.ial, ATTR.confidence),
+      text: stripRawLink(r.content, raw),
+      raw,
+      session: attrOf(r.ial, ATTR.session),
+      source: attrOf(r.ial, ATTR.source),
+      project: attrOf(r.ial, ATTR.project),
+      status: attrOf(r.ial, ATTR.status),
+    };
+  });
 }
 
 function tailLog(lines = 30) {
@@ -241,6 +307,32 @@ export function startUi({ port = 7787, host = "127.0.0.1", allowHosts = [], auth
         if (r.failed) {
           return json(503, { error: `翻条目失败：${failureText(r.reason, r.detail)}`, reason: r.reason });
         }
+        return json(200, r);
+      }
+      if (req.method === "GET" && url.pathname === "/api/sessions") {
+        const limit = Number(url.searchParams.get("limit")) || 100;
+        try {
+          return json(200, { sessions: await sessionSummaries(limit) });
+        } catch (e) {
+          return json(503, { error: `列会话失败：${e.message}` });
+        }
+      }
+      if (req.method === "GET" && url.pathname === "/api/session") {
+        const sid = url.searchParams.get("id") ?? "";
+        if (!sid) return json(400, { error: "要给 id" });
+        try {
+          return json(200, { hits: await sessionEntries(sid) });
+        } catch (e) {
+          return json(503, { error: `翻会话失败：${e.message}` });
+        }
+      }
+      if (req.method === "POST" && url.pathname === "/api/archive") {
+        if (!fromThisPage(req)) return json(403, { error: "只接受面板自己发起的请求" });
+        const ids = (url.searchParams.get("ids") ?? "").split(",").filter(Boolean);
+        const reason = url.searchParams.get("reason") ?? "面板归档";
+        if (!ids.length) return json(400, { error: "要给 ids" });
+        const r = await archiveEntries({ ids, reason, source: "ui" });
+        if (r.failed) return json(409, { error: `归档失败：${failureText(r.reason, r.detail)}` });
         return json(200, r);
       }
       if (req.method === "GET" && url.pathname === "/api/search") {

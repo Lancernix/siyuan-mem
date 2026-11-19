@@ -320,6 +320,15 @@ body.resizing { cursor: col-resize; user-select: none; }
 }
 .worker .toggle:hover { color: var(--text-1); border-color: var(--border-strong); }
 
+.toast {
+  position: fixed; right: var(--sp-5); bottom: calc(36px + var(--sp-4));
+  max-width: 380px; padding: var(--sp-2) var(--sp-3);
+  background: var(--surface); color: var(--text-1);
+  border: 1px solid var(--border-strong); border-radius: var(--r-sm);
+  box-shadow: var(--shadow-float, 0 8px 28px rgba(0, 0, 0, 0.42));
+  font-size: var(--fs-xs); z-index: var(--z-toast);
+}
+
 /* ---------- worker 抽屉 ---------- */
 .drawer-scrim {
   position: fixed; inset: 0;
