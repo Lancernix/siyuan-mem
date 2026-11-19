@@ -199,7 +199,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, [tabindex]:focus-vis
 .detail .full { margin: 0; font-size: var(--fs-md); line-height: var(--lh-relaxed); color: var(--text-2); white-space: pre-wrap; }
 .field { display: grid; grid-template-columns: 64px 1fr; gap: var(--sp-2); font-size: var(--fs-xs); padding: var(--sp-1) 0; margin: 0; }
 .field dt { color: var(--text-4); }
-.field dd { margin: 0; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; }
+.field dd { margin: 0; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .field dd a { color: var(--brand-fg); text-decoration: none; border-bottom: 1px solid var(--brand-border); }
 .detail hr { border: 0; border-top: 1px solid var(--border-subtle); margin: var(--sp-1) 0; }
 .sect { font-size: var(--fs-2xs); color: var(--text-4); letter-spacing: var(--ls-wide); margin-bottom: var(--sp-2); }

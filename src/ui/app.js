@@ -39,6 +39,8 @@ function applyLook(brand, theme) {
   } catch {}
 }
 
+const BRANDS = ["copper", "vermilion", "blue", "moss"];
+
 function bootLook() {
   let brand = "copper";
   let theme = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
@@ -46,6 +48,11 @@ function bootLook() {
     brand = localStorage.getItem("mem.brand") || brand;
     theme = localStorage.getItem("mem.theme") || theme;
   } catch {}
+  // 链接里带 ?brand=blue&theme=light 时以链接为准：分享截图、排查某个主题时，
+  // 不用先点两下再截。
+  const q = new URLSearchParams(location.search);
+  if (BRANDS.includes(q.get("brand"))) brand = q.get("brand");
+  if (["light", "dark"].includes(q.get("theme"))) theme = q.get("theme");
   applyLook(brand, theme);
 }
 
@@ -83,14 +90,20 @@ function renderFlow() {
       const type = TYPE_LABEL[h.type] || h.type || "";
       const bits = [
         `<span class="num">${esc(h.date || "")}</span>`,
+        type ? `<span class="sep">·</span><span>${esc(type)}</span>` : "",
         h.project ? `<span class="sep">·</span><span>${esc(h.project)}</span>` : "",
         h.source ? `<span class="sep">·</span><span>${esc(h.source)}</span>` : "",
         h.raw ? `<a class="raw" href="#" data-raw="${esc(h.raw)}" title="${esc(h.raw)}">原文</a>` : "",
       ].filter(Boolean);
+      // 只有「不是在用」的条目才挂状态：全绿一片等于没有信息。
+      const statusTag =
+        status === "current"
+          ? ""
+          : `<span class="badge ${STATUS_CLASS[status] || "mute"}">${esc(STATUS_LABEL[status] || status)}</span>`;
       return `<li class="entry" data-id="${esc(h.id)}" ${h.id === S.selectedId ? 'aria-current="true"' : ""}>
         <div class="l1">
           <span class="brief">${esc(h.brief || firstLine(h.text))}</span>
-          ${type ? `<span class="badge ${status === "current" ? "ok" : STATUS_CLASS[status] || ""}">${esc(type)}</span>` : ""}
+          ${statusTag}
         </div>
         <div class="body">${esc(h.text || "")}</div>
         <div class="meta">${bits.join("")}</div>
@@ -141,7 +154,9 @@ function renderState() {
   $("w-dot").className = `dot ${busy ? "busy" : "idle"}`;
   $("w-state").textContent = busy ? "正在抽取" : "等待下一轮";
   $("w-queue").textContent = String((st.queue ?? []).length);
-  $("w-usage").textContent = String(st.usage ?? 0);
+  const use = st.usage ?? {};
+  $("w-usage").textContent = String(use.calls ?? 0);
+  $("w-failed").textContent = String(use.failed ?? 0);
   $("w-model").textContent = st.model?.configured
     ? `${st.model.provider} · ${st.model.model}`
     : "没配模型";

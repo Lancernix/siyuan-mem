@@ -88,6 +88,19 @@ test("没配 auth 时只认本机 Host，行为不变", async (t) => {
 test("页面里的请求用相对路径：挂在 /panel/ 下才不会打到站根", async (t) => {
   const ui = await boot(t);
   const html = await (await get(ui, "/")).text();
-  assert.match(html, /fetch\("api\/state"\)/);
-  assert.doesNotMatch(html, /fetch\("\/api\//);
+  // 页面本身只引相对路径的三个静态文件——写死 /app.css 的话，挂到 /panel/ 下会 404。
+  assert.match(html, /href="tokens\.css"/);
+  assert.match(html, /src="app\.js"/);
+  // 取数在 app.js 里，同样必须是相对路径：站根是中心接口，不是面板。
+  const js = await (await get(ui, "/app.js")).text();
+  assert.match(js, /"api\/state"/);
+  assert.doesNotMatch(js, /"\/api\//);
+});
+
+test("静态文件带 no-store，改完刷新就是新的", async (t) => {
+  const ui = await boot(t);
+  const res = await get(ui, "/app.css");
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") ?? "", /text\/css/);
+  assert.equal(res.headers.get("cache-control"), "no-store");
 });
