@@ -21,6 +21,7 @@ import { failureText } from "./search-reason.mjs";
 import { listTopics, listEntries } from "./browse.mjs";
 import { ATTR, attrOf } from "./store.mjs";
 import { stripRawLink } from "../util/raw.mjs";
+import { resolveNotebookId } from "../util/siyuan.mjs";
 import { archiveEntries } from "./archive.mjs";
 
 /** 队列项只读头部：完整会话可能有几 MB，面板不需要。 */
@@ -64,7 +65,8 @@ function deadPackages(limit = 20) {
  * 只读 ial，不取正文：一场会话的全文可能几万字，目录不需要。
  */
 async function sessionSummaries(limit = 100) {
-  const { sy, notebook } = open();
+  const { sy, cfg } = open();
+  const notebook = await resolveNotebookId(sy, cfg);
   const rows = await sy.sql(
     `SELECT ial FROM blocks
       WHERE type='p' AND box='${notebook}' AND ial LIKE '%${ATTR.hash}="%'
@@ -94,7 +96,8 @@ async function sessionSummaries(limit = 100) {
 
 /** 一场会话抽出的条目。字段与 /api/entries 保持一致，前端能共用一套渲染。 */
 async function sessionEntries(sid, limit = 100) {
-  const { sy, notebook } = open();
+  const { sy, cfg } = open();
+  const notebook = await resolveNotebookId(sy, cfg);
   const rows = await sy.sql(
     `SELECT id, content, ial FROM blocks
       WHERE type='p' AND box='${notebook}' AND ial LIKE '%${ATTR.hash}="%'

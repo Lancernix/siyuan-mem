@@ -12,6 +12,10 @@
 [data-density="cozy"]    { --row-h: 38px; --entry-py: 13px; }
 [data-density="spacious"]{ --row-h: 46px; --entry-py: 18px; }
 
+/* 组件自带 display 会盖掉浏览器默认的 [hidden]{display:none}，这里统一兜住：
+ * 抽屉、骨架屏、toast 都是靠 hidden 属性切换的。 */
+[hidden] { display: none !important; }
+
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body {
