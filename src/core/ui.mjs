@@ -179,12 +179,66 @@ function settingsView() {
     })),
     params: {
       extract: cfg.extract ?? {},
-      jobs: cfg.jobs ?? {},
+      serve: cfg.serve ?? {},
       raw: { enabled: cfg.raw?.enabled !== false, dir: cfg.raw?.dir ?? "mem-raw" },
     },
     prompt: { text: p.text, version: p.version, source: p.source, warnings: p.warnings ?? [] },
     promptHistory: promptHistory().slice(0, 10),
   };
+}
+
+/** 按日期聚合：时间线视图用。同一天抽了什么，比按话题翻更接近"这些天在关心什么"。 */
+async function daySummaries(limit = 120) {
+  const { sy, cfg } = open();
+  const notebook = await resolveNotebookId(sy, cfg);
+  const rows = await sy.sql(
+    `SELECT ial FROM blocks
+      WHERE type='p' AND box='${notebook}' AND ial LIKE '%${ATTR.hash}="%'
+        AND ial NOT LIKE '%${ATTR.status}="archived"%'
+      ORDER BY updated DESC LIMIT 5000`
+  );
+  if (!Array.isArray(rows)) return [];
+  const counts = new Map();
+  for (const r of rows) {
+    const d = attrOf(r.ial, ATTR.date);
+    if (!d) continue;
+    counts.set(d, (counts.get(d) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([date, count]) => ({ id: date, date, count, last: date }))
+    .sort((a, b) => String(b.date).localeCompare(String(a.date)))
+    .slice(0, limit);
+}
+
+/** 某一天抽出的条目。 */
+async function dayEntries(date, limit = 100) {
+  const clean = String(date).replace(/[^0-9-]/g, "");
+  const { sy, cfg } = open();
+  const notebook = await resolveNotebookId(sy, cfg);
+  const rows = await sy.sql(
+    `SELECT id, content, ial FROM blocks
+      WHERE type='p' AND box='${notebook}' AND ial LIKE '%${ATTR.hash}="%'
+        AND ial LIKE '%${ATTR.date}="${clean}"%'
+      ORDER BY updated DESC LIMIT ${limit}`
+  );
+  if (!Array.isArray(rows)) return [];
+  return rows.map((r) => {
+    const raw = attrOf(r.ial, ATTR.raw);
+    return {
+      id: r.id,
+      entity: attrOf(r.ial, ATTR.entity),
+      brief: attrOf(r.ial, ATTR.brief),
+      date: attrOf(r.ial, ATTR.date),
+      type: attrOf(r.ial, ATTR.type),
+      confidence: attrOf(r.ial, ATTR.confidence),
+      text: stripRawLink(r.content, raw),
+      raw,
+      session: attrOf(r.ial, ATTR.session),
+      source: attrOf(r.ial, ATTR.source),
+      project: attrOf(r.ial, ATTR.project),
+      status: attrOf(r.ial, ATTR.status),
+    };
+  });
 }
 
 function tailLog(lines = 30) {
@@ -375,6 +429,22 @@ export function startUi({ port = 7787, host = "127.0.0.1", allowHosts = [], auth
         }
         return json(200, r);
       }
+      if (req.method === "GET" && url.pathname === "/api/days") {
+        try {
+          return json(200, { days: await daySummaries() });
+        } catch (e) {
+          return json(503, { error: `列日期失败：${e.message}` });
+        }
+      }
+      if (req.method === "GET" && url.pathname === "/api/day") {
+        const date = url.searchParams.get("date") ?? "";
+        if (!date) return json(400, { error: "要给 date" });
+        try {
+          return json(200, { hits: await dayEntries(date) });
+        } catch (e) {
+          return json(503, { error: `翻日期失败：${e.message}` });
+        }
+      }
       if (req.method === "GET" && url.pathname === "/api/sessions") {
         const limit = Number(url.searchParams.get("limit")) || 100;
         try {
@@ -473,10 +543,10 @@ export function startUi({ port = 7787, host = "127.0.0.1", allowHosts = [], auth
           "maxConsecutiveFailures",
           "maxAttemptsPerSession",
         ]) {
-          if (b.jobs?.[k] != null) {
-            const n = Number(b.jobs[k]);
-            if (!Number.isFinite(n) || n < 0) return json(400, { error: `jobs.${k} 要是不小于 0 的数` });
-            (patch.jobs ??= {})[k] = n;
+          if (b.serve?.[k] != null) {
+            const n = Number(b.serve[k]);
+            if (!Number.isFinite(n) || n < 0) return json(400, { error: `serve.${k} 要是不小于 0 的数` });
+            (patch.serve ??= {})[k] = n;
           }
         }
         if (b.raw?.enabled != null) (patch.raw ??= {}).enabled = Boolean(b.raw.enabled);

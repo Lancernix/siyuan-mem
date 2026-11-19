@@ -38,6 +38,8 @@ const S = {
   sort: "count",
   sessions: [],
   session: "",
+  days: [],
+  day: "",
 };
 
 /* ---------- 外观：色 / 明暗 / 密度 ---------- */
@@ -170,6 +172,22 @@ function renderTopics() {
     return;
   }
   el.classList.remove("is-loading");
+  if (S.mode === "timeline") {
+    $("topic-count").textContent = S.days.length ? `${S.days.length} 天` : "—";
+    if (!S.days.length) {
+      el.innerHTML = `<li class="empty">还没有带日期的条目</li>`;
+      return;
+    }
+    el.innerHTML = sorted(S.days)
+      .map(
+        (t) => `<li data-day="${esc(t.date)}" ${t.date === S.day ? 'aria-current="true"' : ""}>
+          <span class="name">${esc(t.date)}</span>
+          <span class="n num">${t.count ?? 0}</span>
+        </li>`
+      )
+      .join("");
+    return;
+  }
   if (S.mode === "sessions") {
     $("topic-count").textContent = S.sessions.length ? `${S.sessions.length} 场会话` : "—";
     if (!S.sessions.length) {
@@ -208,9 +226,11 @@ function renderFlow() {
   const el = $("flow");
   $("flow-title").textContent = S.q
     ? `搜索「${S.q}」`
-    : S.mode === "sessions"
-      ? String(S.session || "").slice(0, 16)
-      : S.topic || "全部条目";
+    : S.mode === "timeline"
+      ? S.day || "时间线"
+      : S.mode === "sessions"
+        ? String(S.session || "").slice(0, 16)
+        : S.topic || "全部条目";
   $("flow-sub").textContent = S.loading ? "" : S.entries.length ? `${S.entries.length} 条` : "";
 
   $("flow-loading").hidden = !S.loading;
@@ -482,7 +502,7 @@ function renderSettings() {
   }
 
   const e = d.params.extract ?? {};
-  const j = d.params.jobs ?? {};
+  const j = d.params.serve ?? {};
   const num = (id, label, v) => `<label>${label}<input id="${id}" type="number" min="0" value="${esc(v ?? "")}"></label>`;
   el.innerHTML = `
     <h3>抽取参数</h3>
@@ -536,6 +556,34 @@ async function loadTopics() {
   S.topicsTotal = d.total ?? S.topics.length;
   S.leftLoading = false;
   renderTopics();
+}
+
+async function loadDays() {
+  S.leftLoading = true;
+  renderTopics();
+  const d = await getJSON("api/days?limit=120");
+  S.days = d.days ?? [];
+  S.leftLoading = false;
+  renderTopics();
+}
+
+async function loadDayEntries(date) {
+  if (!date) {
+    S.entries = [];
+    S.selectedId = "";
+    renderFlow();
+    renderDetail();
+    return;
+  }
+  S.loading = true;
+  renderFlow();
+  const d = await getJSON(`api/day?date=${encodeURIComponent(date)}`);
+  if (S.mode !== "timeline" || S.day !== date) return;
+  S.entries = d.hits ?? [];
+  S.selectedId = S.entries[0]?.id ?? "";
+  S.loading = false;
+  renderFlow();
+  renderDetail();
 }
 
 async function loadSessions() {
@@ -625,7 +673,7 @@ async function loadState() {
 let qTimer = 0;
 function wire() {
   $("topics").addEventListener("click", (e) => {
-    const li = e.target.closest("li[data-topic], li[data-session]");
+    const li = e.target.closest("li[data-topic], li[data-session], li[data-day]");
     if (!li) return;
     S.q = "";
     $("q").value = "";
@@ -633,17 +681,21 @@ function wire() {
       S.topic = li.dataset.topic;
       renderTopics();
       loadEntries(S.topic).catch(showError);
-    } else {
+    } else if (li.dataset.session) {
       S.session = li.dataset.session;
       renderTopics();
       loadSessionEntries(S.session).catch(showError);
+    } else {
+      S.day = li.dataset.day;
+      renderTopics();
+      loadDayEntries(S.day).catch(showError);
     }
   });
 
   document.querySelectorAll(".nav-tabs button[data-view]").forEach((tab) => {
     tab.addEventListener("click", async () => {
       const mode = tab.dataset.view;
-      if (!mode || mode === "timeline" || mode === S.mode) return;
+      if (!mode || mode === S.mode) return;
       S.mode = mode;
       S.q = "";
       $("q").value = "";
@@ -656,11 +708,16 @@ function wire() {
           S.topic = S.topics[0]?.name ?? "";
           renderTopics();
           await loadEntries(S.topic);
-        } else {
+        } else if (mode === "sessions") {
           await loadSessions();
           S.session = S.sessions[0]?.id ?? "";
           renderTopics();
           await loadSessionEntries(S.session);
+        } else {
+          await loadDays();
+          S.day = S.days[0]?.date ?? "";
+          renderTopics();
+          await loadDayEntries(S.day);
         }
       } catch (e) {
         showError(e);
@@ -771,7 +828,7 @@ function wire() {
             maxEntriesPerBatch: val("e-entries"),
             entityShotList: val("e-entities"),
           },
-          jobs: {
+          serve: {
             maxSessionsPerRound: val("j-sessions"),
             maxMinutesPerRound: val("j-round"),
             maxMinutesPerSession: val("j-session"),
@@ -846,12 +903,13 @@ renderFlow();
   // ?topic=xxx / ?session=xxx：直接选中某个话题或会话。
   if (q.get("topic")) S.topic = q.get("topic");
   if (q.get("session")) S.session = q.get("session");
-  if (q.get("view") === "sessions") {
-    S.mode = "sessions";
+  if (["sessions", "timeline"].includes(q.get("view"))) {
+    S.mode = q.get("view");
     for (const b of document.querySelectorAll(".nav-tabs button")) {
-      b.setAttribute("aria-selected", String(b.dataset.view === "sessions"));
+      b.setAttribute("aria-selected", String(b.dataset.view === S.mode));
     }
   }
+  if (q.get("day")) S.day = q.get("day");
   if (["model", "prompt", "params"].includes(q.get("settings"))) {
     S.settings.open = true;
     S.settings.tab = q.get("settings");
@@ -868,6 +926,12 @@ openSettings(S.settings.open);
 loadState();
 loadTopics()
   .then(async () => {
+    if (S.mode === "timeline") {
+      await loadDays();
+      if (!S.day) S.day = S.days[0]?.date ?? "";
+      renderTopics();
+      return loadDayEntries(S.day);
+    }
     if (S.mode === "sessions") {
       await loadSessions();
       if (!S.session) S.session = S.sessions[0]?.id ?? "";
