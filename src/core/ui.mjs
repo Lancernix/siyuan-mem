@@ -11,10 +11,19 @@ import http from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readFileSync, existsSync, readdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
-import { LOG_PATH, DEAD_DIR, INBOX_DIR } from "../util/config.mjs";
+import { LOG_PATH, DEAD_DIR, INBOX_DIR, loadConfig, saveConfig } from "../util/config.mjs";
 import { open } from "./jobs.mjs";
 import { pending } from "./inbox.mjs";
-import { usageToday, resolveModel, hasModel } from "../util/llm.mjs";
+import {
+  PROVIDERS,
+  resolveModel,
+  resolveChain,
+  hasModel,
+  probe as probeModel,
+  saveModelChoice,
+  maskKey,
+  usageToday,
+} from "../util/llm.mjs";
 import { lockInfo, roundStatus } from "./serve.mjs";
 import { searchEntries } from "./search.mjs";
 import { failureText } from "./search-reason.mjs";
@@ -23,6 +32,8 @@ import { ATTR, attrOf } from "./store.mjs";
 import { stripRawLink } from "../util/raw.mjs";
 import { resolveNotebookId } from "../util/siyuan.mjs";
 import { archiveEntries } from "./archive.mjs";
+import { promptState } from "./extract.mjs";
+import { history as promptHistory, savePrompt, restore as restorePrompt } from "./prompt.mjs";
 
 /** 队列项只读头部：完整会话可能有几 MB，面板不需要。 */
 function queueItem(file) {
@@ -122,6 +133,58 @@ async function sessionEntries(sid, limit = 100) {
       status: attrOf(r.ial, ATTR.status),
     };
   });
+}
+
+/** 读 JSON 请求体。提示词可能很长，给 40 万字上限，超了直接拒。 */
+async function readBody(req, max = 400000) {
+  let s = "";
+  for await (const chunk of req) {
+    s += chunk;
+    if (s.length > max) throw new Error("请求体太大（超过 40 万字）");
+  }
+  try {
+    return JSON.parse(s || "{}");
+  } catch {
+    throw new Error("不是合法的 JSON");
+  }
+}
+
+/**
+ * 设置页读到的配置：只回安全的字段，key 一律打码。
+ * 面板挂在公网域名后面，明文 key 绝不能从 /api/* 流出去。
+ */
+function settingsView() {
+  const cfg = loadConfig();
+  const m = resolveModel(cfg);
+  const p = promptState();
+  return {
+    model: {
+      provider: m.provider,
+      model: m.model,
+      wire: m.wire,
+      baseUrl: m.baseUrl || "",
+      key:
+        m.apiKeyFrom && m.apiKeyFrom !== "config"
+          ? `环境变量 ${m.apiKeyFrom}`
+          : maskKey(m.apiKey),
+      configured: hasModel(cfg),
+      jsonMode: Boolean(m.jsonMode),
+      chain: resolveChain(cfg).map((x) => ({ provider: x.provider, model: x.model })),
+    },
+    providers: Object.entries(PROVIDERS).map(([id, v]) => ({
+      id,
+      model: v.model,
+      wire: v.wire,
+      baseUrl: v.baseUrl,
+    })),
+    params: {
+      extract: cfg.extract ?? {},
+      jobs: cfg.jobs ?? {},
+      raw: { enabled: cfg.raw?.enabled !== false, dir: cfg.raw?.dir ?? "mem-raw" },
+    },
+    prompt: { text: p.text, version: p.version, source: p.source, warnings: p.warnings ?? [] },
+    promptHistory: promptHistory().slice(0, 10),
+  };
 }
 
 function tailLog(lines = 30) {
@@ -346,6 +409,95 @@ export function startUi({ port = 7787, host = "127.0.0.1", allowHosts = [], auth
         if (r.failed)
           return json(503, { error: `检索失败：${failureText(r.reason, r.detail)}`, reason: r.reason });
         return json(200, r);
+      }
+      if (req.method === "GET" && url.pathname === "/api/settings") {
+        try {
+          return json(200, settingsView());
+        } catch (e) {
+          return json(500, { error: `读设置失败：${e.message}` });
+        }
+      }
+      if (req.method === "POST" && url.pathname === "/api/settings/model") {
+        if (!fromThisPage(req)) return json(403, { error: "只接受面板自己发起的请求" });
+        const b = await readBody(req);
+        const provider = String(b.provider ?? "").trim();
+        if (!provider) return json(400, { error: "要选一家 provider" });
+        try {
+          const m = saveModelChoice(provider, {
+            apiKey: b.apiKey ? String(b.apiKey).trim() : "",
+            model: b.name ? String(b.name).trim() : "",
+            wire: b.wire ? String(b.wire).trim() : "",
+            base: b.base ? String(b.base).trim() : "",
+          });
+          return json(200, {
+            ok: true,
+            provider: m.provider,
+            model: m.model,
+            key: maskKey(m.apiKey),
+          });
+        } catch (e) {
+          return json(400, { error: e.message });
+        }
+      }
+      if (req.method === "POST" && url.pathname === "/api/settings/model/test") {
+        if (!fromThisPage(req)) return json(403, { error: "只接受面板自己发起的请求" });
+        if (!hasModel(loadConfig())) return json(409, { error: "没有可用的 key" });
+        try {
+          const r = await probeModel(loadConfig());
+          return json(200, { ok: true, result: r });
+        } catch (e) {
+          return json(502, { error: `探活失败：${e.message}` });
+        }
+      }
+      if (req.method === "POST" && url.pathname === "/api/settings/params") {
+        if (!fromThisPage(req)) return json(403, { error: "只接受面板自己发起的请求" });
+        const b = await readBody(req);
+        // 白名单：不让面板写 siyuan.token / ingest.token / push.token 这类凭据字段。
+        const patch = {};
+        for (const k of [
+          "minTurnChars",
+          "maxCharsPerCall",
+          "maxEntriesPerBatch",
+          "entityShotList",
+        ]) {
+          if (b.extract?.[k] != null) {
+            const n = Number(b.extract[k]);
+            if (!Number.isFinite(n) || n < 0) return json(400, { error: `extract.${k} 要是不小于 0 的数` });
+            (patch.extract ??= {})[k] = n;
+          }
+        }
+        for (const k of [
+          "maxSessionsPerRound",
+          "maxMinutesPerRound",
+          "maxMinutesPerSession",
+          "maxConsecutiveFailures",
+          "maxAttemptsPerSession",
+        ]) {
+          if (b.jobs?.[k] != null) {
+            const n = Number(b.jobs[k]);
+            if (!Number.isFinite(n) || n < 0) return json(400, { error: `jobs.${k} 要是不小于 0 的数` });
+            (patch.jobs ??= {})[k] = n;
+          }
+        }
+        if (b.raw?.enabled != null) (patch.raw ??= {}).enabled = Boolean(b.raw.enabled);
+        saveConfig(patch);
+        return json(200, { ok: true });
+      }
+      if (req.method === "POST" && url.pathname === "/api/settings/prompt") {
+        if (!fromThisPage(req)) return json(403, { error: "只接受面板自己发起的请求" });
+        const b = await readBody(req);
+        const text = String(b.text ?? "");
+        if (!text.trim()) return json(400, { error: "提示词不能为空" });
+        const r = savePrompt(text);
+        return json(200, { ok: true, version: promptState().version, result: r });
+      }
+      if (req.method === "POST" && url.pathname === "/api/settings/prompt/restore") {
+        if (!fromThisPage(req)) return json(403, { error: "只接受面板自己发起的请求" });
+        const b = await readBody(req);
+        const name = String(b.name ?? "");
+        if (!name || !/^[A-Za-z0-9._-]+$/.test(name)) return json(400, { error: "版本号不对" });
+        restorePrompt(name);
+        return json(200, { ok: true, version: promptState().version });
       }
       if (req.method === "POST" && url.pathname === "/api/retry") {
         if (!fromThisPage(req)) return json(403, { error: "只接受面板自己发起的请求" });

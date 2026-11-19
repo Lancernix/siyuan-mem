@@ -30,7 +30,7 @@ body {
 button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
 button:disabled { cursor: default; opacity: 0.45; }
 a { color: inherit; }
-button:focus-visible, a:focus-visible, input:focus-visible, [tabindex]:focus-visible {
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
 }
@@ -191,13 +191,18 @@ body.resizing { cursor: col-resize; user-select: none; }
 .nav-tabs button[aria-selected="true"] { color: var(--text-1); border-bottom-color: var(--brand); }
 
 .nav-meta { padding: var(--sp-2) var(--sp-4); font-size: var(--fs-2xs); color: var(--text-4); display: flex; justify-content: space-between; }
+.select-wrap { position: relative; display: inline-flex; align-items: center; }
 .nav-meta select {
   font: inherit; font-size: var(--fs-2xs); color: var(--text-3);
   background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--r-xs); padding: 0 var(--sp-1);
-  cursor: pointer;
+  border-radius: var(--r-xs); padding: 0 var(--sp-5) 0 var(--sp-2);
+  appearance: none; cursor: pointer;
 }
 .nav-meta select:hover { color: var(--text-1); border-color: var(--border-strong); }
+.select-wrap .chev {
+  position: absolute; right: var(--sp-2); top: 50%;
+  transform: translateY(-50%); color: var(--text-4); pointer-events: none;
+}
 
 .list { list-style: none; margin: 0; padding: var(--sp-1) var(--sp-2) var(--sp-4); }
 .list li {
@@ -348,6 +353,44 @@ body.resizing { cursor: col-resize; user-select: none; }
   border-radius: var(--r-sm); background: var(--surface);
 }
 .worker .toggle:hover { color: var(--text-1); border-color: var(--border-strong); }
+
+.settings-scrim {
+  position: fixed; inset: 0; background: var(--n1000); opacity: 0.45;
+  z-index: var(--z-overlay);
+}
+.settings {
+  position: fixed; right: 0; top: 0; bottom: 0; width: 480px;
+  display: grid; grid-template-rows: 44px minmax(0, 1fr);
+  background: var(--bg-subtle); border-left: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-float, 0 8px 28px rgba(0, 0, 0, 0.42));
+  z-index: var(--z-drawer);
+}
+.settings-head { display: flex; align-items: center; padding: 0 var(--sp-4); border-bottom: 1px solid var(--border); }
+.settings-head .tabs { display: flex; gap: var(--sp-4); }
+.settings-head .tabs button {
+  padding: var(--sp-3) 0 var(--sp-2); font-size: var(--fs-sm); color: var(--text-3);
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.settings-head .tabs button[aria-selected="true"] { color: var(--text-1); border-bottom-color: var(--brand); }
+.settings-head .icon-btn { margin-left: auto; }
+.settings-body { overflow: auto; padding: var(--sp-5) var(--sp-5) var(--sp-10); }
+.settings h3 { font-size: var(--fs-lg); font-weight: var(--fw-semi); color: var(--text-1); margin: 0 0 var(--sp-3); }
+.settings p.note { font-size: var(--fs-xs); color: var(--text-4); margin: 0 0 var(--sp-5); line-height: var(--lh-relaxed); }
+.settings label { display: grid; gap: var(--sp-1); font-size: var(--fs-xs); color: var(--text-3); margin-bottom: var(--sp-3); }
+.settings input, .settings select, .settings textarea {
+  font: inherit; font-size: var(--fs-sm); color: var(--text-1);
+  background: var(--bg-muted); border: 1px solid var(--border);
+  border-radius: var(--r-sm); padding: var(--sp-2);
+  width: 100%;
+}
+.settings textarea { min-height: 320px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.6; }
+.settings .row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3); }
+.settings .actions { display: flex; gap: var(--sp-2); margin-top: var(--sp-4); flex-wrap: wrap; }
+.settings .kv { font-size: var(--fs-xs); color: var(--text-3); padding: var(--sp-1) 0; }
+.settings .kv b { color: var(--text-1); font-weight: var(--fw-medium); }
+.settings .warn { color: var(--st-warn-fg); font-size: var(--fs-xs); }
+.settings .hist { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-2); }
+.settings .hist button { font-size: var(--fs-xs); color: var(--brand-fg); text-decoration: underline; }
 
 .toast {
   position: fixed; right: var(--sp-5); bottom: calc(36px + var(--sp-4));

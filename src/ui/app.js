@@ -30,6 +30,7 @@ const S = {
   /** 话题 → 条目。点回看过的话题先出旧数据再刷新，省掉一秒白屏。 */
   cache: new Map(),
   drawer: { open: false, tab: "queue" },
+  settings: { open: false, tab: "model", data: null },
   notice: "",
   /** 当前浏览维度：话题 / 会话（时间线还没做） */
   mode: "topics",
@@ -411,6 +412,111 @@ async function postAction(url, label) {
   renderDrawer();
 }
 
+
+/* ---------- 设置面板 ---------- */
+function openSettings(open) {
+  S.settings.open = open;
+  $("settings").hidden = !open;
+  $("settings-scrim").hidden = !open;
+  if (open) loadSettings();
+}
+
+async function loadSettings() {
+  try {
+    S.settings.data = await getJSON("api/settings");
+    renderSettings();
+  } catch (e) {
+    $("settings-body").innerHTML = `<p class="empty">读不出来：${esc(e.message)}</p>`;
+  }
+}
+
+const opts = (rows, cur, key, label) =>
+  rows.map((r) => `<option value="${esc(r[key])}" ${r[key] === cur ? "selected" : ""}>${esc(r[label] ?? r[key])}</option>`).join("");
+
+function renderSettings() {
+  if (!S.settings.open || !S.settings.data) return;
+  const d = S.settings.data;
+  for (const b of document.querySelectorAll("#settings-tabs button")) {
+    b.setAttribute("aria-selected", String(b.dataset.tab === S.settings.tab));
+  }
+  const el = $("settings-body");
+
+  if (S.settings.tab === "model") {
+    const m = d.model;
+    el.innerHTML = `
+      <h3>模型</h3>
+      <p class="note">key 只显示尾部，接口不会把它读出来。留空表示沿用原来的 key；换厂商时留空会清空旧 key，避免把旧凭据发到新端点。</p>
+      <div class="kv">当前：<b>${esc(m.provider)} / ${esc(m.model)}</b> · ${esc(m.wire)} · key ${esc(m.key)} · ${m.configured ? "可用" : "未配置"}</div>
+      <div class="kv">备用链：${m.chain.length > 1 ? esc(m.chain.slice(1).map((x) => `${x.provider}/${x.model}`).join(" → ")) : "没有配置备用"}</div>
+      <label>提供方
+        <select id="m-provider">${opts(d.providers, m.provider, "id", "id")}</select>
+      </label>
+      <label>模型名 <input id="m-name" value="${esc(m.model)}" placeholder="留空用预设模型"></label>
+      <div class="row">
+        <label>协议
+          <select id="m-wire">${["openai", "anthropic", "gemini"].map((x) => `<option ${x === m.wire ? "selected" : ""}>${x}</option>`).join("")}</select>
+        </label>
+        <label>接口地址 <input id="m-base" value="${esc(m.baseUrl)}" placeholder="自定义端点才填"></label>
+      </div>
+      <label>API key <input id="m-key" type="password" placeholder="留空则不改"></label>
+      <div class="actions">
+        <button class="btn primary" data-act="model-save">保存</button>
+        <button class="btn" data-act="model-test">探活（真发一次请求）</button>
+      </div>`;
+    return;
+  }
+
+  if (S.settings.tab === "prompt") {
+    const p = d.prompt;
+    el.innerHTML = `
+      <h3>抽取提示词</h3>
+      <p class="note">当前 ${esc(p.version)} · ${p.source === "user" ? "用户覆盖版" : "内置版"}。保存会先备份旧版，可回滚。</p>
+      ${(p.warnings ?? []).map((w) => `<p class="warn">⚠ ${esc(w)}</p>`).join("")}
+      <textarea id="p-text" spellcheck="false">${esc(p.text)}</textarea>
+      <div class="actions"><button class="btn primary" data-act="prompt-save">保存并备份旧版</button></div>
+      <h3 style="margin-top:var(--sp-6)">历史版本</h3>
+      <ul class="hist">${(d.promptHistory ?? [])
+        .map((h) => `<li><button data-act="prompt-restore" data-name="${esc(h.name ?? h)}">${esc(h.name ?? h)}</button></li>`)
+        .join("") || "<li class=\"empty\">还没有备份</li>"}</ul>`;
+    return;
+  }
+
+  const e = d.params.extract ?? {};
+  const j = d.params.jobs ?? {};
+  const num = (id, label, v) => `<label>${label}<input id="${id}" type="number" min="0" value="${esc(v ?? "")}"></label>`;
+  el.innerHTML = `
+    <h3>抽取参数</h3>
+    <p class="note">改完保存，下一轮生效。这里只写数值开关；token 和 ingest 凭据不从面板暴露。</p>
+    <div class="row">${num("e-min", "最短发言字数", e.minTurnChars)}${num("e-chars", "单次调用字符上限", e.maxCharsPerCall)}</div>
+    <div class="row">${num("e-entries", "每批最多条目", e.maxEntriesPerBatch)}${num("e-entities", "带入实体数", e.entityShotList)}</div>
+    <h3 style="margin-top:var(--sp-6)">调度参数</h3>
+    <div class="row">${num("j-sessions", "每轮最多会话", j.maxSessionsPerRound)}${num("j-round", "每轮分钟上限", j.maxMinutesPerRound)}</div>
+    <div class="row">${num("j-session", "单场分钟上限", j.maxMinutesPerSession)}${num("j-fail", "连续失败熔断数", j.maxConsecutiveFailures)}</div>
+    ${num("j-attempt", "进死信前的失败次数", j.maxAttemptsPerSession)}
+    <label style="display:flex;align-items:center;gap:var(--sp-2);margin-top:var(--sp-4)">
+      <input id="r-enabled" type="checkbox" style="width:auto" ${d.params.raw?.enabled ? "checked" : ""}> 归档原文到 assets
+    </label>
+    <p class="note">原文目录：${esc(d.params.raw?.dir ?? "mem-raw")}</p>
+    <div class="actions"><button class="btn primary" data-act="params-save">保存参数</button></div>`;
+}
+
+async function settingsPost(url, body, label) {
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body ?? {}),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    toast(`${label}成功`);
+    await loadSettings();
+    await loadState();
+  } catch (e) {
+    toast(`${label}失败：${e.message}`);
+  }
+}
+
 /* ---------- 取数 ---------- */
 async function getJSON(url) {
   // ?slow=1500：人为拖慢每次请求，用来看/调加载态。正常访问不会带这个参数。
@@ -624,6 +730,61 @@ function wire() {
     applyLook({ ...look(), brand: b.dataset.brand });
   });
 
+  $("btn-settings").addEventListener("click", () => openSettings(!S.settings.open));
+  $("settings-close").addEventListener("click", () => openSettings(false));
+  $("settings-scrim").addEventListener("click", () => openSettings(false));
+  $("settings-tabs").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-tab]");
+    if (!b) return;
+    S.settings.tab = b.dataset.tab;
+    renderSettings();
+  });
+  $("settings-body").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-act]");
+    if (!b) return;
+    const val = (id) => $(id)?.value ?? "";
+    if (b.dataset.act === "model-save") {
+      settingsPost(
+        "api/settings/model",
+        {
+          provider: val("m-provider"),
+          name: val("m-name"),
+          wire: val("m-wire"),
+          base: val("m-base"),
+          apiKey: val("m-key"),
+        },
+        "模型保存"
+      );
+    } else if (b.dataset.act === "model-test") {
+      settingsPost("api/settings/model/test", {}, "探活");
+    } else if (b.dataset.act === "prompt-save") {
+      settingsPost("api/settings/prompt", { text: val("p-text") }, "提示词保存");
+    } else if (b.dataset.act === "prompt-restore") {
+      settingsPost("api/settings/prompt/restore", { name: b.dataset.name }, "回滚");
+    } else if (b.dataset.act === "params-save") {
+      settingsPost(
+        "api/settings/params",
+        {
+          extract: {
+            minTurnChars: val("e-min"),
+            maxCharsPerCall: val("e-chars"),
+            maxEntriesPerBatch: val("e-entries"),
+            entityShotList: val("e-entities"),
+          },
+          jobs: {
+            maxSessionsPerRound: val("j-sessions"),
+            maxMinutesPerRound: val("j-round"),
+            maxMinutesPerSession: val("j-session"),
+            maxConsecutiveFailures: val("j-fail"),
+            maxAttemptsPerSession: val("j-attempt"),
+          },
+          raw: { enabled: $("r-enabled")?.checked !== false },
+        },
+        "参数保存"
+      );
+    }
+  });
+
   $("sort").addEventListener("change", (e) => {
     S.sort = e.target.value === "last" ? "last" : "count";
     renderTopics();
@@ -657,7 +818,10 @@ function wire() {
   $("btn-run").addEventListener("click", () => postAction("api/run", "跑一轮"));
   $("btn-retry").addEventListener("click", () => postAction("api/retry?all=1", "重跑死信"));
   addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && S.drawer.open) openDrawer(false);
+    if (e.key === "Escape") {
+      if (S.settings.open) openSettings(false);
+      else if (S.drawer.open) openDrawer(false);
+    }
   });
 
   wireHandles();
@@ -688,6 +852,10 @@ renderFlow();
       b.setAttribute("aria-selected", String(b.dataset.view === "sessions"));
     }
   }
+  if (["model", "prompt", "params"].includes(q.get("settings"))) {
+    S.settings.open = true;
+    S.settings.tab = q.get("settings");
+  }
   if (TABS.includes(q.get("drawer"))) {
     S.drawer.open = true;
     S.drawer.tab = q.get("drawer");
@@ -696,6 +864,7 @@ renderFlow();
 bootWidth();
 wire();
 openDrawer(S.drawer.open);
+openSettings(S.settings.open);
 loadState();
 loadTopics()
   .then(async () => {

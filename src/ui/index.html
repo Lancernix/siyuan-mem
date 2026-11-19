@@ -43,6 +43,9 @@
       <button class="sw" data-brand="moss" aria-label="苔绿"></button>
     </div>
 
+    <button class="icon-btn" id="btn-settings" aria-label="设置">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 9 19.35a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.63 15 1.7 1.7 0 0 0 3.07 14H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.65 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.63 1.7 1.7 0 0 0 10 3.07V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.54 1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.37 9c.12.4.48.7.9.7H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1.3Z"/></svg>
+    </button>
     <button class="icon-btn" id="theme" aria-label="切换明暗">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
     </button>
@@ -58,10 +61,13 @@
     </div>
     <div class="nav-meta">
       <span id="topic-count">—</span>
-      <select id="sort" aria-label="排序方式">
-        <option value="count">按条目数</option>
-        <option value="last">按时间</option>
-      </select>
+      <span class="select-wrap">
+        <select id="sort" aria-label="排序方式">
+          <option value="count">按条目数</option>
+          <option value="last">按时间</option>
+        </select>
+        <svg class="chev" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+      </span>
     </div>
     <ul class="list" id="topics"><li class="empty">读取中…</li></ul>
   </nav>
@@ -89,6 +95,21 @@
     <p class="empty">选一条看详情</p>
   </aside>
 </div>
+
+<div class="settings-scrim" id="settings-scrim" hidden></div>
+<aside class="settings" id="settings" hidden aria-label="设置">
+  <div class="settings-head">
+    <div class="tabs" id="settings-tabs" role="tablist">
+      <button role="tab" data-tab="model" aria-selected="true">模型</button>
+      <button role="tab" data-tab="prompt" aria-selected="false">提示词</button>
+      <button role="tab" data-tab="params" aria-selected="false">参数</button>
+    </div>
+    <button class="icon-btn" id="settings-close" aria-label="关闭设置">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+  <div class="settings-body" id="settings-body"></div>
+</aside>
 
 <div class="toast" id="toast" hidden></div>
 
