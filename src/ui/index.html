@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN" data-brand="copper" data-theme="dark">
+<html lang="zh-CN" data-brand="copper" data-theme="dark" data-density="cozy">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -10,17 +10,31 @@
 <body>
 
 <header class="topbar">
-  <div class="brand"><b>mem</b><span>思源记忆</span></div>
+  <div class="brand">
+    <b>mem</b>
+    <span>思源记忆</span>
+  </div>
+
+  <div class="status" id="status">
+    <i class="dot idle" id="status-dot"></i>
+    <span class="status-text" id="status-text">读取中…</span>
+    <span class="status-sub" id="status-sub"></span>
+  </div>
 
   <label class="search" role="search">
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
     <input id="q" type="search" placeholder="搜索条目、话题、会话" autocomplete="off" spellcheck="false">
     <kbd>⌘K</kbd>
   </label>
 
   <div class="right">
-    <span class="status" id="status"><i class="dot idle"></i><span>读取中…</span></span>
     <span class="count-pill" id="counts">—</span>
+
+    <div class="seg" id="density" role="group" aria-label="密度">
+      <button data-density="compact" title="紧凑">紧</button>
+      <button data-density="cozy" title="标准">标</button>
+      <button data-density="spacious" title="宽松">宽</button>
+    </div>
 
     <div class="swatches" role="group" aria-label="主题色">
       <button class="sw" data-brand="copper" aria-label="铜金"></button>
@@ -28,13 +42,14 @@
       <button class="sw" data-brand="blue" aria-label="蓝"></button>
       <button class="sw" data-brand="moss" aria-label="苔绿"></button>
     </div>
+
     <button class="icon-btn" id="theme" aria-label="切换明暗">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
     </button>
   </div>
 </header>
 
-<div class="shell">
+<div class="shell" id="shell">
   <nav class="pane" aria-label="话题">
     <div class="nav-tabs" role="tablist">
       <button role="tab" aria-selected="true" data-view="topics">话题</button>
@@ -45,19 +60,52 @@
     <ul class="list" id="topics"><li class="empty">读取中…</li></ul>
   </nav>
 
+  <div class="handle" role="separator" aria-orientation="vertical" aria-label="调整话题栏宽度" tabindex="0" data-edge="left"></div>
+
   <main class="pane" aria-label="条目">
     <div class="flow-head">
       <h2 id="flow-title">全部条目</h2>
       <span class="sub" id="flow-sub"></span>
       <div class="chips" id="chips"></div>
     </div>
-    <ul class="flow" id="flow"><li class="empty">读取中…</li></ul>
+
+    <div class="flow-loading" id="flow-loading" hidden>
+      <div class="loading-line"><b class="pulse"></b>正在翻条目…</div>
+      <ul class="flow" aria-hidden="true">
+        <li class="entry sk-row"><span class="sk sk-title"></span><span class="sk sk-body"></span><span class="sk sk-meta"></span></li>
+        <li class="entry sk-row"><span class="sk sk-title"></span><span class="sk sk-body"></span><span class="sk sk-meta"></span></li>
+        <li class="entry sk-row"><span class="sk sk-title"></span><span class="sk sk-body"></span><span class="sk sk-meta"></span></li>
+      </ul>
+    </div>
+
+    <ul class="flow" id="flow"></ul>
   </main>
+
+  <div class="handle" role="separator" aria-orientation="vertical" aria-label="调整详情栏宽度" tabindex="0" data-edge="right"></div>
 
   <aside class="pane detail" id="detail" aria-label="详情">
     <p class="empty">选一条看详情</p>
   </aside>
 </div>
+
+<div class="drawer-scrim" id="scrim" hidden></div>
+<section class="drawer" id="drawer" hidden aria-label="worker">
+  <div class="drawer-head">
+    <div class="tabs" id="drawer-tabs" role="tablist">
+      <button role="tab" data-tab="queue" aria-selected="true">队列 <b id="tab-queue">0</b></button>
+      <button role="tab" data-tab="dead" aria-selected="false">死信 <b id="tab-dead">0</b></button>
+      <button role="tab" data-tab="log" aria-selected="false">日志</button>
+      <button role="tab" data-tab="model" aria-selected="false">模型</button>
+    </div>
+    <span class="spacer"></span>
+    <button class="btn" id="btn-retry">重跑死信</button>
+    <button class="btn primary" id="btn-run">跑一轮</button>
+    <button class="icon-btn" id="drawer-close" aria-label="收起">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+    </button>
+  </div>
+  <div class="drawer-body" id="drawer-body"></div>
+</section>
 
 <footer class="worker" id="worker">
   <span class="grp"><i class="dot idle" id="w-dot"></i><span id="w-state">读取中…</span></span>
@@ -66,6 +114,9 @@
   <span class="grp" id="w-model">—</span>
   <span class="spacer"></span>
   <span class="grp" id="w-last">—</span>
+  <button class="toggle" id="btn-drawer"><span id="drawer-label">展开</span>
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>
+  </button>
 </footer>
 
 <script type="module" src="app.js"></script>

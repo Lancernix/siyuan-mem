@@ -10,8 +10,9 @@
  */
 import http from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { readFileSync, existsSync } from "node:fs";
-import { LOG_PATH } from "../util/config.mjs";
+import { readFileSync, existsSync, readdirSync, renameSync } from "node:fs";
+import { join } from "node:path";
+import { LOG_PATH, DEAD_DIR, INBOX_DIR } from "../util/config.mjs";
 import { open } from "./jobs.mjs";
 import { pending } from "./inbox.mjs";
 import { usageToday, resolveModel, hasModel } from "../util/llm.mjs";
@@ -29,6 +30,29 @@ function queueItem(file) {
     if (obj) meta = { session: obj.session_id ?? "", harness: obj.harness ?? "", turns: (obj.turns ?? []).length };
   } catch {}
   return { file: file.split("/").pop(), ...meta };
+}
+
+/**
+ * 死信队列。面板要能看到「哪些包卡住了、为什么」，不然只能上服务器翻目录。
+ *
+ * 只读头部：完整的会话可能有几 MB，抽屉里不需要。
+ */
+function deadPackages(limit = 20) {
+  if (!existsSync(DEAD_DIR)) return { items: [], total: 0 };
+  const files = readdirSync(DEAD_DIR).filter((f) => f.endsWith(".json"));
+  const items = files.slice(0, limit).map((f) => {
+    let meta = {};
+    try {
+      const d = JSON.parse(readFileSync(join(DEAD_DIR, f), "utf8"));
+      meta = { session: d.session_id ?? "", harness: d.harness ?? "", turns: (d.turns ?? []).length };
+    } catch {}
+    let why = "";
+    try {
+      why = readFileSync(join(DEAD_DIR, `${f}.why`), "utf8").trim().split("\n")[1] ?? "";
+    } catch {}
+    return { file: f, ...meta, why };
+  });
+  return { items, total: files.length };
 }
 
 function tailLog(lines = 30) {
@@ -49,6 +73,7 @@ async function state() {
     siyuan: { baseUrl: cfg.siyuan.baseUrl, version, notebook: cfg.siyuan.notebook },
     stats,
     queue: pending().map(queueItem),
+    dead: deadPackages(),
     entries,
     model: { provider: m.provider, wire: m.wire, model: m.model, configured: hasModel(cfg) },
     usage: usageToday(),
@@ -226,6 +251,25 @@ export function startUi({ port = 7787, host = "127.0.0.1", allowHosts = [], auth
         if (r.failed)
           return json(503, { error: `检索失败：${failureText(r.reason, r.detail)}`, reason: r.reason });
         return json(200, r);
+      }
+      if (req.method === "POST" && url.pathname === "/api/retry") {
+        if (!fromThisPage(req)) return json(403, { error: "只接受面板自己发起的请求" });
+        const all = url.searchParams.get("all") === "1";
+        const one = url.searchParams.get("file") ?? "";
+        if (!all && !one) return json(400, { error: "要给 all=1 或 file=<名字>" });
+        const files = existsSync(DEAD_DIR) ? readdirSync(DEAD_DIR).filter((f) => f.endsWith(".json")) : [];
+        const chosen = all ? files : files.filter((f) => f === one);
+        if (!chosen.length) return json(404, { error: "死信里没有这个包" });
+        let moved = 0;
+        for (const f of chosen) {
+          try {
+            renameSync(join(DEAD_DIR, f), join(INBOX_DIR, f));
+            moved++;
+          } catch {
+            // 单个挪失败不影响其它：返回实际挪走的数量，别谎报成功。
+          }
+        }
+        return json(200, { ok: true, moved });
       }
       if (req.method === "POST" && url.pathname === "/api/run") {
         if (!fromThisPage(req)) {

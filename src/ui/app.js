@@ -1,9 +1,9 @@
 /**
  * 面板前端：原生 ESM，没有构建步骤。
  *
- * 数据只有三个入口——/api/state（服务与统计）、/api/topics（目录）、
- * /api/entries（某个话题下的条目），搜索时走 /api/search。写操作现在没有，
- * 归档和重跑等接口做好再往这里接。
+ * 数据入口只有三个——/api/state（服务与统计）、/api/topics（目录）、
+ * /api/entries（某个话题下的条目），搜索时走 /api/search。
+ * 写操作（归档、重跑）等接口做好再往这里接。
  */
 
 const $ = (id) => document.getElementById(id);
@@ -13,6 +13,8 @@ const esc = (s) =>
 const TYPE_LABEL = { decision: "决策", fact: "事实", preference: "偏好", reference: "参考" };
 const STATUS_LABEL = { current: "在用", superseded: "过时", archived: "归档" };
 const STATUS_CLASS = { current: "ok", superseded: "warn", archived: "mute" };
+const BRANDS = ["copper", "vermilion", "blue", "moss"];
+const DENSITIES = ["compact", "cozy", "spacious"];
 
 const S = {
   topics: [],
@@ -22,38 +24,122 @@ const S = {
   selectedId: "",
   q: "",
   state: null,
-  hint: "",
+  loading: false,
+  /** 话题 → 条目。点回看过的话题先出旧数据再刷新，省掉一秒白屏。 */
+  cache: new Map(),
+  drawer: { open: false, tab: "queue" },
+  notice: "",
 };
 
-/* ---------- 主题 ---------- */
-function applyLook(brand, theme) {
-  const root = document.documentElement;
-  root.dataset.brand = brand;
-  root.dataset.theme = theme;
-  for (const b of document.querySelectorAll(".sw")) {
-    b.setAttribute("aria-pressed", String(b.dataset.brand === brand));
-  }
+/* ---------- 外观：色 / 明暗 / 密度 ---------- */
+function store(key, value) {
   try {
-    localStorage.setItem("mem.brand", brand);
-    localStorage.setItem("mem.theme", theme);
+    localStorage.setItem(key, value);
   } catch {}
 }
 
-const BRANDS = ["copper", "vermilion", "blue", "moss"];
+function applyLook({ brand, theme, density }) {
+  const root = document.documentElement;
+  root.dataset.brand = brand;
+  root.dataset.theme = theme;
+  root.dataset.density = density;
+  for (const b of document.querySelectorAll(".sw")) {
+    b.setAttribute("aria-pressed", String(b.dataset.brand === brand));
+  }
+  for (const b of document.querySelectorAll("#density button")) {
+    b.setAttribute("aria-pressed", String(b.dataset.density === density));
+  }
+  store("mem.brand", brand);
+  store("mem.theme", theme);
+  store("mem.density", density);
+}
 
 function bootLook() {
   let brand = "copper";
   let theme = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  let density = "cozy";
   try {
     brand = localStorage.getItem("mem.brand") || brand;
     theme = localStorage.getItem("mem.theme") || theme;
+    density = localStorage.getItem("mem.density") || density;
   } catch {}
-  // 链接里带 ?brand=blue&theme=light 时以链接为准：分享截图、排查某个主题时，
-  // 不用先点两下再截。
+  // ?brand=blue&theme=light&density=compact：截图和排查时不用先点三下。
   const q = new URLSearchParams(location.search);
   if (BRANDS.includes(q.get("brand"))) brand = q.get("brand");
   if (["light", "dark"].includes(q.get("theme"))) theme = q.get("theme");
-  applyLook(brand, theme);
+  if (DENSITIES.includes(q.get("density"))) density = q.get("density");
+  applyLook({ brand, theme, density });
+}
+
+const look = () => ({
+  brand: document.documentElement.dataset.brand,
+  theme: document.documentElement.dataset.theme,
+  density: document.documentElement.dataset.density,
+});
+
+/* ---------- 栏宽 ---------- */
+const LIMITS = { left: [180, 380], right: [260, 560] };
+
+function applyWidth(edge, px) {
+  const [min, max] = LIMITS[edge];
+  const w = Math.max(min, Math.min(max, Math.round(px)));
+  document.documentElement.style.setProperty(edge === "left" ? "--col-left" : "--col-right", `${w}px`);
+  store(`mem.col.${edge}`, String(w));
+}
+
+function widthOf(edge) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(edge === "left" ? "--col-left" : "--col-right");
+  return Number(String(v).replace("px", "")) || (edge === "left" ? 232 : 322);
+}
+
+function bootWidth() {
+  for (const edge of ["left", "right"]) {
+    const v = Number(localStorage.getItem(`mem.col.${edge}`) || 0);
+    if (v) applyWidth(edge, v);
+  }
+}
+
+function wireHandles() {
+  for (const h of document.querySelectorAll(".handle")) {
+    h.addEventListener("pointerdown", (e) => {
+      const edge = h.dataset.edge;
+      const pane = edge === "left" ? h.previousElementSibling : h.nextElementSibling;
+      if (!pane) return;
+      const startX = e.clientX;
+      const startW = pane.getBoundingClientRect().width;
+      h.setPointerCapture(e.pointerId);
+      h.classList.add("dragging");
+      document.body.classList.add("resizing");
+
+      const move = (ev) => {
+        const dx = ev.clientX - startX;
+        applyWidth(edge, edge === "left" ? startW + dx : startW - dx);
+      };
+      const up = (ev) => {
+        h.classList.remove("dragging");
+        document.body.classList.remove("resizing");
+        h.removeEventListener("pointermove", move);
+        h.removeEventListener("pointerup", up);
+        try {
+          h.releasePointerCapture(ev.pointerId);
+        } catch {}
+      };
+      h.addEventListener("pointermove", move);
+      h.addEventListener("pointerup", up);
+    });
+
+    // 分栏器是控件，键盘也该能调，不然只有鼠标能用。
+    h.addEventListener("keydown", (e) => {
+      const edge = h.dataset.edge;
+      const step = e.shiftKey ? 32 : 8;
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      e.preventDefault();
+      const cur = widthOf(edge);
+      const dir = e.key === "ArrowRight" ? 1 : -1;
+      // 左栏向右变宽，右栏向右变窄——跟拖拽方向一致。
+      applyWidth(edge, cur + dir * step * (edge === "left" ? 1 : -1));
+    });
+  }
 }
 
 /* ---------- 渲染 ---------- */
@@ -78,9 +164,13 @@ function renderTopics() {
 function renderFlow() {
   const el = $("flow");
   $("flow-title").textContent = S.q ? `搜索「${S.q}」` : S.topic || "全部条目";
-  const n = S.entries.length;
-  $("flow-sub").textContent = n ? `${n} 条` : "";
-  if (!n) {
+  $("flow-sub").textContent = S.loading ? "" : S.entries.length ? `${S.entries.length} 条` : "";
+
+  $("flow-loading").hidden = !S.loading;
+  el.hidden = S.loading;
+  if (S.loading) return;
+
+  if (!S.entries.length) {
     el.innerHTML = `<li class="empty">${S.q ? "没有命中。换个词，或清空搜索回到话题。" : "这个话题下没有条目。"}</li>`;
     return;
   }
@@ -146,26 +236,113 @@ function renderDetail() {
 function renderState() {
   const st = S.state;
   if (!st) return;
+  renderDrawer();
   const stats = st.stats ?? {};
   $("counts").innerHTML = `<b class="num">${stats.current ?? 0}</b> 在用 · <b class="num">${stats.superseded ?? 0}</b> 过时 · <b class="num">${stats.archived ?? 0}</b> 归档`;
 
-  const busy = Boolean(st.busy);
-  $("status").innerHTML = `<i class="dot ${busy ? "busy" : "idle"}"></i><span>${busy ? "正在跑一轮" : "空闲"}</span>`;
+  const busy = Boolean(st.busy?.running);
+  const secs = st.busy?.seconds;
+  $("status-dot").className = `dot ${busy ? "busy" : "idle"}`;
+  $("status-text").textContent = busy ? "正在抽取" : "空闲";
+  $("status-sub").textContent = busy
+    ? secs != null
+      ? `已 ${secs} 秒`
+      : ""
+    : (st.queue ?? []).length
+      ? `队列 ${st.queue.length}`
+      : "等下一轮";
+
   $("w-dot").className = `dot ${busy ? "busy" : "idle"}`;
   $("w-state").textContent = busy ? "正在抽取" : "等待下一轮";
   $("w-queue").textContent = String((st.queue ?? []).length);
   const use = st.usage ?? {};
   $("w-usage").textContent = String(use.calls ?? 0);
   $("w-failed").textContent = String(use.failed ?? 0);
-  $("w-model").textContent = st.model?.configured
-    ? `${st.model.provider} · ${st.model.model}`
-    : "没配模型";
-  const svc = st.service;
-  $("w-last").textContent = svc?.heartbeat
-    ? `上次心跳 ${new Date(svc.heartbeat).toLocaleTimeString("zh-CN", { hour12: false })}`
-    : st.siyuan?.version
-      ? `思源 ${st.siyuan.version}`
-      : "—";
+  $("w-model").textContent = st.model?.configured ? `${st.model.provider} · ${st.model.model}` : "没配模型";
+  $("w-last").textContent = st.siyuan?.version ? `思源 ${st.siyuan.version}` : "—";
+}
+
+/* ---------- worker 抽屉 ---------- */
+const TABS = ["queue", "dead", "log", "model"];
+
+function openDrawer(open) {
+  S.drawer.open = open;
+  $("drawer").hidden = !open;
+  $("scrim").hidden = !open;
+  $("drawer-label").textContent = open ? "收起" : "展开";
+  if (open) renderDrawer();
+}
+
+function drawerHead(pairs) {
+  return `<tr>${pairs.map(([k, label, cls]) => `<th${cls ? ` class="${cls}"` : ""}>${label}</th>`).join("")}</tr>`;
+}
+
+function renderDrawer() {
+  if (!S.drawer.open) return;
+  const st = S.state ?? {};
+  const queue = st.queue ?? [];
+  const dead = st.dead ?? { items: [], total: 0 };
+  $("tab-queue").textContent = String(queue.length);
+  $("tab-dead").textContent = String(dead.total ?? 0);
+
+  for (const b of document.querySelectorAll("#drawer-tabs button")) {
+    b.setAttribute("aria-selected", String(b.dataset.tab === S.drawer.tab));
+  }
+
+  const notice = S.notice ? `<p class="empty">${esc(S.notice)}</p>` : "";
+  let body = "";
+
+  if (S.drawer.tab === "queue") {
+    body = queue.length
+      ? `<table><thead>${drawerHead([["f", "包"], ["h", "来源"], ["t", "轮次", "num"]])}</thead><tbody>
+          ${queue
+            .map(
+              (q) => `<tr><td class="why">${esc(q.file)}</td><td>${esc(q.harness || "—")}</td><td class="num">${q.turns ?? 0}</td></tr>`
+            )
+            .join("")}
+        </tbody></table>`
+      : `<p class="empty">队列是空的。下一轮 ${queue.length ? "" : "serve 扫描后会把新会话放进来"}。</p>`;
+  } else if (S.drawer.tab === "dead") {
+    body = dead.items?.length
+      ? `<table><thead>${drawerHead([["f", "包"], ["h", "来源"], ["t", "轮次", "num"], ["w", "为什么"]])}</thead><tbody>
+          ${dead.items
+            .map(
+              (d) => `<tr><td class="why">${esc(d.file)}</td><td>${esc(d.harness || "—")}</td><td class="num">${d.turns ?? 0}</td><td class="why">${esc((d.why || "").slice(0, 80))}</td></tr>`
+            )
+            .join("")}
+        </tbody></table>
+        ${dead.total > dead.items.length ? `<p class="empty">…还有 ${dead.total - dead.items.length} 个</p>` : ""}`
+      : `<p class="empty">死信是空的。</p>`;
+  } else if (S.drawer.tab === "log") {
+    const lines = st.log ?? [];
+    body = lines.length ? `<pre class="log">${esc(lines.join("\n"))}</pre>` : `<p class="empty">今天还没有日志。</p>`;
+  } else {
+    const m = st.model ?? {};
+    const use = st.usage ?? {};
+    body = `<dl class="model-grid">
+      <dt>提供方</dt><dd>${esc(m.provider || "—")}</dd>
+      <dt>模型</dt><dd>${esc(m.model || "—")}</dd>
+      <dt>协议</dt><dd>${esc(m.wire || "—")}</dd>
+      <dt>可用</dt><dd>${m.configured ? "已配置" : "没配 key"}</dd>
+      <dt>今日调用</dt><dd class="num">${use.calls ?? 0} 次，失败 ${use.failed ?? 0}</dd>
+      <dt>token</dt><dd class="num">入 ${use.prompt ?? 0} / 出 ${use.completion ?? 0}${use.cached ? ` / 缓存 ${use.cached}` : ""}</dd>
+    </dl>`;
+  }
+
+  $("drawer-body").innerHTML = notice + body;
+}
+
+async function postAction(url, label) {
+  try {
+    const r = await fetch(url, { method: "POST" });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    S.notice = d.moved != null ? `${label}：${d.moved} 个包已挪回队列` : `${label}：${d.wrote ?? d.n ?? "已提交"}`;
+  } catch (e) {
+    S.notice = `${label}失败：${e.message}`;
+  }
+  await loadState();
+  renderDrawer();
 }
 
 /* ---------- 取数 ---------- */
@@ -191,18 +368,38 @@ async function loadEntries(topic) {
     renderDetail();
     return;
   }
+  // 看过的话题先出旧数据（瞬间），再刷新——回看时不用再等一秒。
+  const cached = S.cache.get(topic);
+  if (cached) {
+    S.entries = cached;
+    S.selectedId = cached[0]?.id ?? "";
+    S.loading = false;
+    renderFlow();
+    renderDetail();
+  } else {
+    S.loading = true;
+    renderFlow();
+  }
+
   const d = await getJSON(`api/entries?limit=100&topic=${encodeURIComponent(topic)}`);
-  S.entries = d.hits ?? [];
-  S.selectedId = S.entries[0]?.id ?? "";
-  S.hint = d.hint ?? "";
+  // 请求回来时用户可能已经点到别的话题了，丢掉过期的结果。
+  if (S.topic !== topic) return;
+  const hits = d.hits ?? [];
+  S.cache.set(topic, hits);
+  S.entries = hits;
+  S.loading = false;
+  if (!S.entries.some((x) => x.id === S.selectedId)) S.selectedId = S.entries[0]?.id ?? "";
   renderFlow();
   renderDetail();
 }
 
 async function search(q) {
+  S.loading = true;
+  renderFlow();
   const d = await getJSON(`api/search?q=${encodeURIComponent(q)}`);
   S.entries = d.hits ?? [];
   S.selectedId = S.entries[0]?.id ?? "";
+  S.loading = false;
   renderFlow();
   renderDetail();
 }
@@ -211,8 +408,9 @@ async function loadState() {
   try {
     S.state = await getJSON("api/state");
     renderState();
-  } catch (e) {
-    $("status").innerHTML = `<i class="dot busy"></i><span>状态读取失败</span>`;
+  } catch {
+    $("status-text").textContent = "状态读取失败";
+    $("status-dot").className = "dot idle";
   }
 }
 
@@ -230,10 +428,9 @@ function wire() {
   });
 
   $("flow").addEventListener("click", (e) => {
-    const raw = e.target.closest("a[data-raw]");
-    if (raw) {
+    if (e.target.closest("a[data-raw]")) {
       e.preventDefault();
-      e.stopPropagation();
+      return;
     }
     const li = e.target.closest("li[data-id]");
     if (!li) return;
@@ -262,16 +459,19 @@ function wire() {
   });
 
   $("theme").addEventListener("click", () => {
-    applyLook(
-      document.documentElement.dataset.brand,
-      document.documentElement.dataset.theme === "dark" ? "light" : "dark"
-    );
+    applyLook({ ...look(), theme: look().theme === "dark" ? "light" : "dark" });
   });
 
   document.querySelector(".swatches").addEventListener("click", (e) => {
     const b = e.target.closest(".sw");
     if (!b) return;
-    applyLook(b.dataset.brand, document.documentElement.dataset.theme);
+    applyLook({ ...look(), brand: b.dataset.brand });
+  });
+
+  $("density").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-density]");
+    if (!b) return;
+    applyLook({ ...look(), density: b.dataset.density });
   });
 
   addEventListener("keydown", (e) => {
@@ -280,15 +480,46 @@ function wire() {
       $("q").focus();
     }
   });
+
+  $("btn-drawer").addEventListener("click", () => openDrawer(!S.drawer.open));
+  $("drawer-close").addEventListener("click", () => openDrawer(false));
+  $("scrim").addEventListener("click", () => openDrawer(false));
+  $("drawer-tabs").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-tab]");
+    if (!b) return;
+    S.drawer.tab = b.dataset.tab;
+    S.notice = "";
+    renderDrawer();
+  });
+  $("btn-run").addEventListener("click", () => postAction("api/run", "跑一轮"));
+  $("btn-retry").addEventListener("click", () => postAction("api/retry?all=1", "重跑死信"));
+  addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && S.drawer.open) openDrawer(false);
+  });
+
+  wireHandles();
 }
 
 function showError(e) {
+  S.loading = false;
+  $("flow-loading").hidden = true;
+  $("flow").hidden = false;
   $("flow").innerHTML = `<li class="empty">读不出来：${esc(e.message)}</li>`;
 }
 
 /* ---------- 启动 ---------- */
 bootLook();
+// ?drawer=queue|dead|log|model：直接打开抽屉的那一页，截图和贴链接时用。
+{
+  const q = new URLSearchParams(location.search);
+  if (TABS.includes(q.get("drawer"))) {
+    S.drawer.open = true;
+    S.drawer.tab = q.get("drawer");
+  }
+}
+bootWidth();
 wire();
+openDrawer(S.drawer.open);
 loadState();
 loadTopics()
   .then(() => {
@@ -301,5 +532,5 @@ loadTopics()
   })
   .catch(showError);
 
-// 服务和统计每 10 秒刷一次，话题目录不跟着刷——它变得很慢，刷了反而跳。
+// 服务和统计每 10 秒刷一次；话题目录不跟着刷——它变得很慢，刷了反而跳。
 setInterval(loadState, 10000);
