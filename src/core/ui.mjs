@@ -426,6 +426,12 @@ function authOk(req, expected) {
 }
 
 /**
+ * Basic 口令的失败限速。
+ *
+ * 面板挂在公网域名后面，Basic 没有限速就等于让人无限猜。只放内存里：重启就清零，
+ * 不值得为这种小事再落一个文件。按 IP 记 5 分钟内 10 次失败，超了回 429。
+ */
+/**
  * Host 头是不是本机的。
  *
  * 防的是 DNS rebinding：攻击者把 `evil.com` 解析到 127.0.0.1，你打开那个页面，
@@ -461,6 +467,36 @@ export function startUi({ port = 7787, host = "127.0.0.1", allowHosts = [], auth
       `拒绝启动：面板显示的是记忆库正文，绑到 ${host} 必须同时给账号密码（--auth user:密码，或 MEM_PANEL_AUTH）`
     );
   }
+const authFails = new Map();
+const AUTH_WINDOW_MS = 5 * 60_000;
+const AUTH_MAX_FAILS = 10;
+
+function clientIp(req) {
+  return String(req.socket?.remoteAddress ?? "unknown");
+}
+
+function authBlockedFor(req) {
+  const r = authFails.get(clientIp(req));
+  if (!r) return 0;
+  if (Date.now() >= r.until) {
+    authFails.delete(clientIp(req));
+    return 0;
+  }
+  return r.n >= AUTH_MAX_FAILS ? Math.max(1, Math.ceil((r.until - Date.now()) / 1000)) : 0;
+}
+
+function authFailed(req) {
+  const ip = clientIp(req);
+  const r = authFails.get(ip);
+  if (!r || Date.now() >= r.until) authFails.set(ip, { n: 1, until: Date.now() + AUTH_WINDOW_MS });
+  else r.n++;
+  // 极端情况下别让这张表无限长：清一遍过期的。
+  if (authFails.size > 2000) {
+    for (const [k, v] of authFails) if (Date.now() >= v.until) authFails.delete(k);
+  }
+}
+
+
   const server = http.createServer(async (req, res) => {
     // 点一下就归档、跑一轮的面板不该被别的站点套进 iframe 里点。
     res.setHeader("x-frame-options", "DENY");
@@ -476,13 +512,20 @@ export function startUi({ port = 7787, host = "127.0.0.1", allowHosts = [], auth
       if (!hostOk(req, host, allowHosts)) {
         return json(403, { error: `不认这个 Host（${String(req.headers.host ?? "")}）：用 IP 或 localhost 访问，或启动时加 --allow-host` });
       }
+      const wait = auth ? authBlockedFor(req) : 0;
+      if (wait) {
+        res.setHeader("retry-after", String(wait));
+        return json(429, { error: `口令错太多次，${wait} 秒后再试` });
+      }
       if (auth && !authOk(req, auth)) {
+        authFailed(req);
         res.writeHead(401, {
           "www-authenticate": 'Basic realm="siyuan-mem", charset="UTF-8"',
           "content-type": "text/plain; charset=utf-8",
         });
         return res.end("需要登录");
       }
+      if (auth) authFails.delete(clientIp(req));
       if (req.method === "GET" && serveStatic(url.pathname, res)) return;
       if (req.method === "GET" && url.pathname === "/api/state") {
         return json(200, await state());

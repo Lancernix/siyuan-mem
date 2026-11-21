@@ -131,3 +131,14 @@ test("写操作的同源判断能容忍大小写与端口差异", async (t) => {
   // localhost 与 127.0.0.1 都算回环，大小写不同不该被判成跨站
   assert.notEqual(res.status, 403);
 });
+
+test("Basic 口令连续猜错会被限速", async (t) => {
+  const ui = await boot(t, { auth: AUTH });
+  const wrong = { authorization: "Basic " + Buffer.from("me:wrong").toString("base64") };
+  for (let i = 0; i < 10; i++) assert.equal((await get(ui, "/", wrong)).status, 401);
+  const r = await get(ui, "/", wrong);
+  assert.equal(r.status, 429);
+  assert.ok(Number(r.headers.get("retry-after")) > 0, "要告诉客户端等多久");
+  const ok = await get(ui, "/", { authorization: "Basic " + Buffer.from(AUTH).toString("base64") });
+  assert.equal(ok.status, 429, "封禁期内即使口令对了也先挡住");
+});

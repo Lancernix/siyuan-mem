@@ -268,3 +268,32 @@ test("判重回 200 但内容不是 JSON：拆半后的叶子失败也要算进 
   assert.equal(out.unjudged, 1, "拆半叶子全失败也必须报 unjudged（failed 恒为 0 的坑）");
   assert.ok(out.calls >= 3, "父块 + 两个叶子至少三次调用");
 });
+
+test("判重池读不出来就停手：不许当空表继续写", () => {
+  const out = run(`
+    import { mkdtempSync, writeFileSync } from "node:fs";
+    import { join } from "node:path";
+    import { processQueue } from "./src/core/jobs.mjs";
+    import { INBOX_DIR } from "./src/util/config.mjs";
+
+    writeFileSync(join(INBOX_DIR, "sess-pool.json"), JSON.stringify({
+      session_id: "pool", harness: "dsh", machine: "Mac", cwd: "/tmp/proj", date: "2026-11-18", turnFrom: 1,
+      turns: [{ role: "user", text: "端口映射这一块到底该怎么配才对" }, { role: "assistant", text: "按 1000 改，改完重启容器。" }],
+    }));
+    const store = {
+      listCurrent: async () => { throw new Error("SQL 超时"); },
+      docIds: async () => ({ notebook: "box", months: {}, entries: "e", entities: "n", pending: "p" }),
+      ensureGroupAnchor: async () => "",
+      supersede: async () => {},
+      writeEntry: async () => {},
+    };
+    const cfg = { raw: { enabled: false }, model: { apiKey: "k", baseUrl: "http://127.0.0.1:1/v1", name: "x", provider: "openai", wire: "openai", retries: 0 }, extract: {} };
+    const extract = async () => ({ entries: [{ entity: "端口映射", text: "端口映射按 1000 改", brief: "端口映射", type: "fact", from: 1, to: 1 }], mode: "model", batches: 1, usage: {}, coveredThrough: null });
+    let err = "";
+    try {
+      await processQueue({ useModel: true, deps: { cfg, sy: {}, store, extract }, maxSessionMs: 1000, maxMs: 1000 });
+    } catch (e) { err = e.message; }
+    console.log(JSON.stringify({ err }));
+  `);
+  assert.match(out.err, /判重池读不出来/, "要把停手原因说清楚，不能静默写库");
+});

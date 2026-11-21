@@ -79,6 +79,31 @@ function safeLabel(s) {
  * 一个 part 的字节内容。首行 meta，后面一行一轮。
  * 头里放 from/to/turns/chars/hash：读之前就能知道这份文件覆盖哪一段、多大。
  */
+/**
+ * 同一段轮次的内容 hash，算法与 buildPart 保持一致。
+ * 老 part 的索引没有 hash 字段，没法校验——那种情况按「可信」处理，
+ * 否则一次升级就会把全部历史原文重传一遍。
+ */
+function hashRange(turns, from, to, turnFrom) {
+  const rows = [];
+  for (let i = from; i <= to; i++) {
+    const t = turns[i - turnFrom];
+    if (!t) return null;
+    rows.push({ i, role: t.role, text: String(t.text ?? "") });
+  }
+  return createHash("sha1")
+    .update(rows.map((r) => `${r.i}\u0000${r.role}\u0000${r.text}`).join("\u0001"))
+    .digest("hex")
+    .slice(0, 16);
+}
+
+/** 范围对得上、且索引里有 hash 时内容也要对上，才能复用旧 part。 */
+function matchesPart(part, turns, turnFrom) {
+  if (!(part.from <= turnFrom && part.to >= turnFrom + turns.length - 1)) return false;
+  if (!part.hash) return true;
+  return hashRange(turns, part.from, part.to, turnFrom) === part.hash;
+}
+
 export function buildPart(meta, turns) {
   if (!turns.length) throw new Error("buildPart 收到空 turns");
   const from = Number(meta.from) || 1;
@@ -172,11 +197,14 @@ export async function archive({ sy, cfg, ids, payload, dry = false, log = () => 
     harness: payload.harness,
     session,
   });
-  const covered = existing.find((p) => p.from <= from && p.to >= to);
+  const covered = existing.find((p) => matchesPart(p, turns, from));
+  // 范围对得上但内容变了（日志被重写）：旧指针会指向另一份内容，不能复用。
+  const stale = !covered && existing.some((p) => p.from <= from && p.to >= to);
   // path 必须带上：调用方靠它给会话分组项挂 `[原文](assets/…)`，那是附件唯一的
   // 保活引用。漏了这个字段，重跑一遍已归档的会话，链接就全没了——条目属性里
   // 指针还在，但正文里没人引用，下次「清理未引用资源」就把附件扫走。
   if (covered) return [{ skip: true, ptr: null, from, to, path: covered.path, existing: covered }];
+  if (stale) log("    原文日志改过内容，旧指针不再可信，这一段重新归档");
 
   const maxBytes = rawCfg.forcePartBytes ?? 8 * 1024 * 1024;
   const chunks = sliceByBytes({ machine: payload.machine, harness: payload.harness }, turns, maxBytes);
@@ -196,7 +224,11 @@ export async function archive({ sy, cfg, ids, payload, dry = false, log = () => 
   for (let k = 0; k < chunks.length; k++) {
     const chunk = chunks[k];
     const [a, b] = ranges[k];
-    const done = existing.find((p) => p.from <= a && p.to >= b);
+    const done = existing.find((p) => {
+      if (!(p.from <= a && p.to >= b)) return false;
+      if (!p.hash) return true;
+      return hashRange(turns, p.from, p.to, from) === p.hash;
+    });
 
     const meta = {
       machine: payload.machine ?? "",
@@ -229,9 +261,10 @@ export async function archive({ sy, cfg, ids, payload, dry = false, log = () => 
     // 引用由条目的会话分组项承担，少一个文档、少一次写。
     const idx = loadRawIndex();
     const key = indexKey(payload.machine, payload.harness, session);
-    idx[key] = [...(idx[key] ?? existing), { path, from: part.from, to: part.to }];
+    // hash 要进索引：下次才能发现「范围没变但日志内容改了」。
+    idx[key] = [...(idx[key] ?? existing), { path, from: part.from, to: part.to, hash: part.hash }];
     saveRawIndex(idx);
-    existing.push({ path, from: part.from, to: part.to });
+    existing.push({ path, from: part.from, to: part.to, hash: part.hash });
 
     out.push({ ptr, path, from: part.from, to: part.to, bytes: part.buf.length, chars: part.chars });
     log(`    原文 ${path.split("/").pop()}  第 ${part.from}–${part.to} 轮  ${fmtChars(part.chars)}`);

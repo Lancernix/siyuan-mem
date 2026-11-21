@@ -234,7 +234,16 @@ export async function processQueue({
   // 判重用的条目池：一轮读一次，之后每写一条往里补一条。不从 SQL 现查——块索引有
   // 3 秒延迟，这一轮刚写的条目查不回来，会被判成「库里没有」。
 
-  const known = !dry && useModel ? await store.listCurrent().catch(() => []) : [];
+  // 读不到判重池就停手，不能当空表继续：空表会让每条新条目都判成「库里没有」，
+  // 于是一堆重复被写进去，日志上却一切正常。
+  let known = [];
+  if (!dry && useModel) {
+    try {
+      known = await store.listCurrent();
+    } catch (e) {
+      throw new Error(`判重池读不出来，本轮停手（不写没判过重的条目）：${e.message}`);
+    }
+  }
   // 判重池是有上限的（默认 3000）。撞到上限时判重会漏——新条目跟池子外那条
   // 是同一件事也发现不了——而这件事看不出来，只能主动报。
   if (known.length >= 3000) {
@@ -820,10 +829,16 @@ export async function processQueue({
       // 收敛要给模型看证据：光给名字，「mcp-adapter」和「DSH MCP 插件生态」
       // 在字面上就是一大一小两个名字，看不出后者桶里装的其实是前者。
       const samples = new Map();
-      for (const r of await store.listCurrent().catch(() => [])) {
-        const list = samples.get(r.entity) ?? [];
-        if (list.length < 3 && r.brief) list.push(r.brief);
-        samples.set(r.entity, list);
+      try {
+        for (const r of await store.listCurrent()) {
+          const list = samples.get(r.entity) ?? [];
+          if (list.length < 3 && r.brief) list.push(r.brief);
+          samples.set(r.entity, list);
+        }
+      } catch (e) {
+        // 收敛只是改善名字归并，缺证据可以退化为「只看名字」；但要说出来，
+        // 不能静默成 samples 为空、下次还以为收敛跑得挺好。
+        onLine(`    ! 收敛证据读不出来，这一轮只按主题名收敛：${e.message}`);
       }
       const merges = await convergeTopics({ cfg, table: entityTable, samples, log: onLine, deadline: Date.now() + 5 * 60_000 });
       for (const [from, to] of merges) {
