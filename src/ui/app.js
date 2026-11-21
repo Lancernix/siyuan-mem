@@ -319,10 +319,12 @@ function renderAlerts() {
   const bar = $("alertbar");
   if (!list.length) {
     bar.hidden = true;
+    document.documentElement.style.setProperty("--alert-h", "0px");
     return;
   }
   // 一次只显示最新的一条，其余在展开的死信页里看——顶部堆三条就没人看了。
   bar.hidden = false;
+  document.documentElement.style.setProperty("--alert-h", "36px");
   $("alert-text").textContent = list[0].text;
   $("alertbar").dataset.kind = list[0].kind;
 }

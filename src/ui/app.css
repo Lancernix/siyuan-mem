@@ -161,27 +161,22 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 /* 告警条：浮在顶栏下面，不占布局——它出现和消失时不该让整个页面跳一下 */
 .alertbar {
-  position: fixed; top: calc(var(--topbar-h) + var(--sp-2)); left: 50%;
-  transform: translateX(-50%);
   display: flex; align-items: center; gap: var(--sp-3);
-  max-width: min(720px, calc(100vw - var(--sp-8)));
-  padding: var(--sp-2) var(--sp-3) var(--sp-2) var(--sp-4);
+  height: 36px; padding: 0 var(--sp-5);
   background: var(--st-warn-bg);
   color: var(--st-warn-fg);
-  border: 1px solid var(--st-warn-bd);
-  border-radius: var(--r-sm);
-  box-shadow: var(--shadow-float, 0 8px 28px rgba(0, 0, 0, 0.35));
+  border-bottom: 1px solid var(--st-warn-bd);
   font-size: var(--fs-xs);
-  z-index: var(--z-toast);
 }
 .alertbar .alert-text { line-height: var(--lh-snug); }
+.alertbar .alert-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .alertbar .btn { background: transparent; border-color: var(--st-warn-bd); color: var(--st-warn-fg); }
 
 /* ---------- 三栏 ---------- */
 .shell {
   display: grid;
   grid-template-columns: var(--col-left) 5px minmax(0, 1fr) 5px var(--col-right);
-  height: calc(100dvh - var(--topbar-h) - 36px);
+  height: calc(100dvh - var(--topbar-h) - 36px - var(--alert-h, 0px));
 }
 .handle {
   cursor: col-resize; background: transparent; position: relative;
