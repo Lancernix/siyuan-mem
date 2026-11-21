@@ -5,6 +5,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -26,4 +27,30 @@ test("不同 kind 各留一条，清空后为空", () => {
   assert.equal(alerts().length, 1);
   clear();
   assert.equal(alerts().length, 0);
+});
+
+
+test("告警会发到群机器人 Webhook，重复内容不重发", async () => {
+  const got = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      got.push(JSON.parse(body));
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ errcode: 0 }));
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  process.env.MEM_ALERT_WEBHOOK = `http://127.0.0.1:${server.address().port}/hook`;
+  try {
+    raise("webhook-test", "一次测试告警");
+    raise("webhook-test", "一次测试告警"); // 同样的文字不该再发
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(got.length, 1);
+    assert.match(got[0].text ?? JSON.stringify(got[0]), /测试告警/);
+  } finally {
+    delete process.env.MEM_ALERT_WEBHOOK;
+    server.close();
+  }
 });

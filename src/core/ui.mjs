@@ -200,6 +200,12 @@ function settingsView() {
       wire: v.wire,
       baseUrl: v.baseUrl,
     })),
+    alerts: {
+      webhook: cfg.ui?.alertWebhook
+        ? `${String(cfg.ui.alertWebhook).slice(0, 24)}…（已配置）`
+        : "未配置",
+      configured: Boolean(cfg.ui?.alertWebhook || process.env.MEM_ALERT_WEBHOOK),
+    },
     params: {
       extract: cfg.extract ?? {},
       serve: cfg.serve ?? {},
@@ -702,6 +708,22 @@ function authFailed(req) {
         if (!name || !/^[A-Za-z0-9._-]+$/.test(name)) return json(400, { error: "版本号不对" });
         restorePrompt(name);
         return json(200, { ok: true, version: promptState().version });
+      }
+      if (req.method === "POST" && url.pathname === "/api/settings/alerts") {
+        if (!fromThisPage(req)) return json(403, { error: "只接受面板自己发起的请求" });
+        const b = await readBody(req);
+        const raw = String(b.webhook ?? "").trim();
+        if (raw) {
+          let u;
+          try {
+            u = new URL(raw);
+          } catch {
+            return json(400, { error: "Webhook 地址写错了" });
+          }
+          if (u.protocol !== "https:") return json(400, { error: "Webhook 必须是 https" });
+        }
+        saveConfig({ ui: { alertWebhook: raw } });
+        return json(200, { ok: true });
       }
       if (req.method === "POST" && url.pathname === "/api/alerts/clear") {
         if (!fromThisPage(req)) return json(403, { error: "只接受面板自己发起的请求" });

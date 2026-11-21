@@ -539,7 +539,11 @@ function renderSettings() {
       <input id="r-enabled" type="checkbox" style="width:auto" ${d.params.raw?.enabled ? "checked" : ""}> 归档原文到 assets
     </label>
     <p class="note">原文目录：${esc(d.params.raw?.dir ?? "mem-raw")}</p>
-    <div class="actions"><button class="btn primary" data-act="params-save">保存参数</button></div>`;
+    <div class="actions"><button class="btn primary" data-act="params-save">保存参数</button></div>
+    <h3 style="margin-top:var(--sp-6)">告警外发</h3>
+    <p class="note">当前：${esc(d.alerts?.webhook ?? "未配置")}。支持企业微信 / 钉钉 / 飞书群机器人，或任何接受 JSON 的 https Webhook；留空则只在面板里显示。</p>
+    <label>Webhook 地址 <input id="a-webhook" type="url" placeholder="https://…（留空清空）"></label>
+    <div class="actions"><button class="btn" data-act="alerts-save">保存 Webhook</button></div>`;
 }
 
 async function settingsPost(url, body, label) {
@@ -843,6 +847,8 @@ function wire() {
       settingsPost("api/settings/prompt", { text: val("p-text") }, "提示词保存");
     } else if (b.dataset.act === "prompt-restore") {
       settingsPost("api/settings/prompt/restore", { name: b.dataset.name }, "回滚");
+    } else if (b.dataset.act === "alerts-save") {
+      settingsPost("api/settings/alerts", { webhook: val("a-webhook") }, "Webhook 保存");
     } else if (b.dataset.act === "params-save") {
       settingsPost(
         "api/settings/params",

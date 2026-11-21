@@ -7,7 +7,7 @@
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { HOME_DIR } from "../util/config.mjs";
+import { HOME_DIR, loadConfig } from "../util/config.mjs";
 
 const PATH = join(HOME_DIR, "alerts.json");
 
@@ -20,7 +20,32 @@ export function alerts() {
   }
 }
 
+/**
+ * 群机器人消息体各家不一样，按域名挑一个。认不出的按通用 {text} 发。
+ * 这是尽力而为：发失败不能影响主流程，面板里那条还在，不会真丢。
+ */
+function webhookBody(url, text) {
+  const host = (() => { try { return new URL(url).hostname; } catch { return ""; } })();
+  if (/qyapi\.weixin\.qq\.com$/.test(host)) return { msgtype: "text", text: { content: text } };
+  if (/oapi\.dingtalk\.com$/.test(host)) return { msgtype: "text", text: { content: text } };
+  if (/open\.feishu\.cn$/.test(host)) return { msg_type: "text", content: { text } };
+  return { text };
+}
+
+function deliver(url, text) {
+  if (!url) return;
+  fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(webhookBody(url, text)),
+    signal: AbortSignal.timeout(6000),
+  }).catch(() => {});
+}
+
 export function raise(kind, text) {
+  const old = alerts().find((a) => a.kind === kind);
+  // 同一件事反复出现、文字都没变，不重复发——否则每轮一条，群里很快没人看了。
+  if (old?.text === text) return alerts();
   const list = alerts().filter((a) => a.kind !== kind);
   list.unshift({ kind, text, at: new Date().toISOString() });
   try {
@@ -29,6 +54,9 @@ export function raise(kind, text) {
   } catch {
     // 写不进去不影响主流程：告警是提示，不是账本。
   }
+  // Webhook 是凭据：配置优先，环境变量兜底（容器里注入更方便）。
+  const url = process.env.MEM_ALERT_WEBHOOK || loadConfig().ui?.alertWebhook || "";
+  deliver(url, `[siyuan-mem] ${text}`);
   return list;
 }
 
