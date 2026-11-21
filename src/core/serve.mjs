@@ -33,6 +33,7 @@ import { checkDedupe } from "./selfcheck.mjs";
 import { SiYuan, resolveNotebookId } from "../util/siyuan.mjs";
 import { startUi } from "./ui.mjs";
 import { startIngest } from "./ingest.mjs";
+import { raise as raiseAlert } from "./alerts.mjs";
 
 export { LOCK_PATH, LOG_PATH };
 
@@ -483,6 +484,11 @@ export async function serve({ once = false, dry = false, useModel = true, interv
         );
       }
       if (!r.candidates && !r.sessions) log("  队列空，也没有新会话");
+      // 只在这几种「需要人看一眼」的情况下留告警：死信、整批判重没跑成、模型配置坏。
+      // 模型抖动不告警——下一轮可能自己好，报了只会训练人忽略。
+      if (r.dead > 0) raiseAlert("dead", `${r.dead} 个会话试到上限进了死信（共 ${r.dead} 个包，面板可一键捞回）`);
+      if ((r.unjudged ?? 0) >= 3) raiseAlert("unjudged", `本轮 ${r.unjudged} 个会话判重没跑成，产出没写进库`);
+      if (r.modelDown?.fatal) raiseAlert("model", `模型不可用：${String(r.modelDown.error ?? "").slice(0, 120)}`);
       event("round", {
         no: roundNo,
         ms: Date.now() - t0,

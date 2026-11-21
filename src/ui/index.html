@@ -52,6 +52,11 @@
   </div>
 </header>
 
+<div class="alertbar" id="alertbar" hidden>
+  <span class="alert-text" id="alert-text"></span>
+  <button class="btn" id="alert-clear">知道了</button>
+</div>
+
 <div class="shell" id="shell">
   <nav class="pane" aria-label="话题">
     <div class="nav-tabs" role="tablist">
@@ -137,6 +142,7 @@
   <span class="grp">队列 <b class="num" id="w-queue">0</b></span>
   <span class="grp">今日 <b class="num" id="w-usage">0</b> 次 / 失败 <b class="num" id="w-failed">0</b></span>
   <span class="grp" id="w-model">—</span>
+  <span class="grp wide">写入 <b class="num" id="w-written">0</b> · 合并 <b class="num" id="w-merge">0%</b></span>
   <span class="spacer"></span>
   <span class="grp" id="w-last">—</span>
   <button class="toggle" id="btn-drawer"><span id="drawer-label">展开</span>

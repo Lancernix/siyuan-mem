@@ -159,6 +159,24 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 .icon-btn:hover { background: var(--surface-hover); color: var(--text-1); }
 
+/* 告警条：浮在顶栏下面，不占布局——它出现和消失时不该让整个页面跳一下 */
+.alertbar {
+  position: fixed; top: calc(var(--topbar-h) + var(--sp-2)); left: 50%;
+  transform: translateX(-50%);
+  display: flex; align-items: center; gap: var(--sp-3);
+  max-width: min(720px, calc(100vw - var(--sp-8)));
+  padding: var(--sp-2) var(--sp-3) var(--sp-2) var(--sp-4);
+  background: var(--st-warn-bg);
+  color: var(--st-warn-fg);
+  border: 1px solid var(--st-warn-bd);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-float, 0 8px 28px rgba(0, 0, 0, 0.35));
+  font-size: var(--fs-xs);
+  z-index: var(--z-toast);
+}
+.alertbar .alert-text { line-height: var(--lh-snug); }
+.alertbar .btn { background: transparent; border-color: var(--st-warn-bd); color: var(--st-warn-fg); }
+
 /* ---------- 三栏 ---------- */
 .shell {
   display: grid;
@@ -468,5 +486,5 @@ body.resizing { cursor: col-resize; user-select: none; }
   .flow-head .sub { display: none; }
   .entry { padding: var(--sp-3) var(--sp-3); }
   .worker { gap: var(--sp-2); padding: 0 var(--sp-3); font-size: var(--fs-2xs); white-space: nowrap; overflow: hidden; }
-  .worker .grp:nth-child(3), .worker .grp:nth-child(5) { display: none; }
+  .worker .grp:nth-child(3), .worker .grp:nth-child(5), .worker .wide { display: none; }
 }

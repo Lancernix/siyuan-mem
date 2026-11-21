@@ -34,6 +34,9 @@ import { resolveNotebookId } from "../util/siyuan.mjs";
 import { archiveEntries } from "./archive.mjs";
 import { promptState } from "./extract.mjs";
 import { history as promptHistory, savePrompt, restore as restorePrompt } from "./prompt.mjs";
+import { alerts as listAlerts, clear as clearAlerts } from "./alerts.mjs";
+import { pathOf, dayOf } from "../util/log.mjs";
+import { statSync } from "node:fs";
 
 /** 队列项只读头部：完整会话可能有几 MB，面板不需要。 */
 function queueItem(file) {
@@ -91,28 +94,46 @@ async function sessionSummaries(limit = 100) {
     if (!sid) continue;
     let g = groups.get(sid);
     if (!g) {
-      g = { id: sid, count: 0, last: "", project: "", machine: "" };
+      // dates 用 Map 计数：一个 session 只跨一天就是普通会话，跨多天说明这里的
+      // session 其实是个长期会话 ID（老数据的常见情况），下面按日期再切一刀。
+      g = { id: sid, count: 0, last: "", project: "", machine: "", dates: new Map() };
       groups.set(sid, g);
     }
     g.count++;
     const date = attrOf(r.ial, ATTR.date) || "";
+    if (date) g.dates.set(date, (g.dates.get(date) ?? 0) + 1);
     if (date > g.last) g.last = date;
     if (!g.project) g.project = attrOf(r.ial, ATTR.project) || "";
     if (!g.machine) g.machine = attrOf(r.ial, ATTR.machine) || "";
   }
-  return [...groups.values()]
+
+  const out = [];
+  for (const g of groups.values()) {
+    if (g.dates.size <= 1) {
+      out.push({ id: g.id, count: g.count, last: g.last, project: g.project, machine: g.machine });
+      continue;
+    }
+    // 跨天的会话：一天一行，id 用 sid@date，取条目时按日期再过一遍。
+    for (const [date, count] of g.dates) {
+      out.push({ id: `${g.id}@${date}`, session: g.id, date, count, last: date, project: g.project, machine: g.machine, split: true });
+    }
+  }
+  return out
     .sort((a, b) => String(b.last).localeCompare(String(a.last)) || b.count - a.count)
     .slice(0, limit);
 }
 
 /** 一场会话抽出的条目。字段与 /api/entries 保持一致，前端能共用一套渲染。 */
-async function sessionEntries(sid, limit = 100) {
+async function sessionEntries(rawSid, limit = 100) {
+  const [sid, date] = String(rawSid).split("@");
+  const clean = sid.replace(/[^a-zA-Z0-9_-]/g, "");
+  const dayFilter = /^\d{4}-\d{2}-\d{2}$/.test(date ?? "") ? `AND ial LIKE '%${ATTR.date}="${date}"%'` : "";
   const { sy, cfg } = open();
   const notebook = await resolveNotebookId(sy, cfg);
   const rows = await sy.sql(
     `SELECT id, content, ial FROM blocks
       WHERE type='p' AND box='${notebook}' AND ial LIKE '%${ATTR.hash}="%'
-        AND ial LIKE '%${ATTR.session}="${sid.replace(/[^a-zA-Z0-9_-]/g, "")}"%'
+        AND ial LIKE '%${ATTR.session}="${clean}"%' ${dayFilter}
       ORDER BY updated DESC LIMIT ${limit}`
   );
   if (!Array.isArray(rows)) return [];
@@ -241,6 +262,48 @@ async function dayEntries(date, limit = 100) {
   });
 }
 
+/**
+ * 今天的写入/合并计数，用来在面板上盯「合并率」。
+ *
+ * 合并率 = covered / (写入 + covered)：判重吃掉的候选占全部的比例。太高说明
+ * 抽取在重复造同一批东西，或者判重把新信息误判成旧信息——两种都要人看一眼。
+ * 按文件 mtime+size 缓存，面板每 10 秒轮询不会反复读几 MB 日志。
+ */
+let todayCache = { key: "", value: null };
+function todayCounts() {
+  const file = pathOf(dayOf());
+  let st;
+  try {
+    st = statSync(file);
+  } catch {
+    return { written: 0, covered: 0, dedupeFailed: 0, mergeRate: 0 };
+  }
+  const key = `${file}:${st.mtimeMs}:${st.size}`;
+  if (todayCache.key === key) return todayCache.value;
+
+  let written = 0, covered = 0, dedupeFailed = 0;
+  try {
+    for (const line of readFileSync(file, "utf8").split("\n")) {
+      if (!line) continue;
+      let e;
+      try {
+        e = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (e.ev === "entry.write") written++;
+      else if (e.ev === "entry.skip" && e.reason === "covered") covered++;
+      else if (e.ev === "dedupe.failed") dedupeFailed++;
+    }
+  } catch {
+    // 读不动就当没数据，不要因为统计把面板带挂。
+  }
+  const total = written + covered;
+  const value = { written, covered, dedupeFailed, mergeRate: total ? Math.round((covered / total) * 100) : 0 };
+  todayCache = { key, value };
+  return value;
+}
+
 function tailLog(lines = 30) {
   if (!existsSync(LOG_PATH)) return [];
   const all = readFileSync(LOG_PATH, "utf8").trimEnd().split("\n");
@@ -260,6 +323,8 @@ async function state() {
     stats,
     queue: pending().map(queueItem),
     dead: deadPackages(),
+    alerts: listAlerts(),
+    today: todayCounts(),
     entries,
     model: { provider: m.provider, wire: m.wire, model: m.model, configured: hasModel(cfg) },
     usage: usageToday(),
@@ -568,6 +633,11 @@ export function startUi({ port = 7787, host = "127.0.0.1", allowHosts = [], auth
         if (!name || !/^[A-Za-z0-9._-]+$/.test(name)) return json(400, { error: "版本号不对" });
         restorePrompt(name);
         return json(200, { ok: true, version: promptState().version });
+      }
+      if (req.method === "POST" && url.pathname === "/api/alerts/clear") {
+        if (!fromThisPage(req)) return json(403, { error: "只接受面板自己发起的请求" });
+        clearAlerts(url.searchParams.get("kind") ?? "");
+        return json(200, { ok: true });
       }
       if (req.method === "POST" && url.pathname === "/api/retry") {
         if (!fromThisPage(req)) return json(403, { error: "只接受面板自己发起的请求" });

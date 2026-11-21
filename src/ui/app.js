@@ -197,7 +197,7 @@ function renderTopics() {
     el.innerHTML = sorted(S.sessions)
       .map(
         (t) => `<li data-session="${esc(t.id)}" ${t.id === S.session ? 'aria-current="true"' : ""}>
-          <span class="name" title="${esc(t.id)}">${esc(String(t.id).slice(0, 12))}${t.project ? ` · ${esc(t.project)}` : ""}</span>
+          <span class="name" title="${esc(t.id)}">${esc(String(t.session ?? t.id).slice(0, 10))}${t.split ? ` · ${esc(String(t.date).slice(5))}` : t.project ? ` · ${esc(t.project)}` : ""}</span>
           <span class="n num">${t.count ?? 0}</span>
           <span class="date num">${esc((t.last ?? "").slice(5))}</span>
         </li>`
@@ -229,7 +229,10 @@ function renderFlow() {
     : S.mode === "timeline"
       ? S.day || "时间线"
       : S.mode === "sessions"
-        ? String(S.session || "").slice(0, 16)
+        ? (() => {
+            const [sid, day] = String(S.session || "").split("@");
+            return sid.slice(0, 12) + (day ? ` · ${day}` : "");
+          })()
         : S.topic || "全部条目";
   $("flow-sub").textContent = S.loading ? "" : S.entries.length ? `${S.entries.length} 条` : "";
 
@@ -311,6 +314,19 @@ function renderDetail() {
     </dl>`;
 }
 
+function renderAlerts() {
+  const list = S.state?.alerts ?? [];
+  const bar = $("alertbar");
+  if (!list.length) {
+    bar.hidden = true;
+    return;
+  }
+  // 一次只显示最新的一条，其余在展开的死信页里看——顶部堆三条就没人看了。
+  bar.hidden = false;
+  $("alert-text").textContent = list[0].text;
+  $("alertbar").dataset.kind = list[0].kind;
+}
+
 function renderState() {
   const st = S.state;
   if (!st) return;
@@ -320,6 +336,7 @@ function renderState() {
 
   const busy = Boolean(st.busy?.running);
   const secs = st.busy?.seconds;
+  renderAlerts();
   $("status-dot").className = `dot ${busy ? "busy" : "idle"}`;
   $("status-text").textContent = busy ? "正在抽取" : "空闲";
   $("status-sub").textContent = busy
@@ -337,6 +354,9 @@ function renderState() {
   $("w-usage").textContent = String(use.calls ?? 0);
   $("w-failed").textContent = String(use.failed ?? 0);
   $("w-model").textContent = st.model?.configured ? `${st.model.provider} · ${st.model.model}` : "没配模型";
+  const today = st.today ?? {};
+  $("w-written").textContent = String(today.written ?? 0);
+  $("w-merge").textContent = `${today.mergeRate ?? 0}%`;
   $("w-last").textContent = st.siyuan?.version ? `思源 ${st.siyuan.version}` : "—";
 }
 
@@ -843,6 +863,14 @@ function wire() {
         "参数保存"
       );
     }
+  });
+
+  $("alert-clear").addEventListener("click", async () => {
+    const kind = $("alertbar").dataset.kind ?? "";
+    try {
+      await fetch(`api/alerts/clear?kind=${encodeURIComponent(kind)}`, { method: "POST" });
+      await loadState();
+    } catch {}
   });
 
   $("sort").addEventListener("change", (e) => {
