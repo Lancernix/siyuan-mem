@@ -74,7 +74,13 @@ function normalize(body, fallbackMachine = "") {
     const role = t?.role === "assistant" ? "assistant" : t?.role === "user" ? "user" : null;
     const text = typeof t?.text === "string" ? t.text : "";
     if (!role || !text.trim()) continue;
-    clean.push({ role, text });
+    // 时间戳必须留着：内容日期按轮次算（跨天的大包要落回各自那天），
+    // 只留包尾的 date 会让整包都算成最后一天。数字当毫秒，字符串按 ISO 解析。
+    const rawAt = t?.at;
+    const at = Number.isFinite(Number(rawAt)) && Number(rawAt) > 0
+      ? Number(rawAt)
+      : typeof rawAt === "string" ? Date.parse(rawAt) || undefined : undefined;
+    clean.push(at ? { role, text, at } : { role, text });
   }
   return {
     payload: {

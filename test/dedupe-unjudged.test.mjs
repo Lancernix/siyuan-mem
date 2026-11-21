@@ -148,13 +148,15 @@ test("判重正常时不误伤：抽取的结果照写", () => {
     import { processQueue } from "./src/core/jobs.mjs";
     import { INBOX_DIR } from "./src/util/config.mjs";
 
-    // 判重回「都不重复」：合法 JSON，decisions 为空。
+    // 判重回「保持原样」：这是正常结论，不该被当成失败。
+    let judgeCalls = 0;
     const server = createServer((req, res) => {
       let body = "";
       req.on("data", (d) => { body += d; });
       req.on("end", () => {
+        judgeCalls++;
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ decisions: [] }) } }] }));
+        res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ decisions: [{ new: 1, match: 1, action: "keep" }] }) } }] }));
       });
     });
     await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -163,8 +165,10 @@ test("判重正常时不误伤：抽取的结果照写", () => {
 
     let writes = 0;
     const store = {
+      // 候选要跟新条目沾边，否则 pickCandidates 直接返回空、模型一次都不会被调，
+      // 这条断言就成了「没跑也算过」——原来的写法正是如此。
       listCurrent: async () => [
-        { id: "old-1", entity: "其他话题", brief: "别的事", text: "跟这一场无关的另一条结论。", project: "/tmp/proj" },
+        { id: "old-1", entity: "端口映射", brief: "端口映射按 1000 改", text: "端口映射按 1000 改，改完重启容器。", project: "/tmp/proj" },
       ],
       docIds: async () => ({ notebook: "box", months: {}, entries: "e", entities: "n", pending: "p" }),
       ensureGroupAnchor: async () => "",
@@ -194,10 +198,73 @@ test("判重正常时不误伤：抽取的结果照写", () => {
 
     const sum = await processQueue({ useModel: true, deps: { cfg, sy: {}, store, extract }, maxSessionMs: 60_000, maxMs: 60_000 });
     server.close();
-    console.log(JSON.stringify({ written: sum.written, unjudged: sum.unjudged, writes }));
+    console.log(JSON.stringify({ written: sum.written, unjudged: sum.unjudged, writes, judgeCalls }));
   `);
 
   assert.equal(out.writes, 1, "判重说「都不重复」，就该照写");
   assert.equal(out.written, 1);
-  assert.equal(out.unjudged, 0, "不许因为判重结论为空就当成失败");
+  assert.equal(out.unjudged, 0, "keep 是正常结论，不该被当成失败");
+  assert.ok(out.judgeCalls > 0, "判重必须真的被调过——候选不沾边时这条断言会恒真");
+});
+
+
+test("判重回 200 但内容不是 JSON：拆半后的叶子失败也要算进 unjudged", () => {
+  const out = run(`
+    import { createServer } from "node:http";
+    import { writeFileSync } from "node:fs";
+    import { join } from "node:path";
+    import { processQueue } from "./src/core/jobs.mjs";
+    import { INBOX_DIR } from "./src/util/config.mjs";
+
+    let calls = 0;
+    const server = createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        calls++;
+        // 200 + 一句人话：JSON.parse 失败，判重会拆半，叶子继续失败。
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ choices: [{ message: { content: "好的，我看过了" } }] }));
+      });
+    });
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+
+    writeFileSync(join(INBOX_DIR, "sess-c.json"), JSON.stringify({
+      session_id: "c", harness: "dsh", machine: "Mac", cwd: "/tmp/proj", date: "2026-11-18", turnFrom: 1,
+      turns: [
+        { role: "user", text: "端口映射这一块到底该怎么配才对" },
+        { role: "assistant", text: "端口映射按 1000 改，改完重启容器，否则跑的还是旧配置。" },
+      ],
+    }));
+
+    let writes = 0;
+    const store = {
+      listCurrent: async () => [
+        { id: "old-1", entity: "端口映射", brief: "端口映射按 990 改", text: "端口映射按 990 改，改完重启容器。", project: "/tmp/proj" },
+        { id: "old-2", entity: "端口映射", brief: "端口映射按 1000 改", text: "端口映射按 1000 改，改完要重启容器。", project: "/tmp/proj" },
+      ],
+      docIds: async () => ({ notebook: "box", months: {}, entries: "e", entities: "n", pending: "p" }),
+      ensureGroupAnchor: async () => "",
+      supersede: async () => {},
+      writeEntry: async () => { writes++; return { id: "new-" + writes }; },
+    };
+    const cfg = {
+      raw: { enabled: false },
+      model: { apiKey: "k", baseUrl: "http://127.0.0.1:" + server.address().port + "/v1", name: "judge-bad", provider: "openai", wire: "openai", retries: 0, timeoutMs: 2000 },
+      extract: { minTurnChars: 5, maxCharsPerCall: 16000, maxEntriesPerBatch: 8, maxEntriesPerSession: 200 },
+    };
+    const extract = async () => ({
+      entries: [
+        { entity: "端口映射", text: "端口映射按 1000 改，改完重启容器", brief: "端口映射按 1000 改", type: "fact", from: 1, to: 1 },
+        { entity: "端口映射", text: "改完不重启容器，跑的还是旧配置", brief: "改完要重启容器", type: "fact", from: 1, to: 1 },
+      ],
+      mode: "model", batches: 1, usage: { prompt: 0, completion: 0 }, coveredThrough: null,
+    });
+    const sum = await processQueue({ useModel: true, deps: { cfg, sy: {}, store, extract }, maxSessionMs: 60_000, maxMs: 60_000 });
+    server.close();
+    console.log(JSON.stringify({ writes, unjudged: sum.unjudged, calls }));
+  `);
+
+  assert.equal(out.writes, 0, "没判过重就不许写");
+  assert.equal(out.unjudged, 1, "拆半叶子全失败也必须报 unjudged（failed 恒为 0 的坑）");
+  assert.ok(out.calls >= 3, "父块 + 两个叶子至少三次调用");
 });

@@ -104,3 +104,30 @@ test("静态文件带 no-store，改完刷新就是新的", async (t) => {
   assert.match(res.headers.get("content-type") ?? "", /text\/css/);
   assert.equal(res.headers.get("cache-control"), "no-store");
 });
+
+
+test("参数不接受 0：空输入框会让抽取死循环、一轮什么都不做", async (t) => {
+  const ui = await boot(t);
+  const post = (body) =>
+    fetch(`${ui.url}/api/settings/params`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: ui.url },
+      body: JSON.stringify(body),
+    });
+  assert.equal((await post({ extract: { maxCharsPerCall: 0 } })).status, 400);
+  assert.equal((await post({ serve: { maxSessionsPerRound: 0 } })).status, 400);
+  // 正常值仍然放行
+  assert.equal((await post({ extract: { maxCharsPerCall: 20000 } })).status, 200);
+});
+
+test("写操作的同源判断能容忍大小写与端口差异", async (t) => {
+  const ui = await boot(t);
+  const upper = `http://LOCALHOST:${ui.port}`;
+  const res = await fetch(`${ui.url}/api/settings/params`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: upper },
+    body: JSON.stringify({ extract: { maxCharsPerCall: 20000 } }),
+  });
+  // localhost 与 127.0.0.1 都算回环，大小写不同不该被判成跨站
+  assert.notEqual(res.status, 403);
+});

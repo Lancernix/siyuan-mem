@@ -224,3 +224,21 @@ test("ping 也要 token，别当公开探针", async (t) => {
   const ok = await fetch(`${s.url}/api/ping`, { headers: { authorization: `Bearer ${TOKEN}` } });
   assert.equal(ok.status, 200);
 });
+
+
+test("轮次时间戳要保留：否则跨天的大包全被算成包尾那天", async (t) => {
+  const s = await boot(t);
+  const at = Date.parse("2026-11-18T10:00:00Z");
+  const r = await post(s, {
+    session_id: "sess-at", harness: "dsh", machine: "Mac", date: "2026-11-18", range: [0, 2],
+    turns: [
+      { role: "user", text: "端口映射到底该怎么配才对", at },
+      { role: "assistant", text: "按 1000 改，改完重启容器。", at: at + 60_000 },
+    ],
+  });
+  assert.equal(r.status, 200);
+  const files = readdirSync(INBOX_DIR).filter((f) => f.endsWith(".json"));
+  const payload = files.map((f) => JSON.parse(readFileSync(join(INBOX_DIR, f), "utf8"))).find((p) => p.session_id === "sess-at");
+  assert.ok(payload, "队列里应该有这一包");
+  assert.equal(payload.turns[0].at, at, "收到的 at 要原样留着");
+});

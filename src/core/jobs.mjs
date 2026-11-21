@@ -482,10 +482,13 @@ export async function processQueue({
           // 给判重单独两分钟：它不是可选的收尾，是防止写重样的最后一道闸。
           deadline: Math.max(sessionDeadline, Date.now() + maxDedupeMs),
         });
-        dedupeFailed = dedupeStats().failed - failedBefore;
+        // 拆半重试的子块失败只记 leafFailed。只读 failed 的话，一个 8 条的块
+        // 拆成 8 个叶子全失败，failed 仍是 0 → unjudged=0 → 没判过重的条目照写不误。
+        const ds = dedupeStats();
+        dedupeFailed = ds.failed + ds.leafFailed - failedBefore;
         // 记真实模型调用次数，不是「有裁决的批次」：判 keep 时一条裁决都没有，
         // 那个数会是 0，看不出这一轮到底花了多少调用。
-        sum.dedupeCalls += dedupeStats().calls - callsBefore;
+        sum.dedupeCalls += ds.calls - callsBefore;
         sum.dedupeMs += Date.now() - t0;
         for (const [idx, d] of decisions) {
           event("dedupe.decision", {

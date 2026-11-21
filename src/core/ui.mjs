@@ -8,6 +8,7 @@
  * 会显示条目正文和日志，没有鉴权就暴露，等于把记忆库摊在网上。
  */
 import http from "node:http";
+import { isIP } from "node:net";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readFileSync, existsSync, readdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
@@ -133,7 +134,8 @@ async function sessionEntries(rawSid, limit = 100) {
   const rows = await sy.sql(
     `SELECT id, content, ial FROM blocks
       WHERE type='p' AND box='${notebook}' AND ial LIKE '%${ATTR.hash}="%'
-        AND ial LIKE '%${ATTR.session}="${clean}"%' ${dayFilter}
+        AND ial LIKE '%${ATTR.session}="${clean}"%'
+        AND ial NOT LIKE '%${ATTR.status}="archived"%' ${dayFilter}
       ORDER BY updated DESC LIMIT ${limit}`
   );
   if (!Array.isArray(rows)) return [];
@@ -240,6 +242,7 @@ async function dayEntries(date, limit = 100) {
     `SELECT id, content, ial FROM blocks
       WHERE type='p' AND box='${notebook}' AND ial LIKE '%${ATTR.hash}="%'
         AND ial LIKE '%${ATTR.date}="${clean}"%'
+        AND ial NOT LIKE '%${ATTR.status}="archived"%'
       ORDER BY updated DESC LIMIT ${limit}`
   );
   if (!Array.isArray(rows)) return [];
@@ -392,8 +395,11 @@ function fromThisPage(req) {
   if (!origin) return true;
   try {
     const u = new URL(origin);
-    if (u.host === String(req.headers.host ?? "")) return true;
-    return u.hostname === "127.0.0.1" || u.hostname === "localhost" || u.hostname === "::1";
+    // 两端都归一化成 hostname 再比：反代常把 Host 写成 `MEM.EXAMPLE.COM:443` 或
+    // 小写化的域名，字符串全等比会把合法的同源 POST 全判成跨站。
+    const hostName = String(req.headers.host ?? "").replace(/:\d+$/, "").replace(/^\[|\]$/g, "").toLowerCase();
+    if (u.hostname.toLowerCase() === hostName) return true;
+    return ["127.0.0.1", "localhost", "::1"].includes(u.hostname.toLowerCase());
   } catch {
     return false;
   }
@@ -441,7 +447,9 @@ function hostOk(req, boundHost, allowHosts = []) {
   if (name === bound) return true;
   // 绑到通配地址时没法预知会被用哪个名字访问，只放行 IP 字面量和 localhost：
   // 局域网里敲 192.168.x.x 照常用，而 evil.com 这种域名一律拒掉。
-  if (bound === "0.0.0.0" || bound === "::") return /^[0-9a-f.]+$/.test(name) || name === "localhost";
+  // 用 isIP 而不是字符集正则：`beef.cafe`、`abc.de` 也全是 a-f 和点，
+  // 正则放行等于给域名开了后门（实测 200）。
+  if (bound === "0.0.0.0" || bound === "::") return isIP(name) !== 0 || name === "localhost";
   return false;
 }
 
@@ -454,6 +462,10 @@ export function startUi({ port = 7787, host = "127.0.0.1", allowHosts = [], auth
     );
   }
   const server = http.createServer(async (req, res) => {
+    // 点一下就归档、跑一轮的面板不该被别的站点套进 iframe 里点。
+    res.setHeader("x-frame-options", "DENY");
+    res.setHeader("x-content-type-options", "nosniff");
+    res.setHeader("content-security-policy", "frame-ancestors 'none'; base-uri 'none'");
     const url = new URL(req.url, "http://localhost");
     const json = (code, obj) => {
       res.writeHead(code, { "content-type": "application/json; charset=utf-8" });
@@ -557,6 +569,20 @@ export function startUi({ port = 7787, host = "127.0.0.1", allowHosts = [], auth
         const b = await readBody(req);
         const provider = String(b.provider ?? "").trim();
         if (!provider) return json(400, { error: "要选一家 provider" });
+        // 保存前先看端点：探活会把现有 key 发到这个地址，允许任意 http 地址等于
+        // 把 key 交给别人（也是受限 SSRF）。只放行 https，或本机/内网已知的 http。
+        const base = String(b.base ?? "").trim();
+        if (base) {
+          try {
+            const u = new URL(base);
+            const local = ["127.0.0.1", "localhost", "[::1]", "::1", "magpie"].includes(u.hostname);
+            if (u.protocol !== "https:" && !local) {
+              return json(400, { error: "端点必须是 https；只有本机或 magpie 这类内网地址允许 http" });
+            }
+          } catch {
+            return json(400, { error: "端点地址写错了" });
+          }
+        }
         try {
           const m = saveModelChoice(provider, {
             apiKey: b.apiKey ? String(b.apiKey).trim() : "",
@@ -597,7 +623,7 @@ export function startUi({ port = 7787, host = "127.0.0.1", allowHosts = [], auth
         ]) {
           if (b.extract?.[k] != null) {
             const n = Number(b.extract[k]);
-            if (!Number.isFinite(n) || n < 0) return json(400, { error: `extract.${k} 要是不小于 0 的数` });
+            if (!Number.isFinite(n) || n < 1) return json(400, { error: `extract.${k} 必须是不小于 1 的数（0 会让抽取死循环）` });
             (patch.extract ??= {})[k] = n;
           }
         }
@@ -610,7 +636,7 @@ export function startUi({ port = 7787, host = "127.0.0.1", allowHosts = [], auth
         ]) {
           if (b.serve?.[k] != null) {
             const n = Number(b.serve[k]);
-            if (!Number.isFinite(n) || n < 0) return json(400, { error: `serve.${k} 要是不小于 0 的数` });
+            if (!Number.isFinite(n) || n < 1) return json(400, { error: `serve.${k} 必须是不小于 1 的数（0 会让这一轮什么都不做）` });
             (patch.serve ??= {})[k] = n;
           }
         }
