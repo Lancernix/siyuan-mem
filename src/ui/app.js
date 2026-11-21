@@ -23,6 +23,7 @@ const S = {
   entries: [],
   selectedId: "",
   q: "",
+  terms: [],
   state: null,
   loading: false,
   /** 左栏目录在换页：用居中的 spinner，不用骨架——那一栏只有名字和数字，骨架反而看不出在干嘛 */
@@ -259,6 +260,7 @@ function renderFlow() {
       const status = h.status || "current";
       const type = TYPE_LABEL[h.type] || h.type || "";
       const bits = [
+        S.q && h.entity ? `<span>${esc(h.entity)}</span><span class="sep">·</span>` : "",
         `<span class="num">${esc(h.date || "")}</span>`,
         type ? `<span class="sep">·</span><span>${esc(type)}</span>` : "",
         h.project ? `<span class="sep">·</span><span>${esc(h.project)}</span>` : "",
@@ -272,14 +274,23 @@ function renderFlow() {
           : `<span class="badge ${STATUS_CLASS[status] || "mute"}">${esc(STATUS_LABEL[status] || status)}</span>`;
       return `<li class="entry" data-id="${esc(h.id)}" ${h.id === S.selectedId ? 'aria-current="true"' : ""}>
         <div class="l1">
-          <span class="brief">${esc(h.brief || firstLine(h.text))}</span>
+          <span class="brief">${S.q ? mark(h.brief || firstLine(h.text), S.terms) : esc(h.brief || firstLine(h.text))}</span>
           ${statusTag}
         </div>
-        <div class="body">${esc(h.text || "")}</div>
+        <div class="body">${S.q ? mark(h.text, S.terms) : esc(h.text || "")}</div>
         <div class="meta">${bits.join("")}</div>
       </li>`;
     })
     .join("");
+}
+
+/** 搜索结果里把命中的词标出来。先转义再包 mark，避免正文里的尖括号变成标签。 */
+function mark(text, terms) {
+  const safe = esc(text ?? "");
+  const words = (terms ?? []).map((t) => String(t).trim()).filter((t) => t && t.length > 1);
+  if (!words.length) return safe;
+  const re = new RegExp(`(${words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "gi");
+  return safe.replace(re, "<mark>$1</mark>");
 }
 
 function firstLine(t) {
@@ -678,6 +689,7 @@ async function search(q) {
   S.loading = true;
   renderFlow();
   const d = await getJSON(`api/search?q=${encodeURIComponent(q)}`);
+  S.terms = d.terms ?? d.scoreTerms ?? [];
   S.entries = d.hits ?? [];
   S.selectedId = S.entries[0]?.id ?? "";
   S.loading = false;

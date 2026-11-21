@@ -16,6 +16,7 @@ import { normalizeTurns, promptState, toExchanges } from "../core/extract.mjs";
 import { drop, pending, readSession } from "../core/inbox.mjs";
 import { searchEntries } from "../core/search.mjs";
 import { listTopics, listEntries } from "../core/browse.mjs";
+import { findDuplicates, pickPairs } from "../core/dups.mjs";
 import { archiveEntries } from "../core/archive.mjs";
 import { emptyText, failureText } from "../core/search-reason.mjs";
 import { remoteSearch, remoteTopics, remoteEntries, remoteArchive } from "../util/remote.mjs";
@@ -46,6 +47,9 @@ const USAGE = `mem —— 把 harness 会话变成思源笔记里的记忆条目
   mem search <词...>              默认只看 current（--limit --topic --project --type --days --json）
   mem search --all <词...>        连已过时的也查
   mem search --to URL <词...>     从中心查（边缘机器用，token 取 push.token 或 --token）
+  mem dups [--min 0.75] [--all]   找存量重复条目（只列，不改）
+  mem dups --apply [--yes]        把重合最高的那些「旧条目」标成 superseded
+                                  （不删块，原文指针保住）
   mem review [n]                  列最近 n 条，人工扫一眼
   mem show <块id> [--chars N]     回读这条结论对应的原文
   mem mcp [--to URL] [--token T]  起 MCP server（stdio），给 harness 调召回
@@ -433,6 +437,49 @@ async function cmdAudit(flags, rest) {
     const pct = ((r.kept / r.total) * 100).toFixed(1);
     console.log(`${r.harness.padEnd(10)} 收 ${String(r.kept).padStart(9)} / 共 ${String(r.total).padStart(9)} 字 = ${pct}%`);
   }
+}
+
+async function cmdDups(args, flags) {
+  const cfg = loadConfig();
+  const { sy } = open();
+  const min = Number(flags.min ?? 0.75);
+  if (!Number.isFinite(min) || min < 0.5 || min > 1) throw new Error("--min 要在 0.5 到 1 之间");
+  const { total, pairs } = await findDuplicates({ sy, cfg, min, crossEntity: Boolean(flags.all) });
+  const chosen = pickPairs(pairs);
+
+  if (!flags.apply) {
+    console.log(`${total} 条 current，重合 ≥${min}：${pairs.length} 对；去掉重复推荐后 ${chosen.length} 对可处置`);
+    for (const p of chosen.slice(0, 30)) {
+      console.log(`${p.cov.toFixed(2)}  ${p.keep.entity || "?"} · ${p.keep.date || "?"}`);
+      console.log(`  留 ${p.keep.id}  ${p.keep.text.slice(0, 70)}`);
+      console.log(`  弃 ${p.drop.id}  ${p.drop.text.slice(0, 70)}`);
+    }
+    if (chosen.length > 30) console.log(`  …还有 ${chosen.length - 30} 对`);
+    console.log("「留/弃」只是按长度给的默认建议，不是结论；确认后加 --apply 执行 supersede。");
+    return;
+  }
+  if (!chosen.length) {
+    console.log("没有要处理的重复条目。");
+    return;
+  }
+  if (!flags.yes) {
+    console.log(`将把 ${chosen.length} 条标成 superseded（不删块、可撤销）。确认请加 --yes：`);
+    for (const p of chosen) console.log(`  ${p.drop.id} → ${p.keep.id}  (${p.cov.toFixed(2)})`);
+    return;
+  }
+  const { store } = open();
+  let n = 0;
+  for (const p of chosen) {
+    try {
+      await store.supersede(p.drop.id, p.keep.id);
+      n++;
+      console.log(`已标过时 ${p.drop.id} → ${p.keep.id}`);
+    } catch (e) {
+      // 单条失败不影响其它：块没了、已被别处取代，都不该拖住整批。
+      console.log(`跳过 ${p.drop.id}：${e.message}`);
+    }
+  }
+  console.log(`处理了 ${n} 条。superseded 不删块、原文指针保住；改回 current 只需改块属性 custom-mem-status。`);
 }
 
 async function cmdReview(args) {
@@ -1325,6 +1372,8 @@ async function main() {
       return cmdAudit(flags, rest);
     case "search":
       return cmdSearch(rest, flags);
+    case "dups":
+      return cmdDups(rest, flags);
     case "review":
       return cmdReview(rest);
     case "show":

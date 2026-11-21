@@ -271,6 +271,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .entry[aria-current="true"] { background: var(--surface); box-shadow: inset 2px 0 0 var(--brand); }
 .entry .l1 { display: flex; align-items: center; gap: var(--sp-2); }
 .entry .brief { font-size: var(--fs-sm); font-weight: var(--fw-medium); color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.entry mark { background: var(--brand-subtle); color: var(--brand-fg); border-radius: var(--r-xs); padding: 0 2px; }
 .entry .body { font-size: var(--fs-sm); color: var(--text-3); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .entry .meta { display: flex; align-items: center; gap: var(--sp-1); font-size: var(--fs-2xs); color: var(--text-4); }
 .entry .meta .sep { color: var(--border-strong); }
