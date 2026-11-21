@@ -28,6 +28,12 @@ async function withModel(reply, fn) {
     req.on("data", (c) => (body += c));
     req.on("end", () => {
       calls++;
+      // 用 { __status: 500 } 模拟端点真的挂了；直接传 500 会被当成模型回复
+      // 正文 "500"，那是「解析出来的东西形状不对」，跟调用失败不是一回事。
+      if (reply && typeof reply === "object" && reply.__status) {
+        res.writeHead(reply.__status, { "content-type": "text/plain" });
+        return res.end("boom");
+      }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
         JSON.stringify({
@@ -100,7 +106,7 @@ test("调用失败时不拆半重试：拆了只是把同样的失败乘上叶�
   // 拆半的本意是「一次塞太多、模型挑不过来」。端点挂掉（5xx/超时）跟内容多少无关，
   // 拆成 8 份就是打 8 次、错 8 次。2026-11-10 那次判重失效，一个 8 条的块被拆成
   // 8 个叶子、每个都抛同一个 ReferenceError，日志上看像「模型大面积失败」。
-  await withModel(500, async ({ cfg, calls }) => {
+  await withModel({ __status: 500 }, async ({ cfg, calls }) => {
     const pairs = Array.from({ length: 8 }, (_, k) => {
       const n = k + 1;
       return {
@@ -116,5 +122,35 @@ test("调用失败时不拆半重试：拆了只是把同样的失败乘上叶�
       deadline: Date.now() + 5000,
     });
     assert.equal(calls(), 1, `8 条的块失败一次就该收手，实际打了 ${calls()} 次`);
+  });
+});
+
+test("decisions 被包成对象/字符串时也要认：模型答了就不能当成没答", async () => {
+  const existing = [mk("e1", "容器内 nginx 监听 7788，宿主机映射写成 7789 了，改回去就好。")];
+  const news = [mk("n1", "容器里 nginx 监听的是 7788，宿主机映射写成了 7789，要改回来。")];
+
+  for (const reply of [
+    { decisions: { 1: { new: 1, match: 1, action: "replace" } } },
+    { decisions: JSON.stringify([{ new: 1, match: 1, action: "replace" }]) },
+    { decisions: { items: [{ new: 1, match: 1, action: "replace" }] } },
+  ]) {
+    await withModel(reply, async ({ cfg, calls }) => {
+      const out = await judgeDuplicates({ cfg, news, existing, deadline: Date.now() + 5000 });
+      assert.equal(calls(), 1, "形状不对时不该拆半，先按一种形状解析");
+      assert.equal(out.get(0)?.action, "replace", `这个形状该认得出来：${JSON.stringify(reply)}`);
+    });
+  }
+});
+
+test("decisions 形状不对且有多条时拆半重试", async () => {
+  const existing = [mk("e1", "容器内 nginx 监听 7788，宿主机映射写成 7789 了，改回去就好。")];
+  const news = [
+    mk("n1", "容器里 nginx 监听的是 7788，宿主机映射写成了 7789，要改回来。"),
+    mk("n2", "容器里的 nginx 端口是 7788，宿主机映射成 7789，需要改回来。"),
+  ];
+  await withModel({ foo: "bar" }, async ({ cfg, calls }) => {
+    const out = await judgeDuplicates({ cfg, news, existing, deadline: Date.now() + 5000 });
+    assert.equal(calls(), 3, "一个父块拆成两半，应该一共发三次");
+    assert.equal(out.size, 0, "模型一直不给结构，就没有裁决");
   });
 });

@@ -243,6 +243,43 @@ export function renderChunk(chunk) {
   return lines.join("\n");
 }
 
+/**
+ * 把模型的 decisions 归一化成数组。
+ *
+ * 实测模型会给出四种形状：数组（正常）、字符串化的数组、以编号为键的对象、
+ * 以及干脆漏掉外层、直接把单条裁决放在顶层。只认第一种的话，明明答了也会被
+ * 当成「没答」，整批作废——这类失败看起来像模型挂了，其实是解析太窄。
+ *
+ * 空数组仍然按「没给」处理：哨兵要能看到「模型什么都没裁」，
+ * 这跟「全都判 keep」在数据上无法区分，只能当失败。
+ */
+function decisionsOf(parsed) {
+  let raw = parsed?.decisions ?? parsed?.decisions_list;
+  if (raw == null) {
+    // 顶层直接给一条裁决：{"new":1,"action":"keep"}
+    if (parsed && typeof parsed === "object" && (parsed.new != null || parsed.action != null)) {
+      return [parsed];
+    }
+    return [];
+  }
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+  if (Array.isArray(raw)) return raw.filter((x) => x && typeof x === "object");
+  if (raw && typeof raw === "object") {
+    for (const key of ["items", "list", "decisions"]) {
+      if (Array.isArray(raw[key])) return raw[key].filter((x) => x && typeof x === "object");
+    }
+    const vals = Object.values(raw).filter((x) => x && typeof x === "object");
+    if (vals.length) return vals;
+  }
+  return [];
+}
+
 async function judgeChunk({ cfg, chunk, out, depth = 0, deadline = Number.POSITIVE_INFINITY }) {
   const lines = renderChunk(chunk).split("\n");
 
@@ -314,22 +351,22 @@ async function judgeChunk({ cfg, chunk, out, depth = 0, deadline = Number.POSITI
     return out;
   }
 
-  const decisions = Array.isArray(parsed?.decisions) ? parsed.decisions : [];
-  // 模型答了但没给出可用的 decisions，跟「模型说没重复」是两回事：前者是链路失效。
-  if (depth === 0) {
-    if (decisions.length) stats.answered++;
-    else {
-      stats.failed++;
-      stats.lastError = "模型没有返回可解析的 decisions";
-    }
-  }
+  const decisions = decisionsOf(parsed);
+  // 拿不到可用裁决 = 链路失效。跟 JSON 解析失败同一套判断：塞太多时模型才会
+  // 漏掉结构，拆半有意义；只有一条时拆无可拆，直接记失败。
   if (!decisions.length) {
-    event("dedupe.failed", {
-      size: chunk.length,
-      reason: "no-decisions",
+    if (depth < 2 && chunk.length > 1) {
+      const mid = Math.ceil(chunk.length / 2);
+      await judgeChunk({ cfg, chunk: chunk.slice(0, mid), out, depth: depth + 1, deadline });
+      await judgeChunk({ cfg, chunk: chunk.slice(mid), out, depth: depth + 1, deadline });
+      return out;
+    }
+    recordFail(new Error("模型没有返回可解析的 decisions"), "no-decisions", {
       keys: Object.keys(parsed ?? {}).slice(0, 3).join(","),
     });
+    return out;
   }
+  if (depth === 0) stats.answered++;
 
   // 对上候选的条数（含 keep）。判 keep 是完全正常的结果，不能算「对不上」。
   let matched = 0;
