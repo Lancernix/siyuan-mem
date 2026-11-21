@@ -965,6 +965,11 @@ renderFlow();
     }
   }
   if (q.get("day")) S.day = q.get("day");
+  if (q.get("q")) {
+    S.q = q.get("q");
+    S.terms = [];
+    $("q").value = S.q;
+  }
   if (["model", "prompt", "params"].includes(q.get("settings"))) {
     S.settings.open = true;
     S.settings.tab = q.get("settings");
@@ -981,6 +986,7 @@ openSettings(S.settings.open);
 loadState();
 loadTopics()
   .then(async () => {
+    if (S.q) return search(S.q);
     if (S.mode === "timeline") {
       await loadDays();
       if (!S.day) S.day = S.days[0]?.date ?? "";
