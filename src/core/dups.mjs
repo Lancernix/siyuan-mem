@@ -36,7 +36,9 @@ export async function findDuplicates({ sy, cfg, min = 0.75, crossEntity = false,
   if (!box) throw new Error(`找不到笔记本「${notebook}」`);
   const rows = await sy.sql(
     `SELECT id, content, ial FROM blocks WHERE box='${box}' AND type='p'
-       AND ial LIKE '%${ATTR.hash}="%' AND ial NOT LIKE '%${ATTR.status}="archived"%'
+       AND ial LIKE '%${ATTR.hash}="%'
+       AND ial NOT LIKE '%${ATTR.status}="archived"%'
+       AND ial NOT LIKE '%${ATTR.status}="superseded"%'
        ORDER BY updated DESC LIMIT ${limit}`
   );
   if (!Array.isArray(rows)) throw new Error("列条目失败：SQL 没返回数组");
