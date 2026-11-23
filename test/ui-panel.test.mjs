@@ -14,6 +14,7 @@ import { join } from "node:path";
 process.env.HOME = mkdtempSync(join(tmpdir(), "mem-ui-panel-"));
 
 const { startUi } = await import("../src/core/ui.mjs");
+const { loadConfig } = await import("../src/util/config.mjs");
 
 const AUTH = "me:s3cret-pass";
 
@@ -178,14 +179,36 @@ test("安全响应头在位：不许被 iframe 套、不许猜类型", async (t)
 });
 
 
-test("默认参数原样保存不能被自己的上限打回", async (t) => {
+/**
+ * 面板会把可保存字段全量提交（app.js 的 renderSettings → params-save）。
+ * 只要有一个默认值落在服务端的 LIMITS 之外，用户打开设置页什么都不改、点保存
+ * 就被 400 打回——2026-11-24 的 entityShotList（默认 300、上限 100）就是这么来的。
+ *
+ * 所以这里遍历 DEFAULTS 里的全部可保存字段，而不是写死某几个值：
+ * 以后新增字段会自动纳入，不用记得回来补测试。
+ */
+const SAVE_KEYS = {
+  extract: ["minTurnChars", "maxCharsPerCall", "maxEntriesPerBatch", "entityShotList"],
+  serve: ["maxSessionsPerRound", "maxMinutesPerRound", "maxMinutesPerSession", "maxConsecutiveFailures", "maxAttemptsPerSession"],
+};
+
+test("所有默认参数原样保存都要通过：新增字段自动纳入", async (t) => {
   const ui = await boot(t);
-  // 这两个默认值分别是 300 和 38000：上限一度压到 100/100，打开设置页什么都不改
-  // 点保存就 400。默认值必须落在 LIMITS 内，否则界面和后端自相矛盾。
+  const cfg = loadConfig();
+  const body = {
+    extract: Object.fromEntries(SAVE_KEYS.extract.map((k) => [k, cfg.extract[k]])),
+    serve: Object.fromEntries(SAVE_KEYS.serve.map((k) => [k, cfg.serve[k]])),
+  };
   const res = await fetch(`${ui.url}/api/settings/params`, {
     method: "POST",
     headers: { "content-type": "application/json", origin: ui.url },
-    body: JSON.stringify({ extract: { entityShotList: 300, maxCharsPerCall: 38000 } }),
+    body: JSON.stringify(body),
   });
   assert.equal(res.status, 200, "面板显示的默认值必须能原样存回去");
+
+  // 顺带核对落盘值：回显的默认值跟真正写进去的要一致，别一个 200 一个静默改数。
+  const saved = loadConfig();
+  for (const [group, keys] of Object.entries(SAVE_KEYS)) {
+    for (const k of keys) assert.equal(saved[group][k], cfg[group][k], `${group}.${k} 没原样落盘`);
+  }
 });
