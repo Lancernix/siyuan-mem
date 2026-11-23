@@ -166,3 +166,13 @@ test("绑定 0.0.0.0 时用 isIP 判断，beef.cafe 这种字母域名必须 403
   assert.equal((await rawGet(ui, "/", { ...auth, host: "beef.cafe" }))[0], 403);
   assert.equal((await rawGet(ui, "/", { ...auth, host: "127.0.0.1" }))[0], 200);
 });
+
+
+test("安全响应头在位：不许被 iframe 套、不许猜类型", async (t) => {
+  const ui = await boot(t);
+  const r = await get(ui, "/");
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get("x-frame-options"), "DENY");
+  assert.equal(r.headers.get("x-content-type-options"), "nosniff");
+  assert.match(r.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
+});
