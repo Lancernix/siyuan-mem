@@ -669,7 +669,9 @@ function authFailed(req) {
             minTurnChars: [1, 10000],
             maxCharsPerCall: [1, 200000],
             maxEntriesPerBatch: [1, 100],
-            entityShotList: [1, 100],
+            // 默认就是 300：抽取时带进 prompt 的已有实体数。上限压到 100 的话，
+            // 用户打开设置页什么都不改、点保存就会被自己配置的默认值 400 打回。
+            entityShotList: [1, 500],
           },
           serve: {
             maxSessionsPerRound: [1, 1000],

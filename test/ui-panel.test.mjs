@@ -176,3 +176,16 @@ test("安全响应头在位：不许被 iframe 套、不许猜类型", async (t)
   assert.equal(r.headers.get("x-content-type-options"), "nosniff");
   assert.match(r.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
 });
+
+
+test("默认参数原样保存不能被自己的上限打回", async (t) => {
+  const ui = await boot(t);
+  // 这两个默认值分别是 300 和 38000：上限一度压到 100/100，打开设置页什么都不改
+  // 点保存就 400。默认值必须落在 LIMITS 内，否则界面和后端自相矛盾。
+  const res = await fetch(`${ui.url}/api/settings/params`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: ui.url },
+    body: JSON.stringify({ extract: { entityShotList: 300, maxCharsPerCall: 38000 } }),
+  });
+  assert.equal(res.status, 200, "面板显示的默认值必须能原样存回去");
+});
