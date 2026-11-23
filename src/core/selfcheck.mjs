@@ -65,13 +65,13 @@ export async function checkDedupe(cfg, { deadlineMs = 90_000 } = {}) {
     if (after.failed > before.failed) {
       return { ok: false, reason: `判重没生效：${after.lastError || "模型调用失败"}`, ms, action: "" };
     }
-    // 关键的一条：必须**真的拿到一份可解析的裁决**。
+    // 关键的一条：样本是**特意做成重复**的，所以必须真的判出一条裁决。
     //
-    // 只看 failed 是不够的——模型返回 `{"decisions":[]}`（换了键名、或者干脆没按格式回）
-    // 时既不抛错也不产生裁决，failed 不动，哨兵就会报「通过」。而这恰恰是哨兵最该
-    // 抓的那种「静默失效」。
-    if (after.answered <= before.answered) {
-      return { ok: false, reason: "模型没有返回可解析的裁决（空结果也算坏）", ms, action: "" };
+    // 不能只看 failed：模型回 `{"decisions":[]}` 时既不抛错、failed 也不动。
+    // 注意这里跟正常判重不同——正常批次的空数组是合法的「都不重复」，
+    // 而自检样本本来就是同一条的两个说法，判空说明模型没在干活。
+    if (after.matched <= before.matched) {
+      return { ok: false, reason: "自检样本没有被判出重复（空结果也算坏）", ms, action: "" };
     }
     // 判成 keep 也是通的：哨兵验链路，不验判断力。
     return { ok: true, reason: "", ms, action: out.get(0)?.action ?? "keep" };

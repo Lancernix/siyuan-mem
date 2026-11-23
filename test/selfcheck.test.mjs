@@ -161,15 +161,15 @@ test("子块失败按 depth 分流：两个视图里的数字要一致", () => {
 });
 
 test("模型返回空裁决：哨兵必须报错，这就是它要抓的「静默失效」", async () => {
-  // {"decisions":[]} 是模型换了个键名、或者没按格式回的典型样子。它不抛错、
-  // 不产生裁决，如果只看 failed 计数，哨兵会报「通过」——正是最该抓的那种坏。
+  // 自检样本是特意做成重复的：判空说明模型没在干活。跟正常批次的空数组不是一回事，
+  // 那里的空是合法的「都不重复」。
   resetDedupeStats();
   await withModel(
     200,
     async ({ cfg }) => {
       const r = await checkDedupe(cfg, { deadlineMs: 5000 });
       assert.equal(r.ok, false, "空裁决就是链路没通，不能报通过");
-      assert.match(r.reason, /判重没生效|decisions/);
+      assert.match(r.reason, /判重没生效|decisions|样本/);
     },
     "keep",
     { decisions: [] },

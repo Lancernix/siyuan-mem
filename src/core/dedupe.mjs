@@ -221,14 +221,14 @@ export function resolveMatch(match, ids) {
  * 就没重复」在日志里长得一样。有这几个数，自检和 `mem status` 才能问出「这一小时
  * 到底判过没有」。
  */
-const stats = { calls: 0, answered: 0, decisions: 0, covered: 0, replace: 0, failed: 0, crashed: 0, leafFailed: 0, lastError: "", lastAt: 0 };
+const stats = { calls: 0, answered: 0, matched: 0, decisions: 0, covered: 0, replace: 0, failed: 0, crashed: 0, leafFailed: 0, lastError: "", lastAt: 0 };
 
 export function dedupeStats() {
   return { ...stats };
 }
 
 export function resetDedupeStats() {
-  Object.assign(stats, { calls: 0, answered: 0, decisions: 0, covered: 0, replace: 0, failed: 0, crashed: 0, leafFailed: 0, lastError: "", lastAt: 0 });
+  Object.assign(stats, { calls: 0, answered: 0, matched: 0, decisions: 0, covered: 0, replace: 0, failed: 0, crashed: 0, leafFailed: 0, lastError: "", lastAt: 0 });
 }
 
 export function renderChunk(chunk) {
@@ -250,34 +250,41 @@ export function renderChunk(chunk) {
  * 以及干脆漏掉外层、直接把单条裁决放在顶层。只认第一种的话，明明答了也会被
  * 当成「没答」，整批作废——这类失败看起来像模型挂了，其实是解析太窄。
  *
- * 空数组仍然按「没给」处理：哨兵要能看到「模型什么都没裁」，
- * 这跟「全都判 keep」在数据上无法区分，只能当失败。
+ * present 区分「字段在、只是没有重复」和「压根没给」：
+ * 提示词明确要求「不重复的新条目不要出现在结果里」，所以空数组是合法答案，
+ * 意思是这批全 keep。把它当失败，正常轮次会被整场拦下——2026-11-23 的死信
+ * 有一半是这么来的。
  */
 function decisionsOf(parsed) {
   let raw = parsed?.decisions ?? parsed?.decisions_list;
   if (raw == null) {
     // 顶层直接给一条裁决：{"new":1,"action":"keep"}
     if (parsed && typeof parsed === "object" && (parsed.new != null || parsed.action != null)) {
-      return [parsed];
+      return { items: [parsed], present: true };
     }
-    return [];
+    return { items: [], present: false };
   }
   if (typeof raw === "string") {
     try {
       raw = JSON.parse(raw);
     } catch {
-      return [];
+      return { items: [], present: false };
     }
   }
-  if (Array.isArray(raw)) return raw.filter((x) => x && typeof x === "object");
+  // 空数组是「这批都不重复」，字段本身在，答案有效。
+  if (Array.isArray(raw)) return { items: raw.filter((x) => x && typeof x === "object"), present: true };
   if (raw && typeof raw === "object") {
     for (const key of ["items", "list", "decisions"]) {
-      if (Array.isArray(raw[key])) return raw[key].filter((x) => x && typeof x === "object");
+      if (Array.isArray(raw[key])) {
+        return { items: raw[key].filter((x) => x && typeof x === "object"), present: true };
+      }
     }
     const vals = Object.values(raw).filter((x) => x && typeof x === "object");
-    if (vals.length) return vals;
+    if (vals.length) return { items: vals, present: true };
+    // 空对象：形状认了，但没有裁决，等同于空数组。
+    return { items: [], present: true };
   }
-  return [];
+  return { items: [], present: false };
 }
 
 async function judgeChunk({ cfg, chunk, out, depth = 0, deadline = Number.POSITIVE_INFINITY }) {
@@ -351,10 +358,11 @@ async function judgeChunk({ cfg, chunk, out, depth = 0, deadline = Number.POSITI
     return out;
   }
 
-  const decisions = decisionsOf(parsed);
-  // 拿不到可用裁决 = 链路失效。跟 JSON 解析失败同一套判断：塞太多时模型才会
+  const shape = decisionsOf(parsed);
+  // 字段压根没给 = 链路失效。跟 JSON 解析失败同一套判断：塞太多时模型才会
   // 漏掉结构，拆半有意义；只有一条时拆无可拆，直接记失败。
-  if (!decisions.length) {
+  // 注意：空数组不算失效，那是「都不重复」的正常答案，见 decisionsOf 的注释。
+  if (!shape.present) {
     if (depth < 2 && chunk.length > 1) {
       const mid = Math.ceil(chunk.length / 2);
       await judgeChunk({ cfg, chunk: chunk.slice(0, mid), out, depth: depth + 1, deadline });
@@ -367,7 +375,7 @@ async function judgeChunk({ cfg, chunk, out, depth = 0, deadline = Number.POSITI
     return out;
   }
   if (depth === 0) stats.answered++;
-
+  const decisions = shape.items;
   // 对上候选的条数（含 keep）。判 keep 是完全正常的结果，不能算「对不上」。
   let matched = 0;
   try {
@@ -396,6 +404,8 @@ async function judgeChunk({ cfg, chunk, out, depth = 0, deadline = Number.POSITI
     recordFail(e, "decide");
     return out;
   }
+  // matched 含 keep：自检哨兵靠它区分「模型判了 keep」和「模型什么都没答」。
+  if (depth === 0) stats.matched += matched;
   if (decisions.length && matched === 0) {
     // 模型给了裁决、但一条都没落到候选上（编号越界、id 编的）。这同样是「判重没生效」，
     // 不能因为「模型回了东西」就算通过。

@@ -19,7 +19,7 @@ import { join } from "node:path";
 // ~/.siyuan-mem/usage.jsonl 写一条 model:"fake"，mem status 的数字就不真了。
 process.env.HOME = mkdtempSync(join(tmpdir(), "mem-dedupe-call-"));
 
-const { judgeDuplicates } = await import("../src/core/dedupe.mjs");
+const { judgeDuplicates, dedupeStats, resetDedupeStats } = await import("../src/core/dedupe.mjs");
 
 async function withModel(reply, fn) {
   let calls = 0;
@@ -152,5 +152,20 @@ test("decisions 形状不对且有多条时拆半重试", async () => {
     const out = await judgeDuplicates({ cfg, news, existing, deadline: Date.now() + 5000 });
     assert.equal(calls(), 3, "一个父块拆成两半，应该一共发三次");
     assert.equal(out.size, 0, "模型一直不给结构，就没有裁决");
+  });
+});
+
+
+test("空 decisions 是「都不重复」，不是失败：提示词就是这么要求的", async () => {
+  resetDedupeStats();
+  const existing = [mk("e1", "容器内 nginx 监听 7788，宿主机映射写成 7789 了，改回去就好。")];
+  const news = [mk("n1", "容器里 nginx 监听的是 7788，宿主机映射写成了 7789，要改回来。")];
+  await withModel({ decisions: [] }, async ({ cfg, calls }) => {
+    const out = await judgeDuplicates({ cfg, news, existing, deadline: Date.now() + 5000 });
+    assert.equal(calls(), 1);
+    assert.equal(out.size, 0, "没有重复就没有裁决");
+    const st = dedupeStats();
+    assert.equal(st.failed, 0, "空数组不能记成 failed");
+    assert.equal(st.answered, 1, "要算一次有效回答");
   });
 });
