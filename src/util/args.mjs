@@ -13,6 +13,9 @@ const VALUED = new Set([
   "topic", "days", "status", "project",
   // forget 的三个值参数。漏了它们，`--session abc` 会把 abc 当成块 id 去归档。
   "session", "reason",
+  // dups 的相似度阈值。漏了它 --min 0.8 会被当成 true，Number(true)=1，
+  // 结果变成「只要完全一样」，而且不报错。
+  "min",
   // 面板放域名后面用：--bind / --allow-host / --auth 都是值参数。
   "bind", "allow-host", "auth",
 ]);
