@@ -157,3 +157,12 @@ test("参数有上限：把单轮预算调到 1e9 要拒掉", async (t) => {
   assert.equal((await post({ extract: { maxCharsPerCall: 1e7 } })).status, 400);
   assert.equal((await post({ serve: { maxMinutesPerRound: 60 } })).status, 200);
 });
+
+
+test("绑定 0.0.0.0 时用 isIP 判断，beef.cafe 这种字母域名必须 403", async (t) => {
+  // 老的字符集正则 [0-9a-f.]+ 会把这串放进来——它全是 a-f 和点，但不是 IP。
+  const ui = await boot(t, { host: "0.0.0.0", auth: AUTH });
+  const auth = basic(AUTH);
+  assert.equal((await rawGet(ui, "/", { ...auth, host: "beef.cafe" }))[0], 403);
+  assert.equal((await rawGet(ui, "/", { ...auth, host: "127.0.0.1" }))[0], 200);
+});
