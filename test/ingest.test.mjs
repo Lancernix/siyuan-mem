@@ -242,3 +242,23 @@ test("轮次时间戳要保留：否则跨天的大包全被算成包尾那天",
   assert.ok(payload, "队列里应该有这一包");
   assert.equal(payload.turns[0].at, at, "收到的 at 要原样留着");
 });
+
+
+test("秒级时间戳要换算成毫秒，脏时间戳要丢掉", async (t) => {
+  const s = await boot(t);
+  const sec = 1700000000;
+  await post(s, {
+    session_id: "sess-sec", harness: "dsh", machine: "Mac", date: "2026-11-18", range: [0, 3],
+    turns: [
+      { role: "user", text: "端口映射到底该怎么配才对", at: sec },
+      { role: "assistant", text: "按 1000 改，改完重启容器。", at: sec + 60 },
+      { role: "user", text: "那脏时间戳呢" },
+      { role: "assistant", text: "比如 1 这种值就该丢掉。", at: 1 },
+    ],
+  });
+  const files = readdirSync(INBOX_DIR).filter((f) => f.endsWith(".json"));
+  const payload = files.map((f) => JSON.parse(readFileSync(join(INBOX_DIR, f), "utf8"))).find((p) => p.session_id === "sess-sec");
+  assert.ok(payload, "队列里应该有这一包");
+  assert.equal(payload.turns[0].at, sec * 1000, "秒级要换算成毫秒");
+  assert.equal(payload.turns[3].at, undefined, "1970 附近的脏时间戳要丢掉");
+});

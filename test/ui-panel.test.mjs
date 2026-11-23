@@ -128,8 +128,9 @@ test("写操作的同源判断能容忍大小写与端口差异", async (t) => {
     headers: { "content-type": "application/json", origin: upper },
     body: JSON.stringify({ extract: { maxCharsPerCall: 20000 } }),
   });
-  // localhost 与 127.0.0.1 都算回环，大小写不同不该被判成跨站
-  assert.notEqual(res.status, 403);
+  // localhost 与 127.0.0.1 都算回环，大小写不同不该被判成跨站。
+  // 断言 200 而不是「不等于 403」：500/429 也能过后者，等于没测。
+  assert.equal(res.status, 200);
 });
 
 test("Basic 口令连续猜错会被限速", async (t) => {
@@ -141,4 +142,18 @@ test("Basic 口令连续猜错会被限速", async (t) => {
   assert.ok(Number(r.headers.get("retry-after")) > 0, "要告诉客户端等多久");
   const ok = await get(ui, "/", { authorization: "Basic " + Buffer.from(AUTH).toString("base64") });
   assert.equal(ok.status, 429, "封禁期内即使口令对了也先挡住");
+});
+
+
+test("参数有上限：把单轮预算调到 1e9 要拒掉", async (t) => {
+  const ui = await boot(t);
+  const post = (body) =>
+    fetch(`${ui.url}/api/settings/params`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: ui.url },
+      body: JSON.stringify(body),
+    });
+  assert.equal((await post({ serve: { maxMinutesPerRound: 1e9 } })).status, 400);
+  assert.equal((await post({ extract: { maxCharsPerCall: 1e7 } })).status, 400);
+  assert.equal((await post({ serve: { maxMinutesPerRound: 60 } })).status, 200);
 });

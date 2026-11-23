@@ -663,6 +663,22 @@ function authFailed(req) {
         if (!fromThisPage(req)) return json(403, { error: "只接受面板自己发起的请求" });
         const b = await readBody(req);
         // 白名单：不让面板写 siyuan.token / ingest.token / push.token 这类凭据字段。
+        // 上下限一起管：只有下限的话 maxMinutesPerRound: 1e9 等于把单轮预算关掉。
+        const LIMITS = {
+          extract: {
+            minTurnChars: [1, 10000],
+            maxCharsPerCall: [1, 200000],
+            maxEntriesPerBatch: [1, 100],
+            entityShotList: [1, 100],
+          },
+          serve: {
+            maxSessionsPerRound: [1, 1000],
+            maxMinutesPerRound: [1, 1440],
+            maxMinutesPerSession: [1, 1440],
+            maxConsecutiveFailures: [1, 100],
+            maxAttemptsPerSession: [1, 50],
+          },
+        };
         const patch = {};
         for (const k of [
           "minTurnChars",
@@ -672,7 +688,8 @@ function authFailed(req) {
         ]) {
           if (b.extract?.[k] != null) {
             const n = Number(b.extract[k]);
-            if (!Number.isFinite(n) || n < 1) return json(400, { error: `extract.${k} 必须是不小于 1 的数（0 会让抽取死循环）` });
+            const [lo, hi] = LIMITS.extract[k];
+            if (!Number.isFinite(n) || n < lo || n > hi) return json(400, { error: `extract.${k} 要在 ${lo} 到 ${hi} 之间` });
             (patch.extract ??= {})[k] = n;
           }
         }
@@ -685,7 +702,8 @@ function authFailed(req) {
         ]) {
           if (b.serve?.[k] != null) {
             const n = Number(b.serve[k]);
-            if (!Number.isFinite(n) || n < 1) return json(400, { error: `serve.${k} 必须是不小于 1 的数（0 会让这一轮什么都不做）` });
+            const [lo, hi] = LIMITS.serve[k];
+            if (!Number.isFinite(n) || n < lo || n > hi) return json(400, { error: `serve.${k} 要在 ${lo} 到 ${hi} 之间` });
             (patch.serve ??= {})[k] = n;
           }
         }

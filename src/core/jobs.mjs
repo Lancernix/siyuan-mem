@@ -479,8 +479,11 @@ export async function processQueue({
       const pool = known;
       if (pool.length) {
         const t0 = Date.now();
-        const callsBefore = dedupeStats().calls;
-        const failedBefore = dedupeStats().failed;
+        // 基线必须把三个计数一起取：leafFailed / crashed 都是进程级累计，
+        // 只拿 failed 做差的话，上一轮留下的 2 会一直算在这一轮头上，每轮都判成
+        // 「没判过重」→ 全场停写，直到进程重启。拆半子块失败和程序错误都算。
+        const before = dedupeStats();
+        const callsBefore = before.calls;
         decisions = await judgeDuplicates({
           cfg,
           news,
@@ -493,8 +496,10 @@ export async function processQueue({
         });
         // 拆半重试的子块失败只记 leafFailed。只读 failed 的话，一个 8 条的块
         // 拆成 8 个叶子全失败，failed 仍是 0 → unjudged=0 → 没判过重的条目照写不误。
+        // crashed 是程序错误（ReferenceError/TypeError），比模型抖动更该拦。
         const ds = dedupeStats();
-        dedupeFailed = ds.failed + ds.leafFailed - failedBefore;
+        dedupeFailed =
+          ds.failed - before.failed + (ds.leafFailed - before.leafFailed) + (ds.crashed - before.crashed);
         // 记真实模型调用次数，不是「有裁决的批次」：判 keep 时一条裁决都没有，
         // 那个数会是 0，看不出这一轮到底花了多少调用。
         sum.dedupeCalls += ds.calls - callsBefore;

@@ -536,7 +536,7 @@ function renderSettings() {
 
   const e = d.params.extract ?? {};
   const j = d.params.serve ?? {};
-  const num = (id, label, v) => `<label>${label}<input id="${id}" type="number" min="0" value="${esc(v ?? "")}"></label>`;
+  const num = (id, label, v) => `<label>${label}<input id="${id}" type="number" min="1" value="${esc(v ?? "")}"></label>`;
   el.innerHTML = `
     <h3>抽取参数</h3>
     <p class="note">改完保存，下一轮生效。这里只写数值开关；token 和 ingest 凭据不从面板暴露。</p>
@@ -552,7 +552,7 @@ function renderSettings() {
     <p class="note">原文目录：${esc(d.params.raw?.dir ?? "mem-raw")}</p>
     <div class="actions"><button class="btn primary" data-act="params-save">保存参数</button></div>
     <h3 style="margin-top:var(--sp-6)">告警外发</h3>
-    <p class="note">当前：${esc(d.alerts?.webhook ?? "未配置")}。支持企业微信 / 钉钉 / 飞书群机器人，或任何接受 JSON 的 https Webhook；留空则只在面板里显示。</p>
+    <p class="note">当前：${esc(d.alerts?.webhook ?? "未配置")}。支持企业微信 / 钉钉 / 飞书群机器人，或任何接受 JSON 的 https Webhook；留空则只在面板里显示。注意环境变量 MEM_ALERT_WEBHOOK 优先于这里，容器里注入过的话要从容器改。</p>
     <label>Webhook 地址 <input id="a-webhook" type="url" placeholder="https://…（留空清空）"></label>
     <div class="actions"><button class="btn" data-act="alerts-save">保存 Webhook</button></div>`;
 }

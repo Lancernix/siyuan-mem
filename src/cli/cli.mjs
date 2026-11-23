@@ -167,7 +167,8 @@ async function cmdStatus() {
   // 判重坏起来是完全静默的（失败就当「没重复」），所以把账摆出来：
   // 崩溃是我们自己的 bug，出现一次就该当事故；失败是模型/网关的噪音。
   const dh = dedupeHealthToday();
-  if (dh.decisions || dh.failed || dh.crashed) {
+  // leafFailed 也要算：只有子块失败时，不打印的话整行「判重」都不出现。
+  if (dh.decisions || dh.failed || dh.crashed || dh.leafFailed) {
     const bits = [`今天裁决 ${dh.decisions} 条（replace ${dh.replace} / covered ${dh.covered}）`];
     if (dh.failed) bits.push(`失败 ${dh.failed}${dh.lastError ? `（最近：${dh.lastError}）` : ""}`);
     if (dh.crashed) bits.push(`崩溃 ${dh.crashed} 次（程序错误，要查）${dh.lastError ? `：${dh.lastError}` : ""}`);

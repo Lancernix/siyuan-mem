@@ -29,7 +29,9 @@ const attr = (ial, key) => {
 };
 
 /** 找重复对。keep 只是按正文长度给的默认建议，不是结论。 */
-export async function findDuplicates({ sy, cfg, min = 0.75, crossEntity = false, limit = 5000 }) {
+export async function findDuplicates({ sy, cfg, min = 0.75, crossEntity = false, limit = 5000, minLen = 6 }) {
+  // 太短的条目二元组太少，「端口」这种 2 字条目跟任何含它的话题都能算出 1.00。
+  // --apply 会把正常短条目标成 superseded，加个门槛直接不参与配对。
   const notebook = cfg?.siyuan?.notebook ?? "";
   const boxes = await sy.listNotebooks();
   const box = boxes.find((b) => b.name === notebook)?.id ?? "";
@@ -49,9 +51,11 @@ export async function findDuplicates({ sy, cfg, min = 0.75, crossEntity = false,
     date: attr(r.ial, ATTR.date),
   }));
   const sets = items.map((it) => bigrams(it.text));
+  const usable = items.map((it) => it.text.length >= minLen);
   const pairs = [];
   for (let i = 0; i < items.length; i++) {
     for (let j = i + 1; j < items.length; j++) {
+      if (!usable[i] || !usable[j]) continue;
       if (!crossEntity && items[i].entity !== items[j].entity) continue;
       const A = sets[i], B = sets[j];
       if (!A.size || !B.size) continue;

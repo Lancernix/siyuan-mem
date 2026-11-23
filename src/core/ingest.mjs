@@ -77,9 +77,17 @@ function normalize(body, fallbackMachine = "") {
     // 时间戳必须留着：内容日期按轮次算（跨天的大包要落回各自那天），
     // 只留包尾的 date 会让整包都算成最后一天。数字当毫秒，字符串按 ISO 解析。
     const rawAt = t?.at;
-    const at = Number.isFinite(Number(rawAt)) && Number(rawAt) > 0
-      ? Number(rawAt)
-      : typeof rawAt === "string" ? Date.parse(rawAt) || undefined : undefined;
+    let at;
+    if (Number.isFinite(Number(rawAt)) && Number(rawAt) > 0) {
+      at = Number(rawAt);
+      // 10 位是秒（1.7e9），13 位才是毫秒。不换算的话 1970-01-21 会混进日期分组。
+      if (at < 1e12) at *= 1000;
+    } else if (typeof rawAt === "string") {
+      const p = Date.parse(rawAt);
+      if (Number.isFinite(p)) at = p;
+    }
+    // 区间兜底：2000 年前或未来一天后都当脏数据丢掉，别让一条时间戳污染整条时间线。
+    if (!(at >= 946684800000 && at <= Date.now() + 86400000)) at = undefined;
     clean.push(at ? { role, text, at } : { role, text });
   }
   return {

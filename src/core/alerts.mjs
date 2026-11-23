@@ -8,6 +8,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { HOME_DIR, loadConfig } from "../util/config.mjs";
+import { event } from "../util/log.mjs";
 
 const PATH = join(HOME_DIR, "alerts.json");
 
@@ -32,14 +33,24 @@ function webhookBody(url, text) {
   return { text };
 }
 
-function deliver(url, text) {
+function deliver(url, text, kind) {
   if (!url) return;
+  // 发失败要说出来：群里没收到、日志也没一笔的话，Webhook 配错了永远发现不了。
+  // 只记 host 和错误，不记完整地址——那本身就是凭据。
+  let host = "";
+  try {
+    host = new URL(url).hostname;
+  } catch {}
   fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(webhookBody(url, text)),
     signal: AbortSignal.timeout(6000),
-  }).catch(() => {});
+  })
+    .then((r) => {
+      if (!r.ok) event("alert.fail", { kind, host, status: r.status });
+    })
+    .catch((e) => event("alert.fail", { kind, host, error: String(e?.message ?? e).slice(0, 120) }));
 }
 
 export function raise(kind, text) {
@@ -56,7 +67,7 @@ export function raise(kind, text) {
   }
   // Webhook 是凭据：配置优先，环境变量兜底（容器里注入更方便）。
   const url = process.env.MEM_ALERT_WEBHOOK || loadConfig().ui?.alertWebhook || "";
-  deliver(url, `[siyuan-mem] ${text}`);
+  deliver(url, `[siyuan-mem] ${text}`, kind);
   return list;
 }
 
