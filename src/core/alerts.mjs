@@ -79,6 +79,18 @@ export function clear(kind) {
   return list;
 }
 
+/**
+ * 条件消失就把告警撤掉。
+ *
+ * 告警只在 raise 的时候写、clear 要靠人点「知道了」，于是死信捞回、跑了几轮都
+ * 正常之后，顶上那条黄条还挂着 11-23 的事——看久了就没人再看告警了。
+ * 只撤能明确判定的两种：死信清空、以及真的干了活且这轮没有判重失败。
+ */
+export function reconcile({ dead, unjudged, worked }) {
+  if (dead === 0) clear("dead");
+  if (worked && unjudged === 0) clear("unjudged");
+}
+
 /** 当前有没有待处理的问题，给面板一个布尔，省得前端自己算。 */
 export function hasAlerts() {
   return alerts().length > 0;

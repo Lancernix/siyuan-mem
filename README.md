@@ -637,7 +637,7 @@ src/
 
 三条边界：**core** 调模型、写思源；**cli** 只搬运；**mcp** 只读。三者共用 `util/`。
 
-测试：`pnpm test`，400 项，全部是纯函数或假服务端——不连真思源、不真调模型。
+测试：`pnpm test`，401 项，全部是纯函数或假服务端——不连真思源、不真调模型。
 
 发版不改 `package.json` 的版本号：那里是 `0.0.0-development` 占位符，真正的版本由 Release 的 tag（`v0.1.1` 这种）决定。push 代码后在 GitHub 建一个 `v<版本>` 的 Release，workflow 会把 tag 的版本临时写进发布副本、跑完测试再发到 npm，仓库里永远是占位符——不回写、不额外提交，也不会二次触发自己。前提是先去 npmjs.com 的包设置里配好 Trusted Publisher（GitHub Actions，owner `Lancernix`、repo `siyuan-mem`、workflow `publish.yml`、环境留空），配完之后 CI 不需要任何 npm token。
 

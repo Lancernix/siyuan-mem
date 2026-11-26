@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 process.env.HOME = mkdtempSync(join(tmpdir(), "mem-alerts-"));
-const { alerts, raise, clear } = await import("../src/core/alerts.mjs");
+const { alerts, raise, clear, reconcile } = await import("../src/core/alerts.mjs");
 
 test("同一个 kind 连报两次只留最新一条", () => {
   raise("dead", "第一个包进了死信");
@@ -53,4 +53,14 @@ test("告警会发到群机器人 Webhook，重复内容不重发", async () => 
     delete process.env.MEM_ALERT_WEBHOOK;
     server.close();
   }
+});
+
+test("条件消失就自动撤掉告警，不用等人工点", () => {
+  clear(); // 前面的用例可能留了别的 kind（webhook-test），先归零
+  raise("dead", "1 个会话进了死信");
+  raise("unjudged", "3 个会话判重没跑成");
+  reconcile({ dead: 1, unjudged: 3, worked: false });
+  assert.equal(alerts().length, 2, "条件还在就不能撤");
+  reconcile({ dead: 0, unjudged: 0, worked: true });
+  assert.equal(alerts().length, 0, "死信捞回、跑通之后黄条该消失");
 });
