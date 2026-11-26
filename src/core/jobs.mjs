@@ -83,6 +83,11 @@ export function projectOf(cwd, harness = "") {
     if (seg.length < 3 || seg.startsWith(".")) continue;
     // 家目录名本身也不是项目（~/Downloads → 退到 harness）。
     if (seg === home) continue;
+    // /Users/<name>、/home/<name> 里的那一段是用户名：容器里的 homedir() 是
+    // /home/node，跟宿主机的 /Users/lancernix_1 对不上，只比 basename 会把这批
+    // 条目记成项目「lancernix_1」（本周 47 条，占三成）。
+    if (i === 1 && /^(users|home)$/i.test(parts[0] ?? "")) continue;
+    if (seg === "root") continue;
     return seg;
   }
   return String(harness ?? "") || "未命名";

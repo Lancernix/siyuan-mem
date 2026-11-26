@@ -5,7 +5,15 @@
  * app 抢同一个 SQLite，长期会锁冲突。CLI 留给人手敲和 --dry-run 验证。
  */
 
+import { event } from "./log.mjs";
+
 const esc = (v) => String(v ?? "").replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/'/g, "''");
+
+/** 熔断后多久再试。60 秒够覆盖一次内核重启，又不会把整轮都判死。 */
+const DEFAULT_COOLDOWN_MS = 60_000;
+
+/** 连续几次连不上才熔断。1 次太敏感：一条重查询偶尔超时，后面的写本来能成功。 */
+const DEFAULT_TRIP_AFTER = 2;
 
 export class SiYuanError extends Error {
   constructor(api, code, msg) {
@@ -19,14 +27,39 @@ export class SiYuan {
   #base;
   #token;
   #timeoutMs;
+  #cooldownMs;
+  #tripAfter;
+  #fails = 0;
+  #downUntil = 0;
 
-  constructor({ baseUrl, token = "", timeoutMs = 5000 }) {
+  constructor({ baseUrl, token = "", timeoutMs = 5000, cooldownMs = DEFAULT_COOLDOWN_MS, tripAfter = DEFAULT_TRIP_AFTER }) {
     this.#base = baseUrl.replace(/\/+$/, "");
     this.#token = token;
     this.#timeoutMs = timeoutMs;
+    this.#cooldownMs = cooldownMs;
+    this.#tripAfter = Math.max(1, tripAfter);
+  }
+
+  /**
+   * 内核被 OOM 杀掉、或者正在重启时，每个调用都要等满超时。
+   * 写一条条目是「查子块 → 查重 → 写属性」三四个调用，叠起来就是一分多钟；
+   * 2026-11-26 那天一轮拖到 1887 秒，一场会话直接被判超预算。
+   *
+   * 所以连不上就熔断：冷却期内立刻失败，让上层按「写失败」收手、把这批留到
+   * 下一轮，而不是把整轮时间耗在反复等同一个超时上。
+   */
+  #trip(api, reason) {
+    if (++this.#fails < this.#tripAfter) return;
+    const already = this.#downUntil > Date.now();
+    this.#downUntil = Date.now() + this.#cooldownMs;
+    if (!already) event("siyuan.down", { api, reason: String(reason).slice(0, 120), cooldownMs: this.#cooldownMs });
   }
 
   async #post(api, payload = {}, timeoutMs = this.#timeoutMs) {
+    if (Date.now() < this.#downUntil) {
+      const wait = Math.ceil((this.#downUntil - Date.now()) / 1000);
+      throw new Error(`思源不可用（熔断中，${wait} 秒后重试）：跳过 ${api}`);
+    }
     const headers = { "Content-Type": "application/json" };
     if (this.#token) headers.Authorization = `Token ${this.#token}`;
     let res;
@@ -39,10 +72,19 @@ export class SiYuan {
       });
     } catch (e) {
       const reason = e.name === "TimeoutError" ? `超时 ${timeoutMs}ms` : e.message;
+      this.#trip(api, reason);
       throw new Error(`连不上思源（${this.#base}${api}）：${reason}`);
     }
-    if (!res.ok) throw new Error(`${api} HTTP ${res.status}`);
+    if (!res.ok) {
+      // 5xx 通常是内核半死不活（索引重建、内存压力），跟超时一起熔断；
+      // 4xx 是调用方写错了参数，熔断只会把问题藏起来。
+      if (res.status >= 500) this.#trip(api, `HTTP ${res.status}`);
+      throw new Error(`${api} HTTP ${res.status}`);
+    }
     const body = await res.json();
+    // 成功一次就说明内核活着：计数归零、解除熔断。
+    this.#fails = 0;
+    this.#downUntil = 0;
     // 思源遇到不支持的语句也返回 code:0，所以返回值要按调用方语义再校验一次。
     if (body.code !== 0) throw new SiYuanError(api, body.code, body.msg);
     return body.data;
